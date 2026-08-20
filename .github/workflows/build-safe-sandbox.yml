@@ -33,6 +33,28 @@ jobs:
         run: python3 sandbox/tests.py
       - name: Test program understanding
         run: python3 sandbox/tests_program_understanding.py
+      - name: Test extended MCP registration
+        run: |
+          export SAFE_REVERSER_WORKSPACE="$RUNNER_TEMP/safe-reverser-workspace"
+          export SAFE_REVERSER_DATA_ROOT="$RUNNER_TEMP/safe-reverser-data"
+          mkdir -p "$SAFE_REVERSER_WORKSPACE" "$SAFE_REVERSER_DATA_ROOT"
+          PYTHONPATH=sandbox python3 - <<'PY'
+          import mcp_server_v2 as server
+          names = {tool["name"] for tool in server.core.TOOLS}
+          expected = {
+              "build_program_index",
+              "find_symbols",
+              "find_xrefs",
+              "get_cfg",
+              "identify_protector",
+              "extract_network_model",
+          }
+          missing = expected - names
+          assert not missing, f"missing semantic MCP tools: {sorted(missing)}"
+          health = server.health({})
+          assert health["version"] == "0.2.0"
+          assert health["program_understanding"]["program_index"] is True
+          PY
       - name: Test automatic runtime wrapper
         run: bash sandbox/test_wrapper.sh
       - name: Validate Python syntax
