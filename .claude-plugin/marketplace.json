@@ -31,7 +31,7 @@
       "author": {
         "name": "salingnh"
       },
-      "repository": "https://github.com/salingnh/android-reverse-engineering-skill",
+      "repository": "https://github.com/salingnh/android-reverse-engineering-mcp",
       "license": "Apache-2.0",
       "keywords": ["android", "reverse-engineering", "apk", "jadx", "mcp", "sandbox", "security"],
       "category": "security"
