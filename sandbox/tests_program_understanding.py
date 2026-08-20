@@ -41,8 +41,10 @@ class ProgramUnderstandingTests(unittest.TestCase):
         assert spec.loader
         spec.loader.exec_module(cls.pu)
         import pu_index
+        import pu_network
         import pu_source
         cls.index = pu_index
+        cls.network = pu_network
         cls.source = pu_source
 
     def make_job(self):
@@ -98,12 +100,15 @@ class AuthHeaders {
             )
             workspace_artifact = job.parent / "workspace" / "app.apk"
             metadata = {
-                "schema_version": 2,
-                "builder_version": 2,
+                "schema_version": self.index.SCHEMA_VERSION,
+                "builder_version": self.index.BUILDER_VERSION,
                 "analysis_kind": "dex-xref",
                 "analyzer": {"name": "test"},
                 "truncated": {"methods": False, "edges": False},
+                "limits": {"max_methods": 100000, "max_edges": 250000},
                 "artifact_stat": self.index.artifact_stat(workspace_artifact),
+                "artifact_sha256": self.index.sha256(workspace_artifact),
+                "androguard_available_at_build": bool(self.pu.capabilities()["androguard"]),
             }
             for key, value in metadata.items():
                 self.index.meta_set(conn, key, value)
@@ -123,12 +128,19 @@ class AuthHeaders {
         finally:
             tmp.cleanup()
 
+    def test_descriptor_normalization_removes_only_dex_markers(self):
+        self.assertEqual(self.index.normalize_class_descriptor("LLogin;"), "Login")
+        self.assertEqual(self.index.normalize_class_descriptor("Lcom/example/Login;"), "com.example.Login")
+        self.assertEqual(self.index.normalize_class_descriptor("Login"), "Login")
+        self.assertEqual(self.index.normalize_class_descriptor("L"), "L")
+
     def test_source_fallback_uses_sqlite_index(self):
         tmp, workspace, job = self.make_job()
         try:
             result = self.pu.build_program_index(job, workspace)
             self.assertEqual(result["analysis_kind"], "source-fallback")
             self.assertEqual(result["storage"], "sqlite")
+            self.assertEqual(result["builder_version"], self.index.BUILDER_VERSION)
             self.assertTrue((job / "program-index.sqlite3").is_file())
             symbols = self.pu.find_symbols(job, workspace, "login")
             self.assertEqual(symbols["matches"][0]["name"], "login")
@@ -148,6 +160,25 @@ class AuthHeaders {
         finally:
             tmp.cleanup()
 
+    def test_simple_class_resolution_treats_underscore_literally(self):
+        tmp, _, job = self.make_job()
+        try:
+            with self.index.connect(job) as conn:
+                self.index.init_db(conn)
+                rows = [
+                    ("target", "com.vendor.Api_Test", "ping", "()V", 0, 0, "{}"),
+                    ("wrong", "com.vendor.ApiXTest", "ping", "()V", 0, 0, "{}"),
+                ]
+                conn.executemany(
+                    "INSERT INTO methods(id,class,name,descriptor,parameter_count,external,source_json) VALUES (?,?,?,?,?,?,?)",
+                    rows,
+                )
+                result = self.network.resolve_method(conn, "missing.Api_Test", "ping", 0)
+                self.assertEqual(result["status"], "resolved")
+                self.assertEqual(result["resolved_symbol_id"], "target")
+        finally:
+            tmp.cleanup()
+
     def test_find_xrefs_queries_sqlite_edges(self):
         tmp, workspace, job = self.make_job()
         try:
@@ -158,6 +189,22 @@ class AuthHeaders {
         finally:
             tmp.cleanup()
 
+    def test_symbol_search_treats_percent_and_underscore_as_literals(self):
+        tmp, workspace, job = self.make_job()
+        try:
+            self.seed_dex_index(job)
+            with self.index.connect(job) as conn:
+                conn.execute(
+                    "INSERT INTO methods(id,class,name,descriptor,parameter_count,external,source_json) VALUES (?,?,?,?,?,?,?)",
+                    ("literal_underscore", "com.example.Foo_Bar", "under_score", "()V", 0, 0, "{}"),
+                )
+                conn.commit()
+            self.assertEqual(self.pu.find_symbols(job, workspace, "%")["matches"], [])
+            matches = self.pu.find_symbols(job, workspace, "_")["matches"]
+            self.assertEqual([item["id"] for item in matches], ["literal_underscore"])
+        finally:
+            tmp.cleanup()
+
     def test_cache_reuses_unchanged_artifact(self):
         tmp, workspace, job = self.make_job()
         try:
@@ -165,6 +212,36 @@ class AuthHeaders {
             second = self.pu.build_program_index(job, workspace)
             self.assertFalse(first["cached"])
             self.assertTrue(second["cached"])
+        finally:
+            tmp.cleanup()
+
+    def test_ensure_index_rebuilds_old_builder(self):
+        tmp, workspace, job = self.make_job()
+        try:
+            self.pu.build_program_index(job, workspace)
+            with self.index.connect(job) as conn:
+                self.index.meta_set(conn, "builder_version", self.index.BUILDER_VERSION - 1)
+                conn.commit()
+            self.pu.find_symbols(job, workspace, "login")
+            with self.index.connect(job) as conn:
+                self.assertEqual(
+                    self.index.meta_get(conn, "builder_version"),
+                    self.index.BUILDER_VERSION,
+                )
+        finally:
+            tmp.cleanup()
+
+    def test_source_fallback_retries_only_after_backend_becomes_available(self):
+        tmp, workspace, job = self.make_job()
+        try:
+            self.pu.build_program_index(job, workspace)
+            with self.index.connect(job) as conn:
+                self.index.meta_set(conn, "analysis_kind", "source-fallback")
+                self.index.meta_set(conn, "androguard_available_at_build", False)
+                self.assertTrue(self.index._backend_upgrade_needed(conn, {"androguard": True}))
+                self.index.meta_set(conn, "androguard_available_at_build", True)
+                self.assertFalse(self.index._backend_upgrade_needed(conn, {"androguard": True}))
+                conn.commit()
         finally:
             tmp.cleanup()
 

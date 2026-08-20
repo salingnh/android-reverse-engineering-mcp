@@ -33,11 +33,13 @@ def resolve_method(conn: sqlite3.Connection, class_name: str, method_name: str, 
         strategy = "class+method"
     if not candidates:
         simple = class_name.rsplit(".", 1)[-1]
-        candidates = fetch("(class=? OR class LIKE ?)", (simple, f"%.{simple}"), True)
+        suffix_expr = "(class=? OR substr(class, -(length(?) + 1)) = '.' || ?)"
+        candidates = fetch(suffix_expr, (simple, simple, simple), True)
         strategy = "simple-class+method+arity"
     if not candidates:
         simple = class_name.rsplit(".", 1)[-1]
-        candidates = fetch("(class=? OR class LIKE ?)", (simple, f"%.{simple}"), False)
+        suffix_expr = "(class=? OR substr(class, -(length(?) + 1)) = '.' || ?)"
+        candidates = fetch(suffix_expr, (simple, simple, simple), False)
         strategy = "simple-class+method"
     if len(candidates) == 1:
         return {"status": "resolved", "strategy": strategy, "resolved_symbol_id": candidates[0], "candidates": candidates}
@@ -143,6 +145,7 @@ def extract_network_model(job: Path, workspace: Path, caps: dict[str, Any], *, m
         "candidate_models": sorted(models)[:cap],
         "notes": [
             "Endpoint callers require unique class+method(+arity) resolution; ambiguous methods are never silently unioned.",
+            "Simple-class fallback uses literal suffix matching rather than SQL wildcard matching.",
             "Cross-split XREFs use one Androguard Analysis graph when available.",
             "Auth evidence reports signal names/locations, not secret values.",
             "Model candidates remain lexical hints until data-flow analysis is added.",
