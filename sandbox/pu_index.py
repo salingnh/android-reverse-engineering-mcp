@@ -15,7 +15,7 @@ import program_understanding as legacy
 from pu_source import declarations, dex_parameter_count, sources, source_meta, text
 
 SCHEMA_VERSION = 2
-BUILDER_VERSION = 2
+BUILDER_VERSION = 3
 MAX_DEX_BYTES = 512 * 1024 * 1024
 MAX_DEX_TOTAL_BYTES = 1024 * 1024 * 1024
 MAX_COMPRESSION_RATIO = 500
@@ -96,6 +96,7 @@ def _summary(job: Path, conn: sqlite3.Connection, cached: bool) -> dict[str, Any
         "fallback_reason": meta_get(conn, "fallback_reason"),
         "storage": "sqlite",
         "schema_version": SCHEMA_VERSION,
+        "builder_version": BUILDER_VERSION,
     }
 
 
@@ -169,6 +170,13 @@ def androguard_analysis(input_artifact: Path):
         yield analysis, class_members
 
 
+def normalize_class_descriptor(value: Any) -> str:
+    class_name = str(value)
+    if class_name.startswith("L") and class_name.endswith(";"):
+        class_name = class_name[1:-1]
+    return class_name.replace("/", ".")
+
+
 def method_record(method: Any, class_members: dict[str, str]) -> dict[str, Any]:
     raw = method.get_method() if hasattr(method, "get_method") else method
     class_name = getattr(method, "class_name", None) or getattr(raw, "get_class_name", lambda: "")()
@@ -177,7 +185,7 @@ def method_record(method: Any, class_members: dict[str, str]) -> dict[str, Any]:
     full_name = getattr(method, "full_name", None) or f"{class_name} {name} {descriptor}"
     return {
         "id": str(full_name),
-        "class": str(class_name).strip("L;").replace("/", "."),
+        "class": normalize_class_descriptor(class_name),
         "name": str(name),
         "descriptor": descriptor,
         "parameter_count": dex_parameter_count(descriptor),
@@ -233,6 +241,14 @@ def _dex_index(conn: sqlite3.Connection, input_artifact: Path, max_methods: int,
     )
 
 
+def _backend_upgrade_needed(conn: sqlite3.Connection, caps: dict[str, Any]) -> bool:
+    return (
+        meta_get(conn, "analysis_kind") == "source-fallback"
+        and not bool(meta_get(conn, "androguard_available_at_build", False))
+        and bool(caps.get("androguard"))
+    )
+
+
 def _cache_ok(conn: sqlite3.Connection, input_artifact: Path, max_methods: int, max_edges: int, caps: dict[str, Any]) -> bool:
     if meta_get(conn, "schema_version") != SCHEMA_VERSION or meta_get(conn, "builder_version") != BUILDER_VERSION:
         return False
@@ -246,7 +262,7 @@ def _cache_ok(conn: sqlite3.Connection, input_artifact: Path, max_methods: int, 
         return False
     if truncated.get("edges") and int(limits.get("max_edges", 0)) < max_edges:
         return False
-    if meta_get(conn, "analysis_kind") == "source-fallback" and caps.get("androguard"):
+    if _backend_upgrade_needed(conn, caps):
         return False
     return True
 
@@ -274,7 +290,7 @@ def build_program_index(job: Path, workspace: Path, caps: dict[str, Any], *, max
             conn.execute("DELETE FROM methods")
             conn.execute("DELETE FROM call_edges")
             truncated = _source_index(conn, job, max_methods)
-            analyzer = {"name": "safe-source-index", "version": "2"}
+            analyzer = {"name": "safe-source-index", "version": "3"}
             kind = "source-fallback"
             fallback = f"Androguard unavailable/failed: {type(exc).__name__}: {exc}"
         for key, value in {
@@ -288,6 +304,7 @@ def build_program_index(job: Path, workspace: Path, caps: dict[str, Any], *, max
             "artifact": str(input_artifact.relative_to(workspace)),
             "artifact_stat": artifact_stat(input_artifact),
             "artifact_sha256": sha256(input_artifact),
+            "androguard_available_at_build": bool(caps.get("androguard")),
         }.items():
             meta_set(conn, key, value)
         if fallback:
@@ -305,7 +322,12 @@ def ensure_index(job: Path, workspace: Path, caps: dict[str, Any]) -> None:
         return
     try:
         with connect(job) as conn:
-            stale = meta_get(conn, "schema_version") != SCHEMA_VERSION or meta_get(conn, "artifact_stat") != artifact_stat(input_artifact)
+            stale = (
+                meta_get(conn, "schema_version") != SCHEMA_VERSION
+                or meta_get(conn, "builder_version") != BUILDER_VERSION
+                or meta_get(conn, "artifact_stat") != artifact_stat(input_artifact)
+                or _backend_upgrade_needed(conn, caps)
+            )
         if stale:
             build_program_index(job, workspace, caps, force=True)
     except sqlite3.DatabaseError:
@@ -326,8 +348,8 @@ def find_symbols(job: Path, workspace: Path, caps: dict[str, Any], query: str, *
     ensure_index(job, workspace, caps)
     with connect(job) as conn:
         rows = conn.execute(
-            "SELECT * FROM methods WHERE lower(class||' '||name||' '||descriptor||' '||id) LIKE ? ORDER BY external,class,name LIMIT ?",
-            (f"%{query.lower()}%", max(1, min(int(limit), 500))),
+            "SELECT * FROM methods WHERE instr(lower(class||' '||name||' '||descriptor||' '||id), ?) > 0 ORDER BY external,class,name LIMIT ?",
+            (query.lower(), max(1, min(int(limit), 500))),
         ).fetchall()
         kind = meta_get(conn, "analysis_kind")
     return {"job_id": job.name, "query": query, "analysis_kind": kind, "matches": [method_row(row) for row in rows]}
@@ -342,8 +364,8 @@ def find_xrefs(job: Path, workspace: Path, caps: dict[str, Any], query: str, *, 
     cap = max(1, min(int(limit), 1000))
     with connect(job) as conn:
         ids = [row["id"] for row in conn.execute(
-            "SELECT id FROM methods WHERE lower(class||' '||name||' '||descriptor||' '||id) LIKE ? ORDER BY external LIMIT 200",
-            (f"%{query.lower()}%",),
+            "SELECT id FROM methods WHERE instr(lower(class||' '||name||' '||descriptor||' '||id), ?) > 0 ORDER BY external LIMIT 200",
+            (query.lower(),),
         )]
         edges = []
         if ids:
