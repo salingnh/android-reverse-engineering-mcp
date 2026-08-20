@@ -2,8 +2,10 @@
 """Extended MCP entrypoint for semantic program-understanding operations."""
 from __future__ import annotations
 
+import sqlite3
+
 import mcp_server as core
-import program_understanding as pu
+import program_understanding_v2 as pu
 
 core.SERVER_VERSION = "0.2.0"
 
@@ -13,7 +15,7 @@ def _pu_call(fn, *args, **kwargs):
         return fn(*args, **kwargs)
     except core.ToolError:
         raise
-    except (ValueError, RuntimeError, ImportError, ModuleNotFoundError, OSError) as exc:
+    except (ValueError, RuntimeError, ImportError, ModuleNotFoundError, OSError, sqlite3.Error) as exc:
         raise core.ToolError(str(exc)) from exc
 
 
@@ -32,12 +34,14 @@ def health(args):
     })
     result["program_understanding"] = {
         "program_index": True,
+        "index_storage": caps.get("index_storage", "sqlite"),
         "symbols": True,
         "xrefs": True,
         "cfg": caps["androguard"],
         "network_model": True,
         "protector_detection": caps["apkid"],
         "analyzer_versions": caps["versions"],
+        "analyzer_errors": caps.get("errors", {}),
     }
     return result
 
@@ -161,7 +165,7 @@ core.TOOLS.extend([
     },
     {
         "name": "extract_network_model",
-        "description": "Build a structured network model linking endpoints to declaring methods, caller XREFs, model hints, auth/signature evidence and source provenance.",
+        "description": "Build a structured network model linking endpoints to uniquely resolved declaring methods, caller XREFs, model hints, auth/signature evidence and source provenance.",
         "inputSchema": {
             "type": "object",
             "properties": {"job_id": {"type": "string"}, "max_items": {"type": "integer", "minimum": 20, "maximum": 2000, "default": 500}},

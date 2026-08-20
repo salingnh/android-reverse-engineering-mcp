@@ -54,12 +54,13 @@ jobs:
           health = server.health({})
           assert health["version"] == "0.2.0"
           assert health["program_understanding"]["program_index"] is True
+          assert health["program_understanding"]["index_storage"] == "sqlite"
           PY
       - name: Test automatic runtime wrapper
         run: bash sandbox/test_wrapper.sh
       - name: Validate Python syntax
         run: |
-          python3 -m py_compile sandbox/mcp_server.py sandbox/mcp_server_v2.py sandbox/program_understanding.py
+          python3 -m py_compile sandbox/mcp_server.py sandbox/mcp_server_v2.py sandbox/program_understanding.py sandbox/program_understanding_v2.py sandbox/pu_source.py sandbox/pu_index.py sandbox/pu_network.py sandbox/tests_program_understanding.py
       - name: Validate shell wrapper syntax
         run: bash -n plugins/safe-android-reverser/bin/safe-reverser-mcp
       - name: Validate JSON manifests
@@ -76,6 +77,65 @@ jobs:
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
+
+      - name: Build runtime image for integration tests
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: sandbox/Dockerfile
+          load: true
+          push: false
+          tags: safe-android-reverser:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Run real DEX semantic integration test inside image
+        run: |
+          mkdir -p "$RUNNER_TEMP/safe-reverser-runtime-data"
+          docker run --rm \
+            --network=none \
+            --read-only \
+            --cap-drop=ALL \
+            --security-opt=no-new-privileges \
+            --tmpfs=/tmp:rw,nosuid,nodev,size=1g \
+            --tmpfs=/work:rw,nosuid,nodev,size=1g \
+            --user="$(id -u):$(id -g)" \
+            --volume="$PWD:/workspace:ro" \
+            --volume="$RUNNER_TEMP/safe-reverser-runtime-data:/data:rw" \
+            --entrypoint=python3 \
+            safe-android-reverser:ci \
+            /workspace/sandbox/tests_program_understanding.py
+
+      - name: Run MCP health smoke test inside image
+        run: |
+          mkdir -p "$RUNNER_TEMP/safe-reverser-mcp-data"
+          output="$RUNNER_TEMP/safe-reverser-health.jsonl"
+          printf '%s\n' \
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"ci","version":"1"}}}' \
+            '{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}' \
+            '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"health","arguments":{}}}' \
+          | docker run --rm -i \
+              --network=none \
+              --read-only \
+              --cap-drop=ALL \
+              --security-opt=no-new-privileges \
+              --tmpfs=/tmp:rw,nosuid,nodev,size=1g \
+              --tmpfs=/work:rw,nosuid,nodev,size=1g \
+              --user="$(id -u):$(id -g)" \
+              --volume="$PWD:/workspace:ro" \
+              --volume="$RUNNER_TEMP/safe-reverser-mcp-data:/data:rw" \
+              safe-android-reverser:ci > "$output"
+          python3 - "$output" <<'PY'
+          import json
+          import sys
+          responses = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8") if line.strip()]
+          health_response = next(item for item in responses if item.get("id") == 2)
+          payload = json.loads(health_response["result"]["content"][0]["text"])
+          assert payload["version"] == "0.2.0", payload
+          assert payload["tools"]["androguard"] is True, payload
+          assert payload["program_understanding"]["cfg"] is True, payload
+          assert payload["program_understanding"]["index_storage"] == "sqlite", payload
+          PY
 
       - name: Log in to GHCR
         if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/safe-v'))
@@ -96,15 +156,15 @@ jobs:
             type=ref,event=pr
             type=match,pattern=safe-v(.*),group=1
 
-      - name: Build and optionally push
+      - name: Publish tested image
+        if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/safe-v'))
         uses: docker/build-push-action@v7
         with:
           context: .
           file: sandbox/Dockerfile
-          push: ${{ github.event_name != 'pull_request' && (github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/safe-v')) }}
+          push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           provenance: mode=max
           sbom: true
           cache-from: type=gha
-          cache-to: type=gha,mode=max
