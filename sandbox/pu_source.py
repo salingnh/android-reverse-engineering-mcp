@@ -7,6 +7,7 @@ from typing import Any, Iterable
 import program_understanding as legacy
 
 IDENT_RE = re.compile(r"([A-Za-z_$][\w$]*)$")
+CLASS_DECL_RE = re.compile(r"\b(?:class|interface|enum|object)\s+([A-Za-z_$][\w$]*)")
 JAVA_MODIFIERS = {
     "public", "protected", "private", "static", "final", "abstract", "synchronized",
     "native", "default", "strictfp", "transient", "volatile",
@@ -60,6 +61,136 @@ def matching_paren(value: str, start: int) -> int | None:
             if depth == 0:
                 return index
     return None
+
+
+def _mask_comments_and_strings(value: str) -> str:
+    """Mask comments/string literals while preserving offsets and newlines."""
+    output = list(value)
+    index = 0
+    state = "code"
+    quote: str | None = None
+    while index < len(value):
+        char = value[index]
+        if state == "code":
+            if char == "/" and index + 1 < len(value) and value[index + 1] == "/":
+                output[index] = output[index + 1] = " "
+                index += 2
+                state = "line-comment"
+                continue
+            if char == "/" and index + 1 < len(value) and value[index + 1] == "*":
+                output[index] = output[index + 1] = " "
+                index += 2
+                state = "block-comment"
+                continue
+            if char in {'"', "'"}:
+                quote = char
+                output[index] = " "
+                index += 1
+                state = "string"
+                continue
+            index += 1
+            continue
+        if state == "line-comment":
+            if char == "\n":
+                state = "code"
+            else:
+                output[index] = " "
+            index += 1
+            continue
+        if state == "block-comment":
+            if char == "*" and index + 1 < len(value) and value[index + 1] == "/":
+                output[index] = output[index + 1] = " "
+                index += 2
+                state = "code"
+                continue
+            if char != "\n":
+                output[index] = " "
+            index += 1
+            continue
+        if state == "string":
+            if char == "\\" and index + 1 < len(value):
+                output[index] = " "
+                if value[index + 1] != "\n":
+                    output[index + 1] = " "
+                index += 2
+                continue
+            if char == quote:
+                output[index] = " "
+                index += 1
+                state = "code"
+                quote = None
+                continue
+            if char != "\n":
+                output[index] = " "
+            index += 1
+    return "".join(output)
+
+
+def _matching_brace(masked: str, start: int) -> int | None:
+    depth = 0
+    for index in range(start, len(masked)):
+        char = masked[index]
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return index
+    return None
+
+
+def _line_number(value: str, position: int) -> int:
+    return value.count("\n", 0, position) + 1
+
+
+def class_scopes(value: str, default_class: str) -> list[dict[str, Any]]:
+    """Return lexical class scopes; nested classes use JVM-like Outer$Inner names."""
+    masked = _mask_comments_and_strings(value)
+    scopes: list[dict[str, Any]] = []
+    for match in CLASS_DECL_RE.finditer(masked):
+        brace = masked.find("{", match.end())
+        if brace < 0:
+            continue
+        semicolon = masked.find(";", match.end(), brace)
+        if semicolon >= 0:
+            continue
+        end = _matching_brace(masked, brace)
+        if end is None:
+            continue
+        scopes.append({
+            "name": match.group(1),
+            "start_pos": match.start(),
+            "brace_pos": brace,
+            "end_pos": end,
+            "start_line": _line_number(value, match.start()),
+            "end_line": _line_number(value, end),
+        })
+    scopes.sort(key=lambda item: (item["start_pos"], -item["end_pos"]))
+    for index, scope in enumerate(scopes):
+        parent = None
+        for candidate in scopes[:index]:
+            if candidate["brace_pos"] < scope["start_pos"] < candidate["end_pos"]:
+                if parent is None or candidate["brace_pos"] > parent["brace_pos"]:
+                    parent = candidate
+        scope["class_name"] = f"{parent['class_name']}${scope['name']}" if parent else scope["name"]
+    if not scopes and default_class:
+        scopes.append({
+            "name": default_class,
+            "class_name": default_class,
+            "start_pos": 0,
+            "brace_pos": 0,
+            "end_pos": len(value),
+            "start_line": 1,
+            "end_line": max(1, len(value.splitlines())),
+        })
+    return scopes
+
+
+def class_name_at_line(scopes: list[dict[str, Any]], line: int, default_class: str) -> str:
+    matches = [scope for scope in scopes if scope["start_line"] <= line <= scope["end_line"]]
+    if not matches:
+        return default_class
+    return max(matches, key=lambda scope: scope["start_line"])["class_name"]
 
 
 def strip_leading_annotations(candidate: str) -> str:
@@ -199,8 +330,9 @@ def parse_declaration(candidate: str, class_name: str) -> tuple[str, str, int] |
 
 def declarations(value: str, class_name: str) -> list[dict[str, Any]]:
     lines = value.splitlines()
+    scopes = class_scopes(value, class_name)
     output: list[dict[str, Any]] = []
-    seen: set[tuple[int, str]] = set()
+    seen: set[tuple[int, str, str]] = set()
     index = 0
     while index < len(lines):
         stripped = lines[index].strip()
@@ -218,36 +350,68 @@ def declarations(value: str, class_name: str) -> list[dict[str, Any]]:
             consumed += 1
             candidate += " " + lines[consumed].strip()
             close_pos = matching_paren(candidate, open_pos)
-        parsed = parse_declaration(candidate, class_name)
+        owner = class_name_at_line(scopes, index + 1, class_name)
+        owner_simple = owner.rsplit("$", 1)[-1]
+        parsed = parse_declaration(candidate, owner_simple)
         if parsed:
             name, params, arity = parsed
-            key = (index + 1, name)
+            key = (index + 1, owner, name)
             if key not in seen:
                 seen.add(key)
-                output.append({"line": index + 1, "name": name, "params": params, "parameter_count": arity})
+                output.append({
+                    "line": index + 1,
+                    "name": name,
+                    "params": params,
+                    "parameter_count": arity,
+                    "class_name": owner,
+                })
             index = consumed + 1
         else:
             index += 1
     return output
 
 
-def ranges(items: list[dict[str, Any]], line_count: int) -> list[tuple[int, int, dict[str, Any]]]:
+def ranges(
+    items: list[dict[str, Any]],
+    line_count: int,
+    scopes: list[dict[str, Any]] | None = None,
+) -> list[tuple[int, int, dict[str, Any]]]:
     output = []
+    scope_ends = {scope["class_name"]: scope["end_line"] for scope in (scopes or [])}
     for index, item in enumerate(items):
-        end = items[index + 1]["line"] - 1 if index + 1 < len(items) else line_count
-        output.append((item["line"], end, item))
+        owner = item.get("class_name")
+        next_line = None
+        for candidate in items[index + 1:]:
+            if candidate.get("class_name") == owner:
+                next_line = candidate["line"]
+                break
+        end = next_line - 1 if next_line is not None else scope_ends.get(owner, line_count)
+        output.append((item["line"], max(item["line"], end), item))
     return output
 
 
-def context(items: list[tuple[int, int, dict[str, Any]]], line: int) -> dict[str, Any] | None:
+def context(
+    items: list[tuple[int, int, dict[str, Any]]],
+    line: int,
+    class_name: str | None = None,
+) -> dict[str, Any] | None:
     for start, end, item in items:
-        if start <= line <= end:
+        if start <= line <= end and (class_name is None or item.get("class_name") == class_name):
             return item
     return None
 
 
-def declaration_after(items: list[dict[str, Any]], line: int, max_distance: int = 8) -> dict[str, Any] | None:
+def declaration_after(
+    items: list[dict[str, Any]],
+    line: int,
+    max_distance: int = 8,
+    class_name: str | None = None,
+) -> dict[str, Any] | None:
     for item in items:
-        if line <= item["line"] <= line + max_distance:
+        if item["line"] < line:
+            continue
+        if item["line"] > line + max_distance:
+            break
+        if class_name is None or item.get("class_name") == class_name:
             return item
     return None
