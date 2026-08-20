@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-IMAGE="${SAFE_REVERSER_IMAGE:-ghcr.io/salingnh/safe-android-reverser:0.1.0}"
+IMAGE="${SAFE_REVERSER_IMAGE:-ghcr.io/salingnh/safe-android-reverser:0.2.0}"
 RUNTIME="${SAFE_REVERSER_RUNTIME:-auto}"
 PROJECT_DIR="${SAFE_REVERSER_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}"
 DATA_DIR="${SAFE_REVERSER_DATA_DIR:-${CLAUDE_PLUGIN_DATA:-$HOME/.local/share/safe-android-reverser}}"
@@ -61,10 +61,6 @@ COMMON=(
 )
 
 if [[ "$RUNTIME" == "podman" ]]; then
-  # The image declares USER 10001, but bind-mounted plugin data belongs to the
-  # host user. Override the runtime user and keep that UID/GID mapped into the
-  # rootless Podman user namespace so /data remains writable without chowning
-  # host files or running the container as root.
   exec podman "${COMMON[@]}" \
     --userns=keep-id \
     --user="$HOST_UID:$HOST_GID" \
