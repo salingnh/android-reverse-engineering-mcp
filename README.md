@@ -1,229 +1,435 @@
-# Android Reverse Engineering & API Extraction — Claude Code skill
+# Safe Android Reverser MCP
 
-[![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0) [![GitHub stars](https://img.shields.io/github/stars/SimoneAvogadro/android-reverse-engineering-skill?style=social)](https://github.com/SimoneAvogadro/android-reverse-engineering-skill/stargazers) [![GitHub last commit](https://img.shields.io/github/last-commit/SimoneAvogadro/android-reverse-engineering-skill)](https://github.com/SimoneAvogadro/android-reverse-engineering-skill/commits/master)
+**MCP-first, sandboxed Android reverse engineering for AI coding agents.**
 
-A Claude Code skill that decompiles Android APK/XAPK/JAR/AAR files and **extracts the HTTP APIs** used by the app — Retrofit endpoints, OkHttp calls, hardcoded URLs, authentication patterns — so you can document and reproduce them without the original source code.
+Safe Android Reverser is evolving this repository from host-executed reverse-engineering scripts into a **controlled reverse-engineering service** that AI agents access through MCP.
 
-> **First-class Kotlin support**: modern Android apps are Kotlin/KMP, heavily obfuscated with R8. This skill recovers the **original Kotlin class names** from metadata R8 cannot strip, and extracts APIs from **Ktor**, **Apollo (GraphQL)** and **Koin** — not just the classic Retrofit/OkHttp stack. See [Kotlin name recovery](#kotlin-name-recovery-r8-deobfuscation) below.
+> **The agent reasons. The MCP server controls. The sandbox executes.**
 
-> **Windows / PowerShell support (experimental)**: The `*.ps1` scripts alongside the bash ones are a recent community contribution, still being stabilised. For any issues please open an issue on **this** repository (not on the contributors' upstream forks): the PowerShell scripts are maintained here by [@SimoneAvogadro](https://github.com/SimoneAvogadro).
+The primary path no longer requires the agent to install JADX/Java on the host, call `sudo`, modify shell profiles, or execute arbitrary reverse-engineering commands directly on the workstation.
 
-## Table of Contents
+---
 
-- [What it does](#what-it-does)
-- [Requirements](#requirements)
-- [Installation](#installation)
-- [Usage](#usage)
-- [Repository Structure](#repository-structure)
-- [References](#references)
-- [Acknowledgments](#acknowledgments)
-- [Disclaimer](#disclaimer)
-- [License](#license)
+## Quick start
 
-## What it does
+The full step-by-step guide is in **[`docs/INSTALL_MCP.md`](docs/INSTALL_MCP.md)**.
 
-| Capability | Description |
-|------------|-------------|
-| **Fingerprint first (Phase 0)** | Triage an APK/XAPK in seconds — detect the framework (Flutter / React Native / Cordova / Xamarin / native-Kotlin), HTTP stack, obfuscation level and native libs *before* spending time on a full decompile |
-| **Decompile** | APK, XAPK, JAR, and AAR files using jadx and Fernflower/Vineflower (single engine or side-by-side comparison) |
-| **Recover Kotlin names** | Rebuild original `*Repository` / `*ViewModel` / `*UseCase` class names from R8-obfuscated binaries using Kotlin metadata that R8 cannot strip |
-| **Extract APIs** | Retrofit, OkHttp, Volley **and modern Kotlin/KMP stacks: Ktor, Apollo (GraphQL), Koin DI** — endpoints, hardcoded URLs, auth headers, tokens and HMAC request-signing schemes |
-| **Trace call flows** | From Activities/Fragments through ViewModels and repositories down to HTTP calls |
-| **Analyze structure** | Manifest, packages, architecture patterns |
-| **Handle obfuscation** | R8-resistant path/URL extraction plus strategies for navigating ProGuard/R8 output |
-
-## Requirements
-
-**Required:**
-
-- Java JDK 17+
-- [jadx](https://github.com/skylot/jadx) (CLI)
-
-**Optional (recommended):**
-
-- [Vineflower](https://github.com/Vineflower/vineflower) or [Fernflower](https://github.com/JetBrains/fernflower) — better output on complex Java code
-- [dex2jar](https://github.com/ThexXTURBOXx/dex2jar) — needed to use Fernflower on APK/DEX files
-
-See `plugins/android-reverse-engineering/skills/android-reverse-engineering/references/setup-guide.md` for detailed installation instructions.
-
-## Installation
-
-### From GitHub (recommended)
-
-Inside Claude Code, run:
+The intended first-run sequence is:
 
 ```text
-/plugin marketplace add SimoneAvogadro/android-reverse-engineering-skill
-/plugin install android-reverse-engineering@android-reverse-engineering-skill
+1. Install Podman/Docker
+2. Prepare the sandbox image
+3. Start Claude Code with SAFE_REVERSER_* variables
+4. Add the marketplace
+5. Install safe-android-reverser
+6. /reload-plugins
+7. /mcp
+8. Call health
+9. Fingerprint an APK
+10. Run a full safe analysis prompt
 ```
 
-The skill will be permanently available in all future sessions.
+### 1. Prepare the sandbox image
 
-### From a local clone
+After the production image is published, rootless Podman is recommended:
 
 ```bash
-git clone https://github.com/SimoneAvogadro/android-reverse-engineering-skill.git
+podman pull ghcr.io/salingnh/safe-android-reverser:0.1.0
+podman image inspect ghcr.io/salingnh/safe-android-reverser:0.1.0 >/dev/null \
+  && echo "safe-android-reverser image is ready"
 ```
 
-Then in Claude Code:
-
-```text
-/plugin marketplace add /path/to/android-reverse-engineering-skill
-/plugin install android-reverse-engineering@android-reverse-engineering-skill
-```
-
-## Usage
-
-### Slash command
-
-```text
-/decompile path/to/app.apk
-```
-
-This runs the full workflow: dependency check, decompilation, and initial structure analysis.
-
-### Natural language
-
-The skill activates on phrases like:
-
-- "Decompile this APK"
-- "Reverse engineer this Android app"
-- "Extract API endpoints from this app"
-- "Follow the call flow from LoginActivity"
-- "Analyze this AAR library"
-
-### Manual scripts
-
-The scripts can also be used standalone:
+Docker is also supported:
 
 ```bash
-# Check dependencies
-bash plugins/android-reverse-engineering/skills/android-reverse-engineering/scripts/check-deps.sh
-
-# Install a missing dependency (auto-detects OS and package manager)
-bash plugins/android-reverse-engineering/skills/android-reverse-engineering/scripts/install-dep.sh jadx
-bash plugins/android-reverse-engineering/skills/android-reverse-engineering/scripts/install-dep.sh vineflower
-
-# Fingerprint an APK/XAPK BEFORE decompiling (Phase 0 triage):
-# framework, HTTP stack, obfuscation level, native libs, notable SDKs
-bash plugins/android-reverse-engineering/skills/android-reverse-engineering/scripts/fingerprint.sh app.apk
-
-# Decompile APK with jadx (default)
-bash plugins/android-reverse-engineering/skills/android-reverse-engineering/scripts/decompile.sh app.apk
-
-# Decompile XAPK (auto-extracts and decompiles each APK inside)
-bash plugins/android-reverse-engineering/skills/android-reverse-engineering/scripts/decompile.sh app-bundle.xapk
-
-# Decompile with Fernflower
-bash plugins/android-reverse-engineering/skills/android-reverse-engineering/scripts/decompile.sh --engine fernflower library.jar
-
-# Run both engines and compare
-bash plugins/android-reverse-engineering/skills/android-reverse-engineering/scripts/decompile.sh --engine both --deobf app.apk
-
-# Find API calls — defaults to a full scan across every supported stack
-bash plugins/android-reverse-engineering/skills/android-reverse-engineering/scripts/find-api-calls.sh output/sources/
-bash plugins/android-reverse-engineering/skills/android-reverse-engineering/scripts/find-api-calls.sh output/sources/ --retrofit
-bash plugins/android-reverse-engineering/skills/android-reverse-engineering/scripts/find-api-calls.sh output/sources/ --urls
-
-# Modern Kotlin/KMP stacks and obfuscation-resistant extraction
-bash plugins/android-reverse-engineering/skills/android-reverse-engineering/scripts/find-api-calls.sh output/sources/ --ktor    # Ktor client
-bash plugins/android-reverse-engineering/skills/android-reverse-engineering/scripts/find-api-calls.sh output/sources/ --apollo  # Apollo / GraphQL
-bash plugins/android-reverse-engineering/skills/android-reverse-engineering/scripts/find-api-calls.sh output/sources/ --paths   # quoted path literals that survive R8 inlining
+docker pull ghcr.io/salingnh/safe-android-reverser:0.1.0
 ```
 
-### Kotlin name recovery (R8 deobfuscation)
-
-Most real-world Kotlin/KMP apps ship through R8, so the decompiled classes come
-out as `a.b.c`. R8 renames the JVM symbols but **cannot strip the Kotlin
-metadata strings** — the Kotlin runtime (reflection, coroutines) needs the
-original fully-qualified names at runtime. This skill mines those
-`@DebugMetadata` / `@Metadata` annotations to rebuild an `obfuscated → real`
-class-name map. On a typical app it recovers ~100 % of the
-`*Repository` / `*ViewModel` / `*UseCase` / `*Impl` classes you actually want to
-read.
+For the current `feat/safe-sandbox-plugin` branch, build the image locally instead:
 
 ```bash
-# 1. Build the mapping from the decompiled sources
-bash plugins/android-reverse-engineering/skills/android-reverse-engineering/scripts/recover-kotlin-names.sh output/sources/ output/names/
-#    → output/names/mapping.tsv, mapping.json, by_package/
+git clone --branch feat/safe-sandbox-plugin \
+  https://github.com/salingnh/android-reverse-engineering-mcp.git
+cd android-reverse-engineering-mcp
 
-# 2. Query it: resolve an obfuscated name, search by real name, or grep
-#    the sources with each hit annotated with its recovered class name
-bash plugins/android-reverse-engineering/skills/android-reverse-engineering/scripts/lookup-name.sh output/names/ LoginRepository
-bash plugins/android-reverse-engineering/skills/android-reverse-engineering/scripts/lookup-name.sh output/names/ -o a.b.c
-bash plugins/android-reverse-engineering/skills/android-reverse-engineering/scripts/lookup-name.sh output/names/ --grep 'login' output/sources/
+set -a
+source sandbox/tools.lock.env
+set +a
+
+podman build \
+  -f sandbox/Dockerfile \
+  --build-arg JADX_VERSION="$JADX_VERSION" \
+  --build-arg JADX_SHA256="$JADX_SHA256" \
+  --build-arg VINEFLOWER_VERSION="$VINEFLOWER_VERSION" \
+  -t safe-android-reverser:dev .
 ```
 
-## Repository Structure
+### 2. Start Claude Code with the runtime configuration
+
+Released image:
+
+```bash
+export SAFE_REVERSER_RUNTIME=podman
+export SAFE_REVERSER_IMAGE=ghcr.io/salingnh/safe-android-reverser:0.1.0
+claude
+```
+
+Feature-branch image:
+
+```bash
+export SAFE_REVERSER_RUNTIME=podman
+export SAFE_REVERSER_IMAGE=safe-android-reverser:dev
+claude
+```
+
+Use `docker` instead of `podman` when required.
+
+Set these variables **before starting Claude Code**. The bundled MCP server inherits them when the plugin starts.
+
+### 3. Add the marketplace and plugin
+
+Released/master:
 
 ```text
-android-reverse-engineering-skill/
+/plugin marketplace add salingnh/android-reverse-engineering-mcp
+/plugin install safe-android-reverser@salingnh-reverse-tools
+/reload-plugins
+```
+
+Current feature branch:
+
+```text
+/plugin marketplace add salingnh/android-reverse-engineering-mcp@feat/safe-sandbox-plugin
+/plugin install safe-android-reverser@salingnh-reverse-tools
+/reload-plugins
+```
+
+The plugin bundles `.mcp.json`, so you do **not** need a separate `claude mcp add` command.
+
+### 4. Verify the MCP is up
+
+Inside Claude Code:
+
+```text
+/mcp
+```
+
+Verify that `safe-android-reverser` is listed and connected/healthy.
+
+Then run this prompt:
+
+```text
+Use only the safe-android-reverser MCP server.
+Call the health tool and report whether the sandbox is ready and which reverse-engineering tools are available.
+Do not decompile or analyze any artifact yet.
+```
+
+If `health` succeeds, the end-to-end MCP path is working:
+
+```text
+Claude -> plugin -> MCP wrapper -> container -> MCP server
+```
+
+### 5. Put a test APK under the project root
+
+```bash
+mkdir -p artifacts
+cp /path/to/app.apk artifacts/app.apk
+```
+
+The project is mounted read-only into the sandbox, so artifact paths passed to MCP should be relative to the Claude project root.
+
+### 6. First test prompt
+
+```text
+Analyze artifacts/app.apk using only the safe-android-reverser MCP server.
+
+Required workflow:
+1. Call health first. If the MCP or sandbox is unavailable, stop and report the setup error.
+2. Call fingerprint on artifacts/app.apk.
+3. Report the detected framework, HTTP stack, obfuscation level, native libraries, and notable SDK signals.
+4. If it is a native Android/JVM application, decompile it with JADX.
+5. Run extract_api on the resulting analysis job.
+6. Summarize likely first-party hosts, endpoint paths, HTTP/authentication signals, and the strongest source evidence.
+7. Use search_source/read_source_file only for high-signal findings.
+8. Do not execute host shell commands, host JADX/Java, install-dep.sh, sudo, or a non-MCP reverse-engineering path.
+```
+
+For a cheaper fingerprint-only smoke test:
+
+```text
+Use only safe-android-reverser MCP.
+Run health and then fingerprint artifacts/app.apk.
+Return only the fingerprint summary and recommended next analyzer. Do not decompile yet.
+```
+
+The plugin also includes:
+
+```text
+/safe-decompile artifacts/app.apk
+```
+
+For first-time validation, the explicit prompt above is easier to diagnose because every MCP step is visible.
+
+---
+
+## Architecture
+
+The target architecture is a reusable reverse-engineering platform rather than a skill that simply knows how to call JADX:
+
+```text
+AI Agent
+Claude Code / Codex / other MCP clients
+                │
+                │ MCP
+                ▼
+       Reverse Engineering MCP
+                │
+        allow-listed operations
+                │
+                ▼
+      Sandboxed execution runtime
+       rootless Podman / Docker
+                │
+       ┌────────┼─────────┐
+       ▼        ▼         ▼
+     JADX   Vineflower   analyzers
+                │
+                ▼
+        structured evidence
+                │
+                ▼
+             AI Agent
+```
+
+Responsibilities are separated deliberately:
+
+- **Skill/plugin** — workflow, reasoning instructions, and user-facing commands.
+- **MCP server** — stable tool API, path validation, job management, and bounded access to results.
+- **Sandbox image** — decompilers and binary-analysis tools with restricted host/network access.
+
+The MCP layer is intended to become the primary integration surface. Claude Code is the first client, not the only possible client.
+
+---
+
+## Current MCP API
+
+The static MCP currently exposes:
+
+```text
+health
+fingerprint
+decompile
+extract_api
+search_source
+read_source_file
+recover_kotlin_names
+list_jobs
+```
+
+It deliberately does not expose generic `shell`, `exec`, `bash`, `docker`, or `podman` tools.
+
+### `health`
+
+Checks MCP/sandbox readiness and the reverse-engineering toolchain.
+
+### `fingerprint`
+
+Performs cheap pre-decompilation triage:
+
+- artifact type;
+- native Android vs Flutter / React Native / Cordova / Xamarin markers;
+- HTTP stack hints;
+- DI / serialization libraries;
+- obfuscation estimate;
+- native libraries;
+- notable SDKs.
+
+### `decompile`
+
+Current engine strategy:
+
+```text
+APK / XAPK / APKS / APKM  -> JADX
+JAR                        -> Vineflower or JADX
+AAR                        -> classes.jar + libs/*.jar -> Vineflower
+```
+
+### `extract_api`
+
+Extracts high-signal network evidence:
+
+- Retrofit annotations;
+- OkHttp/Ktor-style calls;
+- hard-coded URLs;
+- endpoint-shaped path literals;
+- auth/header/signing indicators;
+- likely first-party vs third-party hosts.
+
+### `search_source` / `read_source_file`
+
+Lets the agent retrieve only relevant decompiled evidence instead of receiving unrestricted shell access to the analysis directory.
+
+### `recover_kotlin_names`
+
+Produces candidate original Kotlin names from surviving metadata/debug evidence with confidence rather than treating them as guaranteed truth.
+
+---
+
+## Security model
+
+The primary threat model is analyzing **untrusted mobile artifacts** without giving the artifact or reverse-engineering toolchain normal workstation access.
+
+The sandbox launcher applies:
+
+```text
+network              none
+root filesystem      read-only
+Linux capabilities   dropped
+privilege escalation disabled
+project directory    read-only
+analysis output       isolated writable directory
+CPU                   limited
+memory                limited
+PID count             limited
+container user        non-root
+```
+
+Runtime layout:
+
+```text
+/workspace   read-only project input
+/data        persistent analysis output
+/work        ephemeral working area
+/tmp         ephemeral temporary area
+```
+
+The safe path does not automatically:
+
+- run `install-dep.sh`;
+- call `sudo`;
+- install host packages;
+- modify `.bashrc`, `.zshrc`, or host `PATH`;
+- fall back to host-installed JADX/Vineflower;
+- expose ADB, Frida, or a device to the static sandbox;
+- give the static analyzer normal network access.
+
+If the MCP path fails, the safe plugin should report the setup error and stop instead of silently falling back to legacy host execution.
+
+---
+
+## Toolchain policy
+
+Current static image:
+
+```text
+Java        21
+JADX        1.5.6
+Vineflower  1.12.0
+Python      standard-library MCP implementation
+```
+
+JADX is version-pinned and SHA-256 verified during image build. Runtime containers do not contain `curl`/`wget` and do not resolve `latest` releases during analysis.
+
+Further supply-chain hardening will pin and verify every downloaded build artifact and strengthen image provenance/release controls.
+
+---
+
+## Repository layout
+
+```text
+android-reverse-engineering-mcp/
 ├── .claude-plugin/
-│   └── marketplace.json                    # Marketplace catalog
+│   └── marketplace.json
+├── .github/workflows/
+│   └── build-safe-sandbox.yml
+├── docs/
+│   └── INSTALL_MCP.md
 ├── plugins/
-│   └── android-reverse-engineering/
-│       ├── .claude-plugin/
-│       │   └── plugin.json                 # Plugin manifest
-│       ├── skills/
-│       │   └── android-reverse-engineering/
-│       │       ├── SKILL.md                # Core workflow (Phase 0–5)
-│       │       ├── references/
-│       │       │   ├── setup-guide.md
-│       │       │   ├── jadx-usage.md
-│       │       │   ├── fernflower-usage.md
-│       │       │   ├── api-extraction-patterns.md
-│       │       │   ├── kotlin-name-recovery.md
-│       │       │   ├── third_party_hosts.txt   # denylist for first/third-party bucketing
-│       │       │   └── call-flow-analysis.md
-│       │       └── scripts/
-│       │           ├── check-deps.sh       # Bash
-│       │           ├── check-deps.ps1      # PowerShell
-│       │           ├── install-dep.sh
-│       │           ├── install-dep.ps1
-│       │           ├── decompile.sh
-│       │           ├── decompile.ps1
-│       │           ├── fingerprint.sh          # Phase 0 — pre-decompile triage
-│       │           ├── recover-kotlin-names.sh # R8 → real Kotlin class names
-│       │           ├── lookup-name.sh          # query the recovered name map
-│       │           ├── find-api-calls.sh
-│       │           └── find-api-calls.ps1
-│       └── commands/
-│           └── decompile.md                # /decompile slash command
+│   ├── safe-android-reverser/          # primary direction
+│   │   ├── .claude-plugin/plugin.json
+│   │   ├── .mcp.json
+│   │   ├── bin/safe-reverser-mcp
+│   │   ├── commands/safe-decompile.md
+│   │   └── skills/safe-android-reverser/SKILL.md
+│   └── android-reverse-engineering/    # legacy/upstream-compatible plugin
+├── sandbox/
+│   ├── Dockerfile
+│   ├── mcp_server.py
+│   ├── tests.py
+│   ├── tools.lock.env
+│   └── README.md
 ├── LICENSE
 └── README.md
 ```
 
-## References
+---
 
-- [jadx — Dex to Java decompiler](https://github.com/skylot/jadx)
-- [Fernflower — JetBrains analytical decompiler](https://github.com/JetBrains/fernflower)
-- [Vineflower — Fernflower community fork](https://github.com/Vineflower/vineflower)
-- [dex2jar — DEX to JAR converter](https://github.com/ThexXTURBOXx/dex2jar)
-- [apktool — Android resource decoder](https://apktool.org/)
+## Legacy upstream plugin
 
-## Acknowledgments
+The original `android-reverse-engineering` plugin and its shell/PowerShell workflow remain for compatibility and attribution, but they are **not** the preferred execution architecture for new development.
 
-Thanks to the contributors who have shaped this skill:
+If intentionally required:
 
-- [@tajchert](https://github.com/tajchert) — Phase 0 fingerprinting, R8-resistant Kotlin name recovery (`recover-kotlin-names.sh`, `lookup-name.sh`), and Ktor / Apollo / Koin / HMAC extraction patterns (#16)
-- [@philjn](https://github.com/philjn) — Native Windows / PowerShell support (`check-deps.ps1`, `install-dep.ps1`, `decompile.ps1`, `find-api-calls.ps1`) and split/bundled APK detection in `decompile.sh` (#8)
-- [@txhno](https://github.com/txhno) — Migration to the maintained [`ThexXTURBOXx/dex2jar`](https://github.com/ThexXTURBOXx/dex2jar) fork (#12)
-- [@muqiao215](https://github.com/muqiao215) — Decompile partial-success handling, Fernflower timeout safeguard, intermediate-artifact directory (#10)
-- [@kevinaimonster](https://github.com/kevinaimonster) — Chinese localization (`SKILL.md` discovery keywords) (#4)
+```text
+/plugin install android-reverse-engineering@salingnh-reverse-tools
+```
 
-## Disclaimer
+New analyzer functionality should normally be implemented behind MCP rather than as another host-executed script/install path.
 
-This plugin is provided strictly for **lawful purposes**, including but not limited to:
+---
 
-- Security research and authorized penetration testing
-- Interoperability analysis permitted under applicable law (e.g., EU Directive 2009/24/EC, US DMCA §1201(f))
-- Malware analysis and incident response
-- Educational use and CTF competitions
+## Roadmap
 
-**You are solely responsible** for ensuring that your use of this tool complies with all applicable laws, regulations, and terms of service. Unauthorized reverse engineering of software you do not own or do not have permission to analyze may violate intellectual property laws and computer fraud statutes in your jurisdiction.
+The longer-term goal is a general reverse-engineering MCP platform.
 
-The authors disclaim any liability for misuse of this tool.
+Planned directions include:
 
-## License
+- normalized JSON/evidence output;
+- Flutter and React Native analyzer profiles;
+- native `.so` analysis;
+- call graph and AST/data-flow analysis;
+- request/response model extraction;
+- gRPC/protobuf, WebSocket/SSE/MQTT discovery;
+- a **separate** dynamic-analysis MCP/profile for ADB, Frida/Objection, controlled proxying, and scoped network access.
 
-Apache 2.0 — see [LICENSE](LICENSE)
+Static analysis will not automatically gain dynamic-analysis privileges.
+
+---
+
+## CI and image publishing
+
+`.github/workflows/build-safe-sandbox.yml` validates:
+
+- MCP tests;
+- shell wrapper syntax;
+- plugin/marketplace JSON;
+- sandbox image build.
+
+The release path publishes:
+
+```text
+ghcr.io/salingnh/safe-android-reverser:<version>
+```
+
+with BuildKit SBOM/provenance metadata from controlled `master`/release-tag workflows.
+
+---
+
+## Legal use
+
+Use this project only for lawful reverse engineering, interoperability work, authorized security research, malware analysis, incident response, education, or systems you are authorized to inspect.
+
+You are responsible for compliance with applicable laws, licenses, and software terms.
+
+---
+
+## License and attribution
+
+Apache-2.0 — see [LICENSE](LICENSE).
+
+This repository originated from and still contains substantial work from:
+
+[SimoneAvogadro/android-reverse-engineering-skill](https://github.com/SimoneAvogadro/android-reverse-engineering-skill)
+
+The MCP-first sandbox architecture and `safe-android-reverser` plugin are the direction maintained by this fork.
