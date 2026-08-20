@@ -5,10 +5,7 @@
       "args": [],
       "env": {
         "SAFE_REVERSER_PROJECT_DIR": "${CLAUDE_PROJECT_DIR}",
-        "SAFE_REVERSER_DATA_DIR": "${CLAUDE_PLUGIN_DATA}",
-        "SAFE_REVERSER_IMAGE": "${SAFE_REVERSER_IMAGE:-ghcr.io/salingnh/safe-android-reverser:0.2.0}",
-        "SAFE_REVERSER_RUNTIME": "${SAFE_REVERSER_RUNTIME:-auto}",
-        "SAFE_REVERSER_AUTO_PULL": "${SAFE_REVERSER_AUTO_PULL:-1}"
+        "SAFE_REVERSER_DATA_DIR": "${CLAUDE_PLUGIN_DATA}"
       }
     }
   }
