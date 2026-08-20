@@ -236,7 +236,7 @@ The plugin bundles its MCP configuration, so enabling the plugin starts the MCP 
 After the implementation is merged to `master`:
 
 ```text
-/plugin marketplace add salingnh/android-reverse-engineering-skill
+/plugin marketplace add salingnh/android-reverse-engineering-mcp
 ```
 
 ### 2. Install the safe plugin
@@ -289,7 +289,7 @@ feat/safe-sandbox-plugin
 The marketplace can be tested directly from that branch:
 
 ```text
-/plugin marketplace add salingnh/android-reverse-engineering-skill@feat/safe-sandbox-plugin
+/plugin marketplace add salingnh/android-reverse-engineering-mcp@feat/safe-sandbox-plugin
 /plugin install safe-android-reverser@salingnh-reverse-tools
 /reload-plugins
 ```
@@ -299,9 +299,9 @@ Build a local image:
 ```bash
 git clone \
   --branch feat/safe-sandbox-plugin \
-  https://github.com/salingnh/android-reverse-engineering-skill.git
+  https://github.com/salingnh/android-reverse-engineering-mcp.git
 
-cd android-reverse-engineering-skill
+cd android-reverse-engineering-mcp
 
 set -a
 source sandbox/tools.lock.env
@@ -458,7 +458,7 @@ Static analysis will not automatically gain these privileges.
 ## Repository layout
 
 ```text
-android-reverse-engineering-skill/
+android-reverse-engineering-mcp/
 ├── .claude-plugin/
 │   └── marketplace.json
 ├── .github/workflows/
