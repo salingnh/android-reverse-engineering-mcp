@@ -23,31 +23,45 @@ RUN set -eux; \
     if [ -n "$VINEFLOWER_SHA256" ]; then echo "$VINEFLOWER_SHA256  /tmp/vineflower.jar" | sha256sum -c -; fi; \
     test -s /tmp/vineflower.jar
 
-FROM eclipse-temurin:21-jre-jammy
+FROM eclipse-temurin:21-jre-jammy AS python-tools
+ARG DEBIAN_FRONTEND=noninteractive
+ARG ANDROGUARD_VERSION=4.1.4
+ARG ANDROGUARD_WHEEL_SHA256=6265a6d4007401cf5a62a98fa99a1c2994644d4311da031a5398efe3bcaa63b0
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates python3 python3-pip python3-dev build-essential libmagic1 \
+ && python3 -m pip download --disable-pip-version-check --no-deps --only-binary=:all: --dest /tmp/androguard "androguard==${ANDROGUARD_VERSION}" \
+ && echo "${ANDROGUARD_WHEEL_SHA256}  /tmp/androguard/androguard-${ANDROGUARD_VERSION}-py3-none-any.whl" | sha256sum -c - \
+ && python3 -m pip install --no-cache-dir --disable-pip-version-check --target=/opt/python-site "/tmp/androguard/androguard-${ANDROGUARD_VERSION}-py3-none-any.whl" \
+ && PYTHONPATH=/opt/python-site python3 -c 'import androguard; assert androguard.__version__ == "4.1.4"'
 
+FROM eclipse-temurin:21-jre-jammy
 ARG DEBIAN_FRONTEND=noninteractive
 RUN apt-get update \
- && apt-get install -y --no-install-recommends ca-certificates python3 \
+ && apt-get install -y --no-install-recommends ca-certificates python3 file binutils libmagic1 \
  && rm -rf /var/lib/apt/lists/* \
  && useradd --uid 10001 --create-home --home-dir /nonexistent --shell /usr/sbin/nologin reverser \
- && mkdir -p /opt/safe-reverser /opt/vineflower /workspace /data/jobs /work \
+ && mkdir -p /opt/safe-reverser /opt/vineflower /opt/python-site /workspace /data/jobs /work \
  && chown -R 10001:10001 /data /work
 
 COPY --from=tools /opt/jadx /opt/jadx
 COPY --from=tools /tmp/vineflower.jar /opt/vineflower/vineflower.jar
+COPY --from=python-tools /opt/python-site /opt/python-site
 COPY sandbox/mcp_server.py /opt/safe-reverser/mcp_server.py
+COPY sandbox/program_understanding.py /opt/safe-reverser/program_understanding.py
+COPY sandbox/mcp_server_v2.py /opt/safe-reverser/mcp_server_v2.py
 
 RUN ln -s /opt/jadx/bin/jadx /usr/local/bin/jadx \
- && chmod 0555 /opt/safe-reverser/mcp_server.py \
- && chmod -R a-w /opt/jadx /opt/vineflower /opt/safe-reverser
+ && chmod 0555 /opt/safe-reverser/mcp_server.py /opt/safe-reverser/mcp_server_v2.py /opt/safe-reverser/program_understanding.py \
+ && chmod -R a-w /opt/jadx /opt/vineflower /opt/python-site /opt/safe-reverser
 
 ENV SAFE_REVERSER_WORKSPACE=/workspace \
     SAFE_REVERSER_DATA_ROOT=/data/jobs \
     VINEFLOWER_JAR=/opt/vineflower/vineflower.jar \
+    PYTHONPATH=/opt/python-site \
     HOME=/tmp/home \
     XDG_CACHE_HOME=/tmp/xdg-cache \
     XDG_CONFIG_HOME=/tmp/xdg-config
 
 WORKDIR /work
 USER 10001:10001
-ENTRYPOINT ["python3", "/opt/safe-reverser/mcp_server.py"]
+ENTRYPOINT ["python3", "/opt/safe-reverser/mcp_server_v2.py"]
