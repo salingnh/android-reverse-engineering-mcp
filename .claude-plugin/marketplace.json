@@ -7,7 +7,7 @@
   },
   "metadata": {
     "description": "Android reverse-engineering plugins with safe containerized execution",
-    "version": "2.1.0"
+    "version": "2.1.1"
   },
   "plugins": [
     {
@@ -26,14 +26,14 @@
     {
       "name": "safe-android-reverser",
       "source": "./plugins/safe-android-reverser",
-      "description": "Sandboxed Android reverse engineering with automatic Podman/Docker startup, semantic program indexing, XREF/CFG queries and structured network evidence.",
-      "version": "0.2.0",
+      "description": "Sandboxed Android reverse engineering with automatic Podman/Docker startup, semantic program indexing, XREF/CFG queries, bounded call-path tracing and structured network evidence.",
+      "version": "0.2.1",
       "author": {
         "name": "salingnh"
       },
       "repository": "https://github.com/salingnh/android-reverse-engineering-mcp",
       "license": "Apache-2.0",
-      "keywords": ["android", "reverse-engineering", "apk", "jadx", "androguard", "program-analysis", "mcp", "sandbox", "security"],
+      "keywords": ["android", "reverse-engineering", "apk", "jadx", "androguard", "program-analysis", "call-graph", "mcp", "sandbox", "security"],
       "category": "security"
     }
   ]

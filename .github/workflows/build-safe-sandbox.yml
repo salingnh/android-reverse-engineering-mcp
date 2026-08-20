@@ -11,6 +11,7 @@ on:
       - master
       - feat/safe-sandbox-plugin
       - feat/program-understanding-phase1
+      - feat/trace-call-path
     tags: ['safe-v*']
     paths:
       - 'sandbox/**'
@@ -35,6 +36,8 @@ jobs:
         run: python3 sandbox/tests_program_understanding.py
       - name: Test program understanding source scopes and cache integrity
         run: PYTHONPATH=sandbox python3 sandbox/tests_program_understanding_scopes.py
+      - name: Test trace_call_path
+        run: PYTHONPATH=sandbox python3 sandbox/tests_trace_call_path.py
       - name: Test extended MCP registration
         run: |
           export SAFE_REVERSER_WORKSPACE="$RUNNER_TEMP/safe-reverser-workspace"
@@ -47,6 +50,7 @@ jobs:
               "build_program_index",
               "find_symbols",
               "find_xrefs",
+              "trace_call_path",
               "get_cfg",
               "identify_protector",
               "extract_network_model",
@@ -54,15 +58,16 @@ jobs:
           missing = expected - names
           assert not missing, f"missing semantic MCP tools: {sorted(missing)}"
           health = server.health({})
-          assert health["version"] == "0.2.0"
+          assert health["version"] == "0.2.1"
           assert health["program_understanding"]["program_index"] is True
           assert health["program_understanding"]["index_storage"] == "sqlite"
+          assert health["program_understanding"]["call_path"] is True
           PY
       - name: Test automatic runtime wrapper
         run: bash sandbox/test_wrapper.sh
       - name: Validate Python syntax
         run: |
-          python3 -m py_compile sandbox/mcp_server.py sandbox/mcp_server_v2.py sandbox/program_understanding.py sandbox/program_understanding_v2.py sandbox/pu_source.py sandbox/pu_index.py sandbox/pu_network.py sandbox/tests_program_understanding.py sandbox/tests_program_understanding_scopes.py
+          python3 -m py_compile sandbox/mcp_server.py sandbox/mcp_server_v2.py sandbox/program_understanding.py sandbox/program_understanding_v2.py sandbox/pu_source.py sandbox/pu_index.py sandbox/pu_call_path.py sandbox/pu_network.py sandbox/tests_program_understanding.py sandbox/tests_program_understanding_scopes.py sandbox/tests_trace_call_path.py
       - name: Validate shell wrapper syntax
         run: bash -n plugins/safe-android-reverser/bin/safe-reverser-mcp
       - name: Validate JSON manifests
@@ -125,6 +130,23 @@ jobs:
             safe-android-reverser:ci \
             /workspace/sandbox/tests_program_understanding_scopes.py
 
+      - name: Run call-path regression and stress test inside image
+        run: |
+          mkdir -p "$RUNNER_TEMP/safe-reverser-call-path-data"
+          docker run --rm \
+            --network=none \
+            --read-only \
+            --cap-drop=ALL \
+            --security-opt=no-new-privileges \
+            --tmpfs=/tmp:rw,nosuid,nodev,size=1g \
+            --tmpfs=/work:rw,nosuid,nodev,size=1g \
+            --user="$(id -u):$(id -g)" \
+            --volume="$PWD:/workspace:ro" \
+            --volume="$RUNNER_TEMP/safe-reverser-call-path-data:/data:rw" \
+            --entrypoint=python3 \
+            safe-android-reverser:ci \
+            /workspace/sandbox/tests_trace_call_path.py
+
       - name: Run MCP health smoke test inside image
         run: |
           mkdir -p "$RUNNER_TEMP/safe-reverser-mcp-data"
@@ -150,9 +172,10 @@ jobs:
           responses = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8") if line.strip()]
           health_response = next(item for item in responses if item.get("id") == 2)
           payload = json.loads(health_response["result"]["content"][0]["text"])
-          assert payload["version"] == "0.2.0", payload
+          assert payload["version"] == "0.2.1", payload
           assert payload["tools"]["androguard"] is True, payload
           assert payload["program_understanding"]["cfg"] is True, payload
+          assert payload["program_understanding"]["call_path"] is True, payload
           assert payload["program_understanding"]["index_storage"] == "sqlite", payload
           PY
 
@@ -170,7 +193,7 @@ jobs:
         with:
           images: ghcr.io/${{ github.repository_owner }}/safe-android-reverser
           tags: |
-            type=raw,value=0.2.0
+            type=raw,value=0.2.1
             type=ref,event=branch
             type=ref,event=pr
             type=match,pattern=safe-v(.*),group=1

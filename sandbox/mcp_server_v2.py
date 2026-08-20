@@ -9,7 +9,7 @@ from contextlib import contextmanager
 import mcp_server as core
 import program_understanding_v2 as pu
 
-core.SERVER_VERSION = "0.2.0"
+core.SERVER_VERSION = "0.2.1"
 
 
 @contextmanager
@@ -70,6 +70,7 @@ def health(args):
         "index_storage": caps.get("index_storage", "sqlite"),
         "symbols": True,
         "xrefs": True,
+        "call_path": True,
         "cfg": caps["androguard"],
         "network_model": True,
         "protector_detection": caps["apkid"],
@@ -118,6 +119,23 @@ def find_xrefs(args):
     )
 
 
+def trace_call_path(args):
+    job = core._job_dir(str(args.get("job_id", "")))
+    return _pu_call(
+        pu.trace_call_path,
+        job,
+        core.WORKSPACE,
+        str(args.get("source", "")),
+        str(args.get("target", "")),
+        direction=str(args.get("direction", "forward")),
+        max_depth=int(args.get("max_depth", 12)),
+        max_paths=int(args.get("max_paths", 20)),
+        max_visited_nodes=int(args.get("max_visited_nodes", 50000)),
+        max_scanned_edges=int(args.get("max_scanned_edges", 200000)),
+        timeout_seconds=_timeout(args, 300),
+    )
+
+
 def get_cfg(args):
     job = core._job_dir(str(args.get("job_id", "")))
     return _pu_call(
@@ -159,6 +177,7 @@ core.TOOL_HANDLERS.update({
     "build_program_index": build_program_index,
     "find_symbols": find_symbols,
     "find_xrefs": find_xrefs,
+    "trace_call_path": trace_call_path,
     "get_cfg": get_cfg,
     "identify_protector": identify_protector,
     "extract_network_model": extract_network_model,
@@ -209,6 +228,26 @@ core.TOOLS.extend([
                 "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 3600, "default": 300}
             },
             "required": ["job_id", "query"],
+            "additionalProperties": False
+        }
+    },
+    {
+        "name": "trace_call_path",
+        "description": "Find bounded shortest method-call paths between source and target symbol queries using the indexed DEX XREF graph. Broad queries remain explicit candidate sets; call paths are not data-flow proof.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "job_id": {"type": "string"},
+                "source": {"type": "string", "minLength": 1, "maxLength": 512},
+                "target": {"type": "string", "minLength": 1, "maxLength": 512},
+                "direction": {"type": "string", "enum": ["forward", "reverse"], "default": "forward"},
+                "max_depth": {"type": "integer", "minimum": 1, "maximum": 32, "default": 12},
+                "max_paths": {"type": "integer", "minimum": 1, "maximum": 50, "default": 20},
+                "max_visited_nodes": {"type": "integer", "minimum": 200, "maximum": 200000, "default": 50000},
+                "max_scanned_edges": {"type": "integer", "minimum": 100, "maximum": 500000, "default": 200000},
+                "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 3600, "default": 300}
+            },
+            "required": ["job_id", "source", "target"],
             "additionalProperties": False
         }
     },

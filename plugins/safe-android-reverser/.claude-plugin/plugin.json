@@ -1,7 +1,7 @@
 {
   "name": "safe-android-reverser",
-  "version": "0.2.0",
-  "description": "Sandboxed Android reverse engineering with semantic program indexing, XREF/CFG queries and structured network evidence through MCP.",
+  "version": "0.2.1",
+  "description": "Sandboxed Android reverse engineering with semantic program indexing, XREF/CFG queries, bounded call-path tracing and structured network evidence through MCP.",
   "author": {
     "name": "salingnh"
   },
@@ -14,6 +14,7 @@
     "jadx",
     "androguard",
     "program-analysis",
+    "call-graph",
     "mcp",
     "sandbox",
     "security"

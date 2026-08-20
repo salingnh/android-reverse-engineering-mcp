@@ -4,6 +4,7 @@ import shutil
 from typing import Any
 
 import program_understanding as legacy
+import pu_call_path
 import pu_index
 import pu_network
 
@@ -40,6 +41,32 @@ def find_symbols(job, workspace, query, *, limit=100):
 
 def find_xrefs(job, workspace, query, *, direction="both", limit=200):
     return pu_index.find_xrefs(job, workspace, capabilities(), query, direction=direction, limit=limit)
+
+
+def trace_call_path(
+    job,
+    workspace,
+    source,
+    target,
+    *,
+    direction="forward",
+    max_depth=12,
+    max_paths=20,
+    max_visited_nodes=50_000,
+    max_scanned_edges=200_000,
+):
+    return pu_call_path.trace_call_path(
+        job,
+        workspace,
+        capabilities(),
+        source,
+        target,
+        direction=direction,
+        max_depth=max_depth,
+        max_paths=max_paths,
+        max_visited_nodes=max_visited_nodes,
+        max_scanned_edges=max_scanned_edges,
+    )
 
 
 def get_cfg(job, workspace, query, *, max_blocks=500):

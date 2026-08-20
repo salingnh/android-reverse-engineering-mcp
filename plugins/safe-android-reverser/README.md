@@ -29,7 +29,7 @@ Inside Claude Code:
 
 No manual `podman pull`, `podman run`, environment variables, or `claude mcp add` command are required for the default path.
 
-### 3. Verify MCP 0.2.0
+### 3. Verify MCP 0.2.1
 
 ```text
 /mcp
@@ -45,10 +45,11 @@ Call health and report:
 - Androguard availability
 - semantic program-understanding capabilities
 - program-index storage type
+- call-path capability
 Do not analyze an artifact yet.
 ```
 
-The standard 0.2.0 image should report Androguard, XREF/CFG support and SQLite program-index storage as available. APKiD may be unavailable because it remains an optional external analyzer in this profile.
+The standard 0.2.1 image should report Androguard, XREF/CFG support, bounded call-path traversal and SQLite program-index storage as available. APKiD may be unavailable because it remains an optional external analyzer in this profile.
 
 ### 4. Analyze an APK/XAPK
 
@@ -78,11 +79,12 @@ health
   -> build_program_index
   -> extract_network_model
   -> find_symbols / find_xrefs
+  -> trace_call_path when source and target anchors are known
   -> get_cfg only where control-flow detail is useful
   -> targeted search_source / read_source_file for evidence verification
 ```
 
-Do not describe XREF adjacency as proven data-flow.
+Do not describe XREF or call-path adjacency as proven data-flow.
 
 ## Automatic container lifecycle
 
@@ -93,12 +95,13 @@ Claude Code
   -> safe-reverser-mcp wrapper
       -> detect Podman/Docker
       -> create plugin data directory
-      -> pull ghcr.io/salingnh/safe-android-reverser:0.2.0 when missing
+      -> pull ghcr.io/salingnh/safe-android-reverser:0.2.1 when missing
       -> podman/docker run --rm -i
-          -> MCP 0.2.0
+          -> MCP 0.2.1
               -> JADX / Vineflower
               -> Androguard DEX/XREF/CFG
               -> indexed SQLite program graph
+              -> bounded shortest call-path traversal
               -> structured network evidence
 ```
 
@@ -115,7 +118,7 @@ so `/data` remains writable without root or recursive ownership changes on the h
 
 ```text
 SAFE_REVERSER_RUNTIME=auto
-SAFE_REVERSER_IMAGE=ghcr.io/salingnh/safe-android-reverser:0.2.0
+SAFE_REVERSER_IMAGE=ghcr.io/salingnh/safe-android-reverser:0.2.1
 SAFE_REVERSER_AUTO_PULL=1
 SAFE_REVERSER_MEMORY=4g
 SAFE_REVERSER_CPUS=2
@@ -143,18 +146,21 @@ recover_kotlin_names
 list_jobs
 ```
 
-Semantic 0.2.0 layer:
+Semantic 0.2.1 layer:
 
 ```text
 build_program_index
 find_symbols
 find_xrefs
+trace_call_path
 get_cfg
 identify_protector
 extract_network_model
 ```
 
 `build_program_index` uses one cross-split DEX analysis graph for APK bundles when Androguard succeeds and stores the canonical method/call-edge index in SQLite. A lower-confidence source declaration fallback is retained for malformed/protected artifacts.
+
+`trace_call_path` performs deterministic bounded breadth-first traversal over the indexed XREF graph. It returns shortest paths with exact method IDs, keeps broad query matches as explicit candidate sets, supports forward/reverse traversal, and reports index/search truncation rather than presenting incomplete negatives as conclusive.
 
 `extract_network_model` resolves Retrofit endpoints conservatively against class + method + parameter count. Ambiguous symbols are reported as ambiguous and do not receive a union of unrelated callers.
 
@@ -172,6 +178,7 @@ If the sandbox cannot start, the plugin reports the setup problem instead of fal
 
 - Installation and troubleshooting: [`../../docs/INSTALL_MCP.md`](../../docs/INSTALL_MCP.md)
 - Phase 1 implementation: [`../../docs/PROGRAM_UNDERSTANDING_PHASE1.md`](../../docs/PROGRAM_UNDERSTANDING_PHASE1.md)
+- M1 call-path traversal: [`../../docs/TRACE_CALL_PATH.md`](../../docs/TRACE_CALL_PATH.md)
 - Roadmap: [`../../docs/ROADMAP.md`](../../docs/ROADMAP.md)
 - Research: [`../../docs/research/AI_AGENT_PROGRAM_UNDERSTANDING.md`](../../docs/research/AI_AGENT_PROGRAM_UNDERSTANDING.md)
 

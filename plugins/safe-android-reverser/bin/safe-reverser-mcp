@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-IMAGE="${SAFE_REVERSER_IMAGE:-ghcr.io/salingnh/safe-android-reverser:0.2.0}"
+IMAGE="${SAFE_REVERSER_IMAGE:-ghcr.io/salingnh/safe-android-reverser:0.2.1}"
 RUNTIME="${SAFE_REVERSER_RUNTIME:-auto}"
 PROJECT_DIR="${SAFE_REVERSER_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}"
 DATA_DIR="${SAFE_REVERSER_DATA_DIR:-${CLAUDE_PLUGIN_DATA:-$HOME/.local/share/safe-android-reverser}}"

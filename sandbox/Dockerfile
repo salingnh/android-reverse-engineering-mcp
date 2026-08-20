@@ -54,12 +54,13 @@ COPY sandbox/program_understanding.py /opt/safe-reverser/program_understanding.p
 COPY sandbox/program_understanding_v2.py /opt/safe-reverser/program_understanding_v2.py
 COPY sandbox/pu_source.py /opt/safe-reverser/pu_source.py
 COPY sandbox/pu_index.py /opt/safe-reverser/pu_index.py
+COPY sandbox/pu_call_path.py /opt/safe-reverser/pu_call_path.py
 COPY sandbox/pu_network.py /opt/safe-reverser/pu_network.py
 COPY sandbox/mcp_server_v2.py /opt/safe-reverser/mcp_server_v2.py
 
 RUN ln -s /opt/jadx/bin/jadx /usr/local/bin/jadx \
- && PYTHONPATH=/opt/python-site:/opt/safe-reverser python3 -c 'import program_understanding_v2 as pu; caps=pu.capabilities(); assert caps["androguard"], caps' \
- && chmod 0555 /opt/safe-reverser/mcp_server.py /opt/safe-reverser/mcp_server_v2.py /opt/safe-reverser/program_understanding.py /opt/safe-reverser/program_understanding_v2.py /opt/safe-reverser/pu_source.py /opt/safe-reverser/pu_index.py /opt/safe-reverser/pu_network.py \
+ && PYTHONPATH=/opt/python-site:/opt/safe-reverser python3 -c 'import program_understanding_v2 as pu; caps=pu.capabilities(); assert caps["androguard"], caps; assert callable(pu.trace_call_path)' \
+ && chmod 0555 /opt/safe-reverser/mcp_server.py /opt/safe-reverser/mcp_server_v2.py /opt/safe-reverser/program_understanding.py /opt/safe-reverser/program_understanding_v2.py /opt/safe-reverser/pu_source.py /opt/safe-reverser/pu_index.py /opt/safe-reverser/pu_call_path.py /opt/safe-reverser/pu_network.py \
  && chmod -R a-w /opt/jadx /opt/vineflower /opt/python-site /opt/safe-reverser
 
 ENV SAFE_REVERSER_WORKSPACE=/workspace \

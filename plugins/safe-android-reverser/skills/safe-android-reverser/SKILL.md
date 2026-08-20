@@ -1,7 +1,7 @@
 ---
 name: Safe Android Reverser
 description: Safely fingerprint, decompile, index, trace, and extract Android program/network evidence using the safe-android-reverser MCP server. Use for APK/XAPK/APKS/APKM/JAR/AAR reverse engineering when host isolation is required.
-trigger: safe reverse Android|sandbox APK|reverse APK safely|analyze APK|decompile APK|extract Android API|trace Android flow|find xrefs|MCP reverse engineering|safe jadx
+trigger: safe reverse Android|sandbox APK|reverse APK safely|analyze APK|decompile APK|extract Android API|trace Android flow|find xrefs|trace call path|MCP reverse engineering|safe jadx
 ---
 
 # Safe Android Reverser
@@ -21,7 +21,7 @@ Use the bundled `safe-android-reverser` MCP server for all reverse-engineering e
 
 ### Phase 0 — Health
 
-Call `health` first. Expect `jadx`, `java`, `vineflower`, and on image 0.2.0 `androguard` to be available. The wrapper automatically detects Podman/Docker, pulls the pinned image on first use, and starts the ephemeral MCP container.
+Call `health` first. Expect `jadx`, `java`, `vineflower`, and on image 0.2.1 `androguard` to be available. The wrapper automatically detects Podman/Docker, pulls the pinned image on first use, and starts the ephemeral MCP container.
 
 ### Phase 1 — Fingerprint and routing
 
@@ -62,8 +62,11 @@ If DEX analysis fails on malformed/protected input, the MCP may fall back to a l
 Use:
 
 - `find_symbols` to localize classes/methods;
-- `find_xrefs` for incoming/outgoing callers/callees;
+- `find_xrefs` for one-hop incoming/outgoing callers/callees;
+- `trace_call_path` for bounded shortest paths across multiple XREF hops;
 - `get_cfg` only when block-level control flow is needed.
+
+`trace_call_path` returns exact symbol IDs and explicit candidate sets. Broad queries are not silently merged. Treat any `truncated=true` result as incomplete, and never interpret a missing path as conclusive when the index or traversal budget was truncated.
 
 Do not replace XREF analysis with broad source grep unless semantic indexing is unavailable.
 
@@ -86,7 +89,8 @@ For questions such as “How does login work?” or “Where is this endpoint ca
 
 ```text
 find_symbols(anchor)
-  -> find_xrefs(anchor, incoming/outgoing)
+  -> trace_call_path(source, target) when both anchors are known
+  -> find_xrefs(anchor) for local expansion
   -> extract_network_model
   -> get_cfg only for ambiguous branches
   -> search_source/read_source_file only for high-signal evidence
@@ -102,7 +106,7 @@ Typical flow anchors:
 6. auth/signature helper
 7. response/state/UI consumer
 
-Phase 0.2 does not yet provide full interprocedural `trace_value`; do not claim true data-flow solely from XREF adjacency.
+`trace_call_path` is call/XREF evidence only. Version 0.2.1 does not yet provide full interprocedural `trace_value`; do not claim true data-flow solely from call-path adjacency.
 
 ### Phase 6 — Kotlin name evidence
 
@@ -118,12 +122,12 @@ Report high-level behavior and attach evidence to each important conclusion:
 For auth/payment/signing/user-requested flows include:
 
 - entry point;
-- call-flow neighborhood;
+- call-flow neighborhood/path;
 - request construction;
 - headers/auth/signing evidence;
 - request/response model hints;
 - response/state handling when verified;
-- uncertainty and obfuscation notes.
+- uncertainty, graph truncation and obfuscation notes.
 
 ## Current semantic MCP tools
 
@@ -135,6 +139,7 @@ extract_api
 build_program_index
 find_symbols
 find_xrefs
+trace_call_path
 get_cfg
 identify_protector
 extract_network_model
