@@ -26,17 +26,21 @@ sandbox.
 ## Build
 
 ```bash
+set -a
 source sandbox/tools.lock.env
+set +a
 docker build \
   -f sandbox/Dockerfile \
   --build-arg JADX_VERSION="$JADX_VERSION" \
+  --build-arg JADX_SHA256="$JADX_SHA256" \
   --build-arg VINEFLOWER_VERSION="$VINEFLOWER_VERSION" \
+  ${VINEFLOWER_SHA256:+--build-arg VINEFLOWER_SHA256="$VINEFLOWER_SHA256"} \
   -t safe-android-reverser:dev .
 ```
 
-For stronger supply-chain verification, pass independently verified SHA-256 values as
-`JADX_SHA256` and `VINEFLOWER_SHA256`. The GitHub workflow also publishes SBOM/provenance
-metadata for GHCR builds.
+JADX is pinned to 1.5.6 and its release ZIP is SHA-256 verified. Vineflower is version-pinned;
+record an independently verified `VINEFLOWER_SHA256` before treating the build as fully
+artifact-pinned. GHCR builds also request BuildKit SBOM and provenance metadata.
 
 ## Local MCP smoke test
 

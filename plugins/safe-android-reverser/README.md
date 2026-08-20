@@ -10,7 +10,7 @@ The original workflow can install dependencies and run decompilers directly on t
 This variant keeps the LLM-facing workflow but moves binary parsing/decompilation into an
 isolated container with an allow-listed MCP API.
 
-## Install from this repository's marketplace
+## Install from the marketplace after merge
 
 Inside Claude Code:
 
@@ -23,15 +23,42 @@ Inside Claude Code:
 Claude Code plugins can bundle MCP servers; when the plugin is enabled, its `.mcp.json` server
 starts automatically.
 
-## Install the sandbox image
+## Test the feature branch before merge
 
-Rootless Podman is recommended:
+The marketplace can be pinned to the feature branch:
+
+```text
+/plugin marketplace add salingnh/android-reverse-engineering-skill@feat/safe-sandbox-plugin
+/plugin install safe-android-reverser@salingnh-reverse-tools
+/reload-plugins
+```
+
+The feature branch CI builds the image but deliberately does not publish a production tag.
+Build a local image from the branch and point the plugin at it:
+
+```bash
+git clone --branch feat/safe-sandbox-plugin https://github.com/salingnh/android-reverse-engineering-skill.git
+cd android-reverse-engineering-skill
+set -a
+source sandbox/tools.lock.env
+set +a
+docker build -f sandbox/Dockerfile \
+  --build-arg JADX_VERSION="$JADX_VERSION" \
+  --build-arg JADX_SHA256="$JADX_SHA256" \
+  --build-arg VINEFLOWER_VERSION="$VINEFLOWER_VERSION" \
+  -t safe-android-reverser:dev .
+export SAFE_REVERSER_IMAGE=safe-android-reverser:dev
+```
+
+## Install the released sandbox image
+
+After the safe plugin is merged to `master`, the workflow publishes:
 
 ```bash
 podman pull ghcr.io/salingnh/safe-android-reverser:0.1.0
 ```
 
-Or Docker:
+or:
 
 ```bash
 docker pull ghcr.io/salingnh/safe-android-reverser:0.1.0
@@ -77,8 +104,8 @@ tools rather than giving the model unrestricted filesystem execution inside the 
 Included in the image:
 
 - Java 21 runtime
-- JADX 1.5.5
-- Vineflower 1.12.0
+- JADX 1.5.6 with a pinned SHA-256 release ZIP
+- Vineflower 1.12.0 (version-pinned; checksum hardening remains to be completed)
 - Python stdlib MCP server implementation
 
 Not included in this profile:

@@ -1,9 +1,9 @@
 # syntax=docker/dockerfile:1.7
 FROM eclipse-temurin:21-jdk-jammy AS tools
 
-ARG JADX_VERSION=1.5.5
+ARG JADX_VERSION=1.5.6
+ARG JADX_SHA256=545ea2be9c242511bc145755cf4bda2485ade42966e096f8b4d3da2a230e8974
 ARG VINEFLOWER_VERSION=1.12.0
-ARG JADX_SHA256=""
 ARG VINEFLOWER_SHA256=""
 
 RUN apt-get update \
@@ -12,7 +12,8 @@ RUN apt-get update \
 
 RUN set -eux; \
     curl -fsSL "https://github.com/skylot/jadx/releases/download/v${JADX_VERSION}/jadx-${JADX_VERSION}.zip" -o /tmp/jadx.zip; \
-    if [ -n "$JADX_SHA256" ]; then echo "$JADX_SHA256  /tmp/jadx.zip" | sha256sum -c -; fi; \
+    test -n "$JADX_SHA256"; \
+    echo "$JADX_SHA256  /tmp/jadx.zip" | sha256sum -c -; \
     mkdir -p /opt/jadx; \
     unzip -q /tmp/jadx.zip -d /opt/jadx; \
     test -x /opt/jadx/bin/jadx
