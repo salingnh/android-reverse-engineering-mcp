@@ -8,6 +8,7 @@ trap 'rm -rf "$TMP"' EXIT
 
 mkdir -p "$TMP/bin" "$TMP/project" "$TMP/data"
 LOG="$TMP/podman.log"
+STATE="$TMP/image-present"
 
 cat > "$TMP/bin/podman" <<'EOF'
 #!/usr/bin/env bash
@@ -17,9 +18,11 @@ for arg in "$@"; do printf ' <%s>' "$arg" >> "$PODMAN_LOG"; done
 printf '\n' >> "$PODMAN_LOG"
 
 if [[ "${1:-}" == "image" && "${2:-}" == "inspect" ]]; then
-  exit 1
+  [[ -f "$PODMAN_STATE" ]]
+  exit $?
 fi
 if [[ "${1:-}" == "pull" ]]; then
+  touch "$PODMAN_STATE"
   exit 0
 fi
 if [[ "${1:-}" == "run" ]]; then
@@ -30,6 +33,7 @@ EOF
 chmod +x "$TMP/bin/podman"
 
 PODMAN_LOG="$LOG" \
+PODMAN_STATE="$STATE" \
 PATH="$TMP/bin:$PATH" \
 SAFE_REVERSER_RUNTIME=podman \
 SAFE_REVERSER_PROJECT_DIR="$TMP/project" \
@@ -44,9 +48,11 @@ grep -F "<--user=$(id -u):$(id -g)>" "$LOG" >/dev/null
 grep -F "<--volume=$TMP/project:/workspace:ro,z>" "$LOG" >/dev/null
 grep -F "<--volume=$TMP/data:/data:rw,z>" "$LOG" >/dev/null
 
+rm -f "$STATE"
 : > "$LOG"
 set +e
 PODMAN_LOG="$LOG" \
+PODMAN_STATE="$STATE" \
 PATH="$TMP/bin:$PATH" \
 SAFE_REVERSER_RUNTIME=podman \
 SAFE_REVERSER_PROJECT_DIR="$TMP/project" \
