@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import json
-import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -79,13 +78,30 @@ class TraceCallPathTests(unittest.TestCase):
             first = self.trace(job, workspace, "p.A start", "p.D target")
             second = self.trace(job, workspace, "p.A start", "p.D target")
             expected = [["A", "B", "D"], ["A", "C", "D"]]
-            self.assertEqual([[n["id"] for n in p["nodes"]] for p in first["paths"]], expected)
+            self.assertEqual([p["node_ids"] for p in first["paths"]], expected)
             self.assertEqual(first["paths"], second["paths"])
             self.assertEqual(first["shortest_depth"], 2)
             self.assertFalse(first["truncated"])
             self.assertTrue(first["search_complete"])
+            self.assertFalse(first["response_truncated"])
         finally:
             tmp.cleanup()
+
+    def test_duplicate_callsites_collapse_to_one_logical_path(self):
+        tmp, workspace, job, conn = self.make_graph()
+        try:
+            for symbol_id in "ABT": self.method(conn, symbol_id, f"p.{symbol_id}", symbol_id.lower())
+            self.edge(conn, "A", "B", 9)
+            self.edge(conn, "A", "B", 2)
+            self.edge(conn, "A", "B", 5)
+            self.edge(conn, "B", "T", 1)
+            conn.commit(); conn.close()
+            result = self.trace(job, workspace, "A", "T")
+            self.assertEqual(len(result["paths"]), 1)
+            self.assertEqual(result["paths"][0]["node_ids"], ["A", "B", "T"])
+            self.assertEqual(result["paths"][0]["edges"][0]["offset"], 2)
+            self.assertNotIn("path_limit", result["truncation_reasons"])
+        finally: tmp.cleanup()
 
     def test_cycle_does_not_loop(self):
         tmp, workspace, job, conn = self.make_graph()
@@ -106,7 +122,7 @@ class TraceCallPathTests(unittest.TestCase):
             self.edge(conn, "A", "B", 1); self.edge(conn, "B", "C", 2)
             conn.commit(); conn.close()
             result = self.trace(job, workspace, "C", "A", direction="reverse")
-            self.assertEqual([n["id"] for n in result["paths"][0]["nodes"]], ["C", "B", "A"])
+            self.assertEqual(result["paths"][0]["node_ids"], ["C", "B", "A"])
             edge = result["paths"][0]["edges"][0]
             self.assertEqual((edge["caller"], edge["callee"]), ("B", "C"))
             self.assertEqual((edge["traversal_from"], edge["traversal_to"]), ("C", "B"))
@@ -127,7 +143,7 @@ class TraceCallPathTests(unittest.TestCase):
             result = self.trace(job, workspace, "Entry start", "login")
             self.assertEqual(result["target_resolution"]["status"], "candidate-set")
             self.assertEqual(result["target_resolution"]["candidate_count"], 3)
-            self.assertEqual([n["id"] for n in result["paths"][0]["nodes"]], ["E", "L1"])
+            self.assertEqual(result["paths"][0]["node_ids"], ["E", "L1"])
         finally: tmp.cleanup()
 
     def test_zero_length_path(self):
@@ -136,7 +152,7 @@ class TraceCallPathTests(unittest.TestCase):
             self.method(conn, "A", "p.A", "a"); conn.commit(); conn.close()
             result = self.trace(job, workspace, "A", "A")
             self.assertEqual(result["shortest_depth"], 0)
-            self.assertEqual([n["id"] for n in result["paths"][0]["nodes"]], ["A"])
+            self.assertEqual(result["paths"][0]["node_ids"], ["A"])
             self.assertEqual(result["paths"][0]["edges"], [])
         finally: tmp.cleanup()
 
@@ -177,7 +193,7 @@ class TraceCallPathTests(unittest.TestCase):
             self.assertEqual(result["stats"]["scanned_edges"], 100)
         finally: tmp.cleanup()
 
-    def test_path_limit_only_when_more_paths_exist(self):
+    def test_path_limit_only_when_more_logical_paths_exist(self):
         tmp, workspace, job, conn = self.make_graph()
         try:
             self.method(conn, "A", "p.A", "a"); self.method(conn, "T", "p.T", "t")
@@ -230,9 +246,26 @@ class TraceCallPathTests(unittest.TestCase):
             self.edge(conn, "A", "external-X"); self.edge(conn, "external-X", "B")
             conn.commit(); conn.close()
             result = self.trace(job, workspace, "A", "B")
-            nodes = result["paths"][0]["nodes"]
-            self.assertEqual([node["id"] for node in nodes], ["A", "external-X", "B"])
-            self.assertIsNone(nodes[1]["external"])
+            self.assertEqual(result["paths"][0]["node_ids"], ["A", "external-X", "B"])
+        finally: tmp.cleanup()
+
+    def test_response_budget_preserves_valid_bounded_json(self):
+        tmp, workspace, job, conn = self.make_graph()
+        try:
+            self.method(conn, "A", "p.A", "a"); self.method(conn, "T", "p.T", "t")
+            for index in range(50):
+                mid = f"M{index}-" + ("x" * 3500)
+                self.method(conn, mid, f"p.C{index}", "m")
+                self.edge(conn, "A", mid, index)
+                self.edge(conn, mid, "T", index)
+            conn.commit(); conn.close()
+            result = self.trace(job, workspace, "A", "T", max_paths=50)
+            encoded = json.dumps(result, ensure_ascii=False, separators=(",", ":"))
+            self.assertTrue(result["found"])
+            self.assertTrue(result["response_truncated"])
+            self.assertIn("response_budget", result["truncation_reasons"])
+            self.assertGreater(result["paths_omitted_due_response_budget"], 0)
+            self.assertLessEqual(len(encoded), pu_call_path.MAX_RESPONSE_CHARS)
         finally: tmp.cleanup()
 
     def test_large_graph_100k_methods_250k_edges(self):

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from collections import defaultdict
 from contextlib import contextmanager
 from pathlib import Path
@@ -12,6 +13,7 @@ MAX_PATHS = 50
 MAX_VISITED_NODES = 200_000
 MAX_SCANNED_EDGES = 500_000
 MAX_CANDIDATES = 200
+MAX_RESPONSE_CHARS = 150_000
 SQL_BATCH = 400
 
 
@@ -56,11 +58,14 @@ def _resolution(rows: list[Any], truncated: bool) -> dict[str, Any]:
         status = "resolved"
     else:
         status = "candidate-set"
+    candidates = [row["id"] for row in rows]
     return {
         "status": status,
         "candidate_count": len(rows),
         "truncated": truncated,
-        "candidates": [pu_index.method_row(row) for row in rows],
+        "candidates": candidates,
+        "candidates_returned": len(candidates),
+        "candidates_omitted_due_response_budget": 0,
     }
 
 
@@ -91,8 +96,7 @@ def _edge_dict(row: Any, direction: str) -> dict[str, Any]:
 def _frontier_edges(conn, frontier: list[str], direction: str, budget: int) -> tuple[list[Any], bool]:
     field = "caller" if direction == "forward" else "callee"
     output: list[Any] = []
-    chunks = list(_chunks(sorted(frontier)))
-    for chunk in chunks:
+    for chunk in _chunks(sorted(frontier)):
         remaining = budget - len(output)
         marks = ",".join("?" for _ in chunk)
         if remaining <= 0:
@@ -116,18 +120,6 @@ def _frontier_edges(conn, frontier: list[str], direction: str, budget: int) -> t
     return output, False
 
 
-def _load_methods(conn, ids: set[str]) -> dict[str, dict[str, Any]]:
-    output: dict[str, dict[str, Any]] = {}
-    values = sorted(ids)
-    for chunk in _chunks(values):
-        marks = ",".join("?" for _ in chunk)
-        for row in conn.execute(f"SELECT * FROM methods WHERE id IN ({marks})", chunk):
-            output[row["id"]] = pu_index.method_row(row)
-    for symbol_id in values:
-        output.setdefault(symbol_id, {"id": symbol_id, "external": None, "source": {}})
-    return output
-
-
 def _enumerate_paths(
     target_ids: list[str],
     source_ids: set[str],
@@ -135,7 +127,7 @@ def _enumerate_paths(
     max_paths: int,
 ) -> tuple[list[tuple[list[str], list[dict[str, Any]]]], bool]:
     output: list[tuple[list[str], list[dict[str, Any]]]] = []
-    seen: set[tuple[tuple[str, ...], tuple[tuple[Any, ...], ...]]] = set()
+    seen_node_paths: set[tuple[str, ...]] = set()
     hard_limit = max_paths + 1
 
     def walk(node: str, reversed_nodes: list[str], reversed_edges: list[dict[str, Any]]) -> None:
@@ -143,15 +135,10 @@ def _enumerate_paths(
             return
         if node in source_ids:
             nodes = list(reversed(reversed_nodes))
-            edges = list(reversed(reversed_edges))
-            edge_key = tuple(
-                (edge["caller"], edge["callee"], edge["offset"], edge["kind"])
-                for edge in edges
-            )
-            key = (tuple(nodes), edge_key)
-            if key not in seen:
-                seen.add(key)
-                output.append((nodes, edges))
+            key = tuple(nodes)
+            if key not in seen_node_paths:
+                seen_node_paths.add(key)
+                output.append((nodes, list(reversed(reversed_edges))))
             return
         for previous, edge in sorted(
             parents.get(node, []),
@@ -168,6 +155,51 @@ def _enumerate_paths(
         if len(output) >= hard_limit:
             break
     return output[:max_paths], len(output) > max_paths
+
+
+def _response_chars(value: dict[str, Any]) -> int:
+    return len(json.dumps(value, ensure_ascii=False, separators=(",", ":")))
+
+
+def _fit_response(response: dict[str, Any]) -> dict[str, Any]:
+    response["response_budget_chars"] = MAX_RESPONSE_CHARS
+    response["response_truncated"] = False
+    if _response_chars(response) <= MAX_RESPONSE_CHARS:
+        return response
+
+    response["response_truncated"] = True
+    response["truncated"] = True
+    response["search_complete"] = False
+    reasons = response.setdefault("truncation_reasons", [])
+    if "response_budget" not in reasons:
+        reasons.append("response_budget")
+
+    original_path_count = len(response.get("paths", []))
+    while response.get("paths") and _response_chars(response) > MAX_RESPONSE_CHARS:
+        response["paths"].pop()
+    response["paths_returned"] = len(response.get("paths", []))
+    response["paths_omitted_due_response_budget"] = original_path_count - response["paths_returned"]
+
+    if _response_chars(response) > MAX_RESPONSE_CHARS:
+        for key in ("source_resolution", "target_resolution"):
+            resolution = response.get(key) or {}
+            candidates = resolution.get("candidates") or []
+            if candidates:
+                resolution["candidates_omitted_due_response_budget"] = len(candidates)
+                resolution["candidates_returned"] = 0
+                resolution["candidates"] = []
+
+    if _response_chars(response) > MAX_RESPONSE_CHARS:
+        response["notes"] = ["Detailed call-path evidence was omitted because the bounded MCP response budget was reached."]
+
+    if _response_chars(response) > MAX_RESPONSE_CHARS:
+        response["paths"] = []
+        response["paths_returned"] = 0
+        response["paths_omitted_due_response_budget"] = original_path_count
+
+    if _response_chars(response) > MAX_RESPONSE_CHARS:
+        raise RuntimeError("call-path response metadata exceeds bounded MCP response budget")
+    return response
 
 
 def trace_call_path(
@@ -218,46 +250,52 @@ def trace_call_path(
             initial_truncation_reasons.append("target_candidates_truncated")
 
         if analysis_kind != "dex-xref":
-            return {
+            return _fit_response({
                 **base,
                 "available": False,
                 "unavailable_reason": "program_index_has_no_dex_xref_graph",
                 "found": False,
                 "shortest_depth": None,
                 "paths": [],
+                "paths_found_before_response_budget": 0,
+                "paths_returned": 0,
+                "paths_omitted_due_response_budget": 0,
                 "truncated": bool(initial_truncation_reasons),
                 "truncation_reasons": initial_truncation_reasons,
                 "resolution_reasons": [],
                 "search_complete": False,
                 "stats": {"visited_nodes": 0, "scanned_edges": 0, "expanded_depth": 0},
                 "notes": ["Call-path traversal requires a DEX XREF index; source fallback does not claim call edges."],
-            }
+            })
         if not source_rows or not target_rows:
             resolution_reasons = []
             if not source_rows:
                 resolution_reasons.append("source_unresolved")
             if not target_rows:
                 resolution_reasons.append("target_unresolved")
-            return {
+            return _fit_response({
                 **base,
                 "available": True,
                 "unavailable_reason": None,
                 "found": False,
                 "shortest_depth": None,
                 "paths": [],
+                "paths_found_before_response_budget": 0,
+                "paths_returned": 0,
+                "paths_omitted_due_response_budget": 0,
                 "truncated": bool(initial_truncation_reasons),
                 "truncation_reasons": initial_truncation_reasons,
                 "resolution_reasons": resolution_reasons,
                 "search_complete": False,
                 "stats": {"visited_nodes": 0, "scanned_edges": 0, "expanded_depth": 0},
                 "notes": ["No traversal is attempted until both endpoint queries resolve to at least one exact symbol candidate."],
-            }
+            })
 
         source_ids = {row["id"] for row in source_rows}
         target_ids = {row["id"] for row in target_rows}
         overlap = sorted(source_ids & target_ids)
         parents: dict[str, list[tuple[str, dict[str, Any]]]] = defaultdict(list)
-        parent_keys: dict[str, set[tuple[Any, ...]]] = defaultdict(set)
+        parent_nodes: dict[str, set[str]] = defaultdict(set)
         distance = {symbol_id: 0 for symbol_id in source_ids}
         scanned_edges = 0
         expanded_depth = 0
@@ -289,11 +327,9 @@ def trace_call_path(
                             break
                         distance[neighbour] = depth + 1
                         next_frontier.add(neighbour)
-                    if distance.get(neighbour) == depth + 1:
-                        key = (current, edge["caller"], edge["callee"], edge["offset"], edge["kind"])
-                        if key not in parent_keys[neighbour]:
-                            parent_keys[neighbour].add(key)
-                            parents[neighbour].append((current, edge))
+                    if distance.get(neighbour) == depth + 1 and current not in parent_nodes[neighbour]:
+                        parent_nodes[neighbour].add(current)
+                        parents[neighbour].append((current, edge))
                 layer_targets = sorted(target_ids & next_frontier)
                 if layer_targets:
                     found_depth = depth + 1
@@ -314,12 +350,8 @@ def trace_call_path(
             _enumerate_paths(found_targets, source_ids, parents, max_paths)
             if found_depth is not None else ([], False)
         )
-        node_ids: set[str] = set()
-        for nodes, _ in raw_paths:
-            node_ids.update(nodes)
-        methods = _load_methods(conn, node_ids)
         paths = [
-            {"depth": len(edges), "nodes": [methods[node] for node in nodes], "edges": edges}
+            {"depth": len(edges), "node_ids": nodes, "edges": edges}
             for nodes, edges in raw_paths
         ]
         reasons: list[str] = [*initial_truncation_reasons]
@@ -328,26 +360,34 @@ def trace_call_path(
         if path_overflow:
             reasons.append("path_limit")
         reasons = list(dict.fromkeys(reasons))
-        return {
+        result = {
             **base,
             "available": True,
             "unavailable_reason": None,
-            "found": bool(paths),
+            "found": bool(raw_paths),
             "shortest_depth": found_depth,
             "paths": paths,
+            "paths_found_before_response_budget": len(paths),
+            "paths_returned": len(paths),
+            "paths_omitted_due_response_budget": 0,
             "truncated": bool(reasons),
             "truncation_reasons": reasons,
             "resolution_reasons": [],
             "search_complete": not reasons,
             "stats": {
-                "visited_nodes": len(distance), "scanned_edges": scanned_edges, "expanded_depth": expanded_depth,
-                "max_depth": max_depth, "max_paths": max_paths,
-                "max_visited_nodes": max_visited_nodes, "max_scanned_edges": max_scanned_edges,
+                "visited_nodes": len(distance),
+                "scanned_edges": scanned_edges,
+                "expanded_depth": expanded_depth,
+                "max_depth": max_depth,
+                "max_paths": max_paths,
+                "max_visited_nodes": max_visited_nodes,
+                "max_scanned_edges": max_scanned_edges,
             },
             "notes": [
                 "Paths contain exact symbol IDs; broad endpoint queries remain explicit candidate sets and are never merged into synthetic methods.",
-                "Only shortest paths within the current XREF index are returned.",
-                "A missing path is conclusive only when candidate/index/search truncation is false.",
+                "Only logical shortest node paths within the current XREF index are returned; duplicate callsite offsets between the same method pair are collapsed to deterministic edge evidence.",
+                "A missing path is conclusive only when candidate/index/search/response truncation is false.",
                 "CALL/XREF adjacency is not data-flow evidence.",
             ],
         }
+        return _fit_response(result)

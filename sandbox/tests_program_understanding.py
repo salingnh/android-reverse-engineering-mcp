@@ -224,10 +224,7 @@ class AuthHeaders {
                 conn.commit()
             self.pu.find_symbols(job, workspace, "login")
             with self.index.connect(job) as conn:
-                self.assertEqual(
-                    self.index.meta_get(conn, "builder_version"),
-                    self.index.BUILDER_VERSION,
-                )
+                self.assertEqual(self.index.meta_get(conn, "builder_version"), self.index.BUILDER_VERSION)
         finally:
             tmp.cleanup()
 
@@ -266,6 +263,13 @@ class AuthHeaders {
             self.assertTrue(symbols["matches"])
             xrefs = self.pu.find_xrefs(job, workspace, "testObjectCalls", direction="outgoing")
             self.assertTrue(xrefs["xrefs"])
+            source_id = symbols["matches"][0]["id"]
+            target_id = xrefs["xrefs"][0]["to"]
+            call_path = self.pu.trace_call_path(job, workspace, source_id, target_id, max_depth=2)
+            self.assertTrue(call_path["available"])
+            self.assertTrue(call_path["found"])
+            self.assertEqual(call_path["shortest_depth"], 1)
+            self.assertEqual(call_path["paths"][0]["node_ids"], [source_id, target_id])
             cfg = self.pu.get_cfg(job, workspace, "testObjectCalls", max_blocks=50)
             self.assertTrue(cfg["matches"])
             self.assertTrue(cfg["matches"][0]["blocks"])

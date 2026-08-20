@@ -1,6 +1,6 @@
 # Install and use Safe Android Reverser MCP
 
-This is the recommended installation path for `safe-android-reverser` 0.2.0.
+This is the recommended installation path for `safe-android-reverser` 0.2.1.
 
 The normal user flow is intentionally short:
 
@@ -31,7 +31,7 @@ Claude Code
 safe-reverser-mcp wrapper
     ├─ prefer rootless Podman, otherwise Docker
     ├─ create plugin data directory
-    ├─ check ghcr.io/salingnh/safe-android-reverser:0.2.0
+    ├─ check ghcr.io/salingnh/safe-android-reverser:0.2.1
     ├─ pull the pinned image on first use
     ├─ map host UID/GID for writable /data
     └─ launch a locked-down ephemeral container
@@ -87,7 +87,7 @@ No separate MCP registration is required because the plugin bundles `.mcp.json`.
 On first startup the wrapper automatically pulls:
 
 ```text
-ghcr.io/salingnh/safe-android-reverser:0.2.0
+ghcr.io/salingnh/safe-android-reverser:0.2.1
 ```
 
 Subsequent sessions reuse the local image.
@@ -109,10 +109,11 @@ Call health and report:
 - JADX, Java and Vineflower availability
 - Androguard availability
 - program-understanding capabilities
+- call_path availability
 Do not analyze any artifact yet.
 ```
 
-For the standard 0.2.0 image, `health` should report Androguard and the semantic program index as available. APKiD protector detection is an optional external analyzer in this phase and may report unavailable.
+For the standard 0.2.1 image, `health` should report Androguard, SQLite semantic indexing, XREF/CFG and call-path traversal as available. APKiD protector detection is an optional external analyzer in this phase and may report unavailable.
 
 ## 4. Put an artifact under the project root
 
@@ -149,29 +150,24 @@ Required workflow:
 4. If native Android/Java/Kotlin analysis is appropriate, decompile with JADX and keep the returned job_id.
 5. Call build_program_index(job_id).
 6. Call extract_network_model(job_id).
-7. Use find_symbols and find_xrefs to trace important features/endpoints through their callers and callees.
-8. Use get_cfg only when branch/control-flow detail is required.
-9. Use search_source/read_source_file only for high-signal evidence that verifies the graph-based conclusion.
-10. Report:
-   - application/framework summary
-   - first-party hosts and endpoints
-   - declaring endpoint methods
-   - caller/callee flow for important endpoints
-   - request/response model hints
-   - authentication/signature/HMAC evidence
-   - strongest source/DEX evidence with confidence
-   - unresolved questions that require future data-flow/native/dynamic analysis
+7. Use find_symbols/find_xrefs for localization and one-hop call evidence.
+8. When both source and target anchors are known, use trace_call_path for bounded shortest multi-hop call paths.
+9. Treat any trace_call_path result with truncated=true as incomplete; do not infer that no path exists from a truncated negative.
+10. Use get_cfg only when branch/control-flow detail is required.
+11. Use search_source/read_source_file only for high-signal evidence that verifies the graph-based conclusion.
+12. Report graph/traversal truncation and unresolved questions explicitly.
 
 Do not use host JADX/Java/Androguard, host shell commands, sudo, install-dep.sh, or any non-MCP reverse-engineering path.
-Do not describe XREF adjacency as proven data-flow.
+Do not describe XREF/call-path adjacency as proven data-flow.
 ```
 
-The key 0.2.0 semantic MCP operations are:
+The key 0.2.1 semantic MCP operations are:
 
 ```text
 build_program_index
 find_symbols
 find_xrefs
+trace_call_path
 get_cfg
 identify_protector
 extract_network_model
@@ -185,7 +181,7 @@ Normal users do not need to configure environment variables.
 
 ```text
 SAFE_REVERSER_RUNTIME=auto
-SAFE_REVERSER_IMAGE=ghcr.io/salingnh/safe-android-reverser:0.2.0
+SAFE_REVERSER_IMAGE=ghcr.io/salingnh/safe-android-reverser:0.2.1
 SAFE_REVERSER_AUTO_PULL=1
 SAFE_REVERSER_MEMORY=4g
 SAFE_REVERSER_CPUS=2
@@ -229,7 +225,7 @@ podman run \
   --user="$(id -u):$(id -g)" \
   --volume="$PWD:/workspace:ro,z" \
   --volume="<plugin-data>:/data:rw,z" \
-  ghcr.io/salingnh/safe-android-reverser:0.2.0
+  ghcr.io/salingnh/safe-android-reverser:0.2.1
 ```
 
 The explicit host UID/GID keeps `/data` writable while the process remains non-root.
@@ -247,13 +243,13 @@ podman info
 Then check the image:
 
 ```bash
-podman image inspect ghcr.io/salingnh/safe-android-reverser:0.2.0
+podman image inspect ghcr.io/salingnh/safe-android-reverser:0.2.1
 ```
 
 Normal plugin startup pulls it automatically if missing. For diagnosis only:
 
 ```bash
-podman pull ghcr.io/salingnh/safe-android-reverser:0.2.0
+podman pull ghcr.io/salingnh/safe-android-reverser:0.2.1
 ```
 
 ### Manual MCP smoke test
@@ -282,7 +278,7 @@ printf '%s\n' \
     --user="$(id -u):$(id -g)" \
     --volume="$PWD:/workspace:ro,z" \
     --volume="$HOME/.local/share/safe-android-reverser:/data:rw,z" \
-    ghcr.io/salingnh/safe-android-reverser:0.2.0
+    ghcr.io/salingnh/safe-android-reverser:0.2.1
 ```
 
 A successful test returns JSON-RPC responses for initialize and health.
@@ -298,7 +294,7 @@ podman run \
   --user="$(id -u):$(id -g)" \
   --volume="$HOME/.local/share/safe-android-reverser:/data:rw,z" \
   --entrypoint /bin/sh \
-  ghcr.io/salingnh/safe-android-reverser:0.2.0 \
+  ghcr.io/salingnh/safe-android-reverser:0.2.1 \
   -lc 'id; mkdir -p /data/jobs; touch /data/jobs/write-test; ls -l /data/jobs/write-test'
 ```
 

@@ -2,14 +2,15 @@
 
 **MCP-first, sandboxed Android reverse engineering with semantic program understanding for AI agents.**
 
-Safe Android Reverser is evolving from a safe wrapper around decompilers into an **AI-native reverse code-intelligence platform**. The agent should not need to read an entire JADX tree to understand an application. MCP provides bounded semantic operations over symbols, XREFs, control flow, endpoints, authentication signals and evidence provenance.
+Safe Android Reverser is evolving from a safe wrapper around decompilers into an **AI-native reverse code-intelligence platform**. The agent should not need to read an entire JADX tree to understand an application. MCP provides bounded semantic operations over symbols, XREFs, call paths, control flow, endpoints, authentication signals and evidence provenance.
 
 > **The agent reasons. The MCP server controls. The sandbox executes.**
 
 ## Quick start
 
 Full installation guide: **[`docs/INSTALL_MCP.md`](docs/INSTALL_MCP.md)**  
-Implementation notes: **[`docs/PROGRAM_UNDERSTANDING_PHASE1.md`](docs/PROGRAM_UNDERSTANDING_PHASE1.md)**  
+Phase 1 implementation notes: **[`docs/PROGRAM_UNDERSTANDING_PHASE1.md`](docs/PROGRAM_UNDERSTANDING_PHASE1.md)**  
+Call-path milestone: **[`docs/TRACE_CALL_PATH.md`](docs/TRACE_CALL_PATH.md)**  
 Roadmap: **[`docs/ROADMAP.md`](docs/ROADMAP.md)**  
 Research: **[`docs/research/AI_AGENT_PROGRAM_UNDERSTANDING.md`](docs/research/AI_AGENT_PROGRAM_UNDERSTANDING.md)**
 
@@ -32,34 +33,26 @@ The wrapper automatically:
 ```text
 detects Podman/Docker
 → creates isolated plugin data
-→ pulls ghcr.io/salingnh/safe-android-reverser:0.2.0 if missing
+→ pulls ghcr.io/salingnh/safe-android-reverser:0.2.1 if missing
 → starts a locked-down ephemeral container
 → connects MCP over stdio
 ```
 
-## Why semantic program understanding
+## Semantic program understanding
 
-The 0.1.x baseline could answer questions such as:
-
-```text
-Which URLs exist?
-Which HTTP stack is present?
-Which source file contains "Authorization"?
-```
-
-The 0.2.0 direction adds the foundation for questions closer to how coding agents understand a source repository:
+The 0.1.x baseline answered inventory questions such as which URLs, HTTP stacks or source strings exist. The 0.2.x semantic layer adds bounded program-graph queries closer to how coding agents inspect a source repository:
 
 ```text
 Which method declares this endpoint?
 Who calls it?
-What call-flow neighborhood reaches it?
+What shortest call path connects these two methods?
 Which request/response models are nearby?
 Where are auth/signature signals introduced?
 What CFG branches exist inside this method?
 Which evidence supports the conclusion?
 ```
 
-The design deliberately distinguishes **call/XREF evidence** from future true interprocedural **data-flow evidence**. XREF adjacency must not be presented as proof that a value flows between two methods.
+The design deliberately distinguishes **call/XREF evidence** from true interprocedural **data-flow evidence**. A call path must never be presented as proof that a value flows along that path.
 
 ## Architecture
 
@@ -78,6 +71,7 @@ The design deliberately distinguishes **call/XREF evidence** from future true in
                        │                │
                   JADX/Vineflower       ├─ symbols
                                         ├─ DEX XREFs
+                                        ├─ bounded call paths
                                         ├─ CFG
                                         └─ evidence
                                              │
@@ -115,28 +109,31 @@ recover_kotlin_names
 list_jobs
 ```
 
-### Semantic 0.2.0 layer
+### Semantic 0.2.1 layer
 
 ```text
 build_program_index
 find_symbols
 find_xrefs
+trace_call_path
 get_cfg
 identify_protector
 extract_network_model
 ```
 
-`build_program_index` prefers Androguard DEX semantics and persists a bounded normalized method/call-edge index. If DEX semantic analysis cannot run, it may fall back to a lower-confidence source symbol index instead of failing the whole MCP session.
+`build_program_index` prefers Androguard DEX semantics and persists a bounded normalized method/call-edge index in SQLite. If DEX semantic analysis cannot run, it may fall back to a lower-confidence source symbol index instead of failing the whole MCP session.
 
 `find_symbols` localizes classes/methods without scanning the entire decompiled tree.
 
-`find_xrefs` returns bounded incoming/outgoing method XREFs. DEX XREF edges preserve analyzer provenance and bytecode offsets when available.
+`find_xrefs` returns bounded one-hop incoming/outgoing method XREFs. DEX XREF edges preserve analyzer provenance and bytecode offsets when available.
+
+`trace_call_path` performs deterministic bounded breadth-first traversal over indexed XREFs. It returns shortest logical method paths, supports forward/reverse traversal, keeps broad query matches as explicit candidate sets, collapses duplicate callsite offsets between the same logical hop, and reports all index/search/response truncation that can make a negative result incomplete.
 
 `get_cfg` returns bounded basic-block control-flow graphs for selected methods.
 
 `identify_protector` is an adapter for an optional external APKiD analyzer. APKiD is intentionally not bundled in the default static image yet while redistribution/license policy is finalized separately.
 
-`extract_network_model` extends endpoint extraction by correlating Retrofit declarations with declaring methods, caller XREFs, model hints, auth/signature signals and evidence locations.
+`extract_network_model` correlates Retrofit declarations with declaring methods, caller XREFs, model hints, auth/signature signals and evidence locations.
 
 ## Recommended investigation workflow
 
@@ -153,6 +150,8 @@ build_program_index
   ↓
 find_symbols / find_xrefs
   ↓
+trace_call_path when source and target anchors are known
+  ↓
 extract_network_model
   ↓
 get_cfg only for ambiguous control flow
@@ -166,17 +165,18 @@ Example prompt:
 Analyze artifacts/app.xapk using only safe-android-reverser MCP.
 
 1. Call health and fingerprint first.
-2. Decompile when the detected framework makes Java/Kotlin analysis appropriate.
-3. Build the program index.
-4. Build the network model.
-5. For important first-party endpoints, trace their declaring methods and incoming/outgoing XREFs.
-6. Inspect CFG only where branch behavior is relevant.
-7. Read only high-signal source ranges needed to verify the graph evidence.
+2. Decompile when Java/Kotlin analysis is appropriate.
+3. Build the program index and network model.
+4. Localize important first-party methods with find_symbols.
+5. Use trace_call_path for bounded multi-hop caller/callee paths between known anchors.
+6. Inspect CFG only where branch behavior matters.
+7. Read only high-signal source ranges needed to verify graph evidence.
 8. Report call-flow evidence, request/response model hints, auth/signature signals, evidence locations and confidence.
-9. Do not describe XREF adjacency as proven data-flow.
+9. Report graph/traversal truncation explicitly.
+10. Do not describe XREF/call-path adjacency as proven data-flow.
 ```
 
-## Static image 0.2.0
+## Static image 0.2.1
 
 Primary tooling:
 
@@ -231,31 +231,26 @@ android-reverse-engineering-mcp/
 ├── docs/
 │   ├── INSTALL_MCP.md
 │   ├── PROGRAM_UNDERSTANDING_PHASE1.md
+│   ├── TRACE_CALL_PATH.md
 │   ├── ROADMAP.md
 │   └── research/AI_AGENT_PROGRAM_UNDERSTANDING.md
-├── plugins/
-│   ├── safe-android-reverser/
-│   │   ├── .claude-plugin/plugin.json
-│   │   ├── .mcp.json
-│   │   ├── bin/safe-reverser-mcp
-│   │   └── skills/safe-android-reverser/SKILL.md
-│   └── android-reverse-engineering/    # legacy/upstream-compatible
+├── plugins/safe-android-reverser/
 ├── sandbox/
-│   ├── Dockerfile
-│   ├── mcp_server.py                   # 0.1.x core
-│   ├── mcp_server_v2.py                # semantic MCP extension
-│   ├── program_understanding.py
-│   ├── tests.py
-│   ├── tests_program_understanding.py
-│   ├── test_wrapper.sh
-│   └── tools.lock.env
+│   ├── mcp_server.py
+│   ├── mcp_server_v2.py
+│   ├── program_understanding_v2.py
+│   ├── pu_index.py
+│   ├── pu_call_path.py
+│   ├── pu_source.py
+│   ├── pu_network.py
+│   └── tests_*.py
 ├── LICENSE
 └── README.md
 ```
 
 ## Roadmap
 
-The next high-value capabilities are not simply more reverse-engineering CLIs. They are semantic code-intelligence primitives:
+The next high-value semantic primitives are:
 
 ```text
 trace_value
@@ -269,11 +264,11 @@ framework-specific analyzers
 static ↔ dynamic evidence correlation
 ```
 
-See [`docs/ROADMAP.md`](docs/ROADMAP.md) for the tool/profile roadmap and [`docs/research/AI_AGENT_PROGRAM_UNDERSTANDING.md`](docs/research/AI_AGENT_PROGRAM_UNDERSTANDING.md) for the broader codebase-understanding architecture.
+See [`docs/ROADMAP.md`](docs/ROADMAP.md) for the analyzer/profile roadmap and [`docs/research/AI_AGENT_PROGRAM_UNDERSTANDING.md`](docs/research/AI_AGENT_PROGRAM_UNDERSTANDING.md) for the broader codebase-understanding architecture.
 
 ## CI and image publishing
 
-CI validates the legacy MCP core, semantic program-understanding tests, MCP v2 tool registration, wrapper behavior, Python/shell syntax, JSON manifests and the complete sandbox image build.
+CI validates the legacy MCP core, semantic program-understanding tests, source/cache regressions, `trace_call_path` correctness/stress cases, MCP v2 registration, wrapper behavior, syntax/manifests and the complete sandbox image. Final-image gates run real DEX analysis plus the call-path regression suite under the same locked-down container profile used in production.
 
 Controlled `master`/release-tag workflows publish:
 

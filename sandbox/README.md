@@ -18,7 +18,7 @@ The wrapper starts the image with:
 
 Dynamic analysis, ADB, Frida, emulator/device access and proxying belong in a separate privilege profile rather than weakening this static sandbox.
 
-## Static image 0.2.0
+## Static image 0.2.1
 
 The runtime contains:
 
@@ -30,7 +30,7 @@ Vineflower 1.12.0
 Androguard 4.1.4
 file / libmagic
 binutils: strings, readelf, objdump, nm
-Safe Android Reverser MCP + semantic index modules
+Safe Android Reverser MCP + semantic index/call-path modules
 ```
 
 It does **not** retain `curl`, `wget`, pip, compilers or the Python build toolchain used during image construction.
@@ -51,7 +51,7 @@ Program-understanding jobs use an indexed SQLite graph under the writable job di
 /data/jobs/<job_id>/program-index.sqlite3
 ```
 
-The database stores normalized methods and call edges with indexes for symbol identity, callers and callees. A small `program-index.json` summary is also emitted for diagnostics; the full graph is not serialized back through MCP by default.
+The database stores normalized methods and call edges with indexes for symbol identity, callers and callees. `trace_call_path` performs bounded indexed traversal directly over these tables instead of loading the whole graph into MCP context. A small `program-index.json` summary is also emitted for diagnostics.
 
 ## Build
 
@@ -82,7 +82,9 @@ find_xrefs
 get_cfg
 ```
 
-CI then starts the actual MCP entrypoint over JSON-RPC and verifies that `health` reports Androguard, CFG support and SQLite semantic storage as available.
+It also runs the `trace_call_path` regression/stress suite in the final locked-down image, including deterministic shortest paths, cycles, candidate ambiguity, traversal budgets, response budgeting and a synthetic 100k-method/250k-edge graph.
+
+CI then starts the actual MCP entrypoint over JSON-RPC and verifies that `health` reports Androguard, CFG support, call-path support and SQLite semantic storage as available.
 
 ## Local MCP smoke test
 
