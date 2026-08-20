@@ -15,7 +15,7 @@ import program_understanding as legacy
 from pu_source import declarations, dex_parameter_count, sources, source_meta, text
 
 SCHEMA_VERSION = 2
-BUILDER_VERSION = 3
+BUILDER_VERSION = 4
 MAX_DEX_BYTES = 512 * 1024 * 1024
 MAX_DEX_TOTAL_BYTES = 1024 * 1024 * 1024
 MAX_COMPRESSION_RATIO = 500
@@ -107,18 +107,26 @@ def _source_index(conn: sqlite3.Connection, job: Path, max_methods: int) -> dict
         value = text(path)
         if not value:
             continue
-        package, clazz = source_meta(value, path)
-        fqn = f"{package}.{clazz}" if package else clazz
-        for item in declarations(value, clazz):
+        package, default_class = source_meta(value, path)
+        for item in declarations(value, default_class):
             if count >= max_methods:
                 truncated = True
                 break
+            owner = item.get("class_name") or default_class
+            fqn = f"{package}.{owner}" if package else owner
             conn.execute(
                 "INSERT OR IGNORE INTO methods VALUES (?,?,?,?,?,?,?)",
                 (
-                    f"{fqn}#{item['name']}@{item['line']}", fqn, item["name"], item["params"],
-                    item["parameter_count"], 0,
-                    json.dumps({"file": str(path.relative_to(job)), "line": item["line"]}, sort_keys=True),
+                    f"{fqn}#{item['name']}@{item['line']}",
+                    fqn,
+                    item["name"],
+                    item["params"],
+                    item["parameter_count"],
+                    0,
+                    json.dumps(
+                        {"file": str(path.relative_to(job)), "line": item["line"]},
+                        sort_keys=True,
+                    ),
                 ),
             )
             count += 1
@@ -130,12 +138,20 @@ def _source_index(conn: sqlite3.Connection, job: Path, max_methods: int) -> dict
 def _dex_blobs(apk_path: Path) -> Iterator[bytes]:
     total = 0
     with zipfile.ZipFile(apk_path) as archive:
-        infos = [i for i in archive.infolist() if not i.is_dir() and re.fullmatch(r"classes\d*\.dex", i.filename)]
+        infos = [
+            item
+            for item in archive.infolist()
+            if not item.is_dir() and re.fullmatch(r"classes\d*\.dex", item.filename)
+        ]
         infos.sort(key=lambda item: item.filename)
         for info in infos:
             if info.file_size > MAX_DEX_BYTES:
                 raise ValueError(f"DEX exceeds size limit: {info.filename}")
-            if info.compress_size and info.file_size > 16 * 1024 * 1024 and info.file_size / info.compress_size > MAX_COMPRESSION_RATIO:
+            if (
+                info.compress_size
+                and info.file_size > 16 * 1024 * 1024
+                and info.file_size / info.compress_size > MAX_COMPRESSION_RATIO
+            ):
                 raise ValueError(f"DEX has suspicious compression ratio: {info.filename}")
             total += info.file_size
             if total > MAX_DEX_TOTAL_BYTES:
@@ -179,9 +195,14 @@ def normalize_class_descriptor(value: Any) -> str:
 
 def method_record(method: Any, class_members: dict[str, str]) -> dict[str, Any]:
     raw = method.get_method() if hasattr(method, "get_method") else method
-    class_name = getattr(method, "class_name", None) or getattr(raw, "get_class_name", lambda: "")()
+    class_name = getattr(method, "class_name", None) or getattr(
+        raw, "get_class_name", lambda: ""
+    )()
     name = getattr(method, "name", None) or getattr(raw, "get_name", lambda: "")()
-    descriptor = str(getattr(method, "descriptor", None) or getattr(raw, "get_descriptor", lambda: "")())
+    descriptor = str(
+        getattr(method, "descriptor", None)
+        or getattr(raw, "get_descriptor", lambda: "")()
+    )
     full_name = getattr(method, "full_name", None) or f"{class_name} {name} {descriptor}"
     return {
         "id": str(full_name),
@@ -190,67 +211,116 @@ def method_record(method: Any, class_members: dict[str, str]) -> dict[str, Any]:
         "descriptor": descriptor,
         "parameter_count": dex_parameter_count(descriptor),
         "external": bool(method.is_external()) if hasattr(method, "is_external") else False,
-        "source": {"apk_member": class_members.get(str(class_name), "external-or-unknown")},
+        "source": {
+            "apk_member": class_members.get(str(class_name), "external-or-unknown")
+        },
     }
 
 
-def _dex_index(conn: sqlite3.Connection, input_artifact: Path, max_methods: int, max_edges: int):
+def _dex_index(
+    conn: sqlite3.Connection,
+    input_artifact: Path,
+    max_methods: int,
+    max_edges: int,
+):
     import androguard  # type: ignore
 
     stored: set[str] = set()
-    methods_truncated = edges_truncated = False
+    methods_truncated = False
+    edges_truncated = False
     with androguard_analysis(input_artifact) as (analysis, class_members):
         all_methods = list(analysis.get_methods())
-        all_methods.sort(key=lambda method: bool(method.is_external()) if hasattr(method, "is_external") else False)
+        all_methods.sort(
+            key=lambda method: bool(method.is_external())
+            if hasattr(method, "is_external")
+            else False
+        )
         for method in all_methods:
             record = method_record(method, class_members)
+            if record["id"] in stored:
+                continue
             if len(stored) >= max_methods:
                 methods_truncated = True
                 break
-            if record["id"] in stored:
-                continue
             conn.execute(
                 "INSERT OR IGNORE INTO methods VALUES (?,?,?,?,?,?,?)",
                 (
-                    record["id"], record["class"], record["name"], record["descriptor"],
-                    record["parameter_count"], 1 if record["external"] else 0,
+                    record["id"],
+                    record["class"],
+                    record["name"],
+                    record["descriptor"],
+                    record["parameter_count"],
+                    1 if record["external"] else 0,
                     json.dumps(record["source"], sort_keys=True),
                 ),
             )
             stored.add(record["id"])
+
         edge_count = 0
         for method in all_methods:
             caller = method_record(method, class_members)
             if caller["id"] not in stored:
                 continue
-            for _, callee, offset in method.get_xref_to() if hasattr(method, "get_xref_to") else []:
+            for _, callee, offset in (
+                method.get_xref_to() if hasattr(method, "get_xref_to") else []
+            ):
                 if edge_count >= max_edges:
                     edges_truncated = True
                     break
                 target = method_record(callee, class_members)
                 conn.execute(
                     "INSERT INTO call_edges VALUES (?,?,?,?,?)",
-                    (caller["id"], target["id"], int(offset), 0.98, "dex-xref"),
+                    (
+                        caller["id"],
+                        target["id"],
+                        int(offset),
+                        0.98,
+                        "dex-xref",
+                    ),
                 )
                 edge_count += 1
             if edges_truncated:
                 break
     return (
         {"methods": methods_truncated, "edges": edges_truncated},
-        {"name": "androguard", "version": getattr(androguard, "__version__", "unknown")},
+        {
+            "name": "androguard",
+            "version": getattr(androguard, "__version__", "unknown"),
+        },
     )
 
 
-def _backend_upgrade_needed(conn: sqlite3.Connection, caps: dict[str, Any]) -> bool:
+def _backend_upgrade_needed(
+    conn: sqlite3.Connection, caps: dict[str, Any]
+) -> bool:
+    if meta_get(conn, "analysis_kind") != "source-fallback":
+        return False
+    current_available = bool(caps.get("androguard"))
+    built_available = bool(meta_get(conn, "androguard_available_at_build", False))
+    if not built_available and current_available:
+        return True
+    built_version = meta_get(conn, "androguard_version_at_build")
+    current_version = (caps.get("versions") or {}).get("androguard")
     return (
-        meta_get(conn, "analysis_kind") == "source-fallback"
-        and not bool(meta_get(conn, "androguard_available_at_build", False))
-        and bool(caps.get("androguard"))
+        current_available
+        and built_available
+        and bool(built_version)
+        and bool(current_version)
+        and built_version != current_version
     )
 
 
-def _cache_ok(conn: sqlite3.Connection, input_artifact: Path, max_methods: int, max_edges: int, caps: dict[str, Any]) -> bool:
-    if meta_get(conn, "schema_version") != SCHEMA_VERSION or meta_get(conn, "builder_version") != BUILDER_VERSION:
+def _cache_ok(
+    conn: sqlite3.Connection,
+    input_artifact: Path,
+    max_methods: int,
+    max_edges: int,
+    caps: dict[str, Any],
+) -> bool:
+    if (
+        meta_get(conn, "schema_version") != SCHEMA_VERSION
+        or meta_get(conn, "builder_version") != BUILDER_VERSION
+    ):
         return False
     if meta_get(conn, "artifact_stat") != artifact_stat(input_artifact):
         return False
@@ -267,10 +337,19 @@ def _cache_ok(conn: sqlite3.Connection, input_artifact: Path, max_methods: int, 
     return True
 
 
-def build_program_index(job: Path, workspace: Path, caps: dict[str, Any], *, max_methods=100_000, max_edges=250_000, force=False):
+def build_program_index(
+    job: Path,
+    workspace: Path,
+    caps: dict[str, Any],
+    *,
+    max_methods=100_000,
+    max_edges=250_000,
+    force=False,
+):
     max_methods = max(100, min(int(max_methods), legacy.MAX_METHODS))
     max_edges = max(100, min(int(max_edges), legacy.MAX_EDGES))
     input_artifact = artifact(job, workspace)
+
     if db_path(job).exists() and not force:
         try:
             with connect(job) as conn:
@@ -278,21 +357,29 @@ def build_program_index(job: Path, workspace: Path, caps: dict[str, Any], *, max
                     return _summary(job, conn, True)
         except sqlite3.DatabaseError:
             pass
+
     if db_path(job).exists():
         db_path(job).unlink()
+
     with connect(job) as conn:
         init_db(conn)
         fallback = None
         try:
-            truncated, analyzer = _dex_index(conn, input_artifact, max_methods, max_edges)
+            truncated, analyzer = _dex_index(
+                conn, input_artifact, max_methods, max_edges
+            )
             kind = "dex-xref"
         except Exception as exc:
             conn.execute("DELETE FROM methods")
             conn.execute("DELETE FROM call_edges")
             truncated = _source_index(conn, job, max_methods)
-            analyzer = {"name": "safe-source-index", "version": "3"}
+            analyzer = {"name": "safe-source-index", "version": "4"}
             kind = "source-fallback"
-            fallback = f"Androguard unavailable/failed: {type(exc).__name__}: {exc}"
+            fallback = (
+                f"Androguard unavailable/failed: {type(exc).__name__}: {exc}"
+            )
+
+        versions = caps.get("versions") or {}
         for key, value in {
             "schema_version": SCHEMA_VERSION,
             "builder_version": BUILDER_VERSION,
@@ -305,12 +392,14 @@ def build_program_index(job: Path, workspace: Path, caps: dict[str, Any], *, max
             "artifact_stat": artifact_stat(input_artifact),
             "artifact_sha256": sha256(input_artifact),
             "androguard_available_at_build": bool(caps.get("androguard")),
+            "androguard_version_at_build": versions.get("androguard"),
         }.items():
             meta_set(conn, key, value)
         if fallback:
             meta_set(conn, "fallback_reason", fallback)
         conn.commit()
         summary = _summary(job, conn, False)
+
     legacy._save(job / "program-index.json", summary)
     return summary
 
@@ -322,40 +411,83 @@ def ensure_index(job: Path, workspace: Path, caps: dict[str, Any]) -> None:
         return
     try:
         with connect(job) as conn:
-            stale = (
-                meta_get(conn, "schema_version") != SCHEMA_VERSION
-                or meta_get(conn, "builder_version") != BUILDER_VERSION
-                or meta_get(conn, "artifact_stat") != artifact_stat(input_artifact)
-                or _backend_upgrade_needed(conn, caps)
+            limits = meta_get(
+                conn,
+                "limits",
+                {"max_methods": 100_000, "max_edges": 250_000},
             )
-        if stale:
-            build_program_index(job, workspace, caps, force=True)
-    except sqlite3.DatabaseError:
+            max_methods = max(
+                100,
+                min(int(limits.get("max_methods", 100_000)), legacy.MAX_METHODS),
+            )
+            max_edges = max(
+                100,
+                min(int(limits.get("max_edges", 250_000)), legacy.MAX_EDGES),
+            )
+            valid = _cache_ok(
+                conn, input_artifact, max_methods, max_edges, caps
+            )
+        if not valid:
+            build_program_index(
+                job,
+                workspace,
+                caps,
+                max_methods=max_methods,
+                max_edges=max_edges,
+                force=True,
+            )
+    except (sqlite3.DatabaseError, ValueError, TypeError):
         build_program_index(job, workspace, caps, force=True)
 
 
 def method_row(row: sqlite3.Row) -> dict[str, Any]:
     return {
-        "id": row["id"], "class": row["class"], "name": row["name"],
-        "descriptor": row["descriptor"], "parameter_count": row["parameter_count"],
-        "external": bool(row["external"]), "source": json.loads(row["source_json"]),
+        "id": row["id"],
+        "class": row["class"],
+        "name": row["name"],
+        "descriptor": row["descriptor"],
+        "parameter_count": row["parameter_count"],
+        "external": bool(row["external"]),
+        "source": json.loads(row["source_json"]),
     }
 
 
-def find_symbols(job: Path, workspace: Path, caps: dict[str, Any], query: str, *, limit=100):
+def find_symbols(
+    job: Path,
+    workspace: Path,
+    caps: dict[str, Any],
+    query: str,
+    *,
+    limit=100,
+):
     if not query or len(query) > 512:
         raise ValueError("query must be 1..512 characters")
     ensure_index(job, workspace, caps)
     with connect(job) as conn:
         rows = conn.execute(
-            "SELECT * FROM methods WHERE instr(lower(class||' '||name||' '||descriptor||' '||id), ?) > 0 ORDER BY external,class,name LIMIT ?",
+            "SELECT * FROM methods "
+            "WHERE instr(lower(class||' '||name||' '||descriptor||' '||id), ?) > 0 "
+            "ORDER BY external,class,name LIMIT ?",
             (query.lower(), max(1, min(int(limit), 500))),
         ).fetchall()
         kind = meta_get(conn, "analysis_kind")
-    return {"job_id": job.name, "query": query, "analysis_kind": kind, "matches": [method_row(row) for row in rows]}
+    return {
+        "job_id": job.name,
+        "query": query,
+        "analysis_kind": kind,
+        "matches": [method_row(row) for row in rows],
+    }
 
 
-def find_xrefs(job: Path, workspace: Path, caps: dict[str, Any], query: str, *, direction="both", limit=200):
+def find_xrefs(
+    job: Path,
+    workspace: Path,
+    caps: dict[str, Any],
+    query: str,
+    *,
+    direction="both",
+    limit=200,
+):
     if not query or len(query) > 512:
         raise ValueError("query must be 1..512 characters")
     if direction not in {"incoming", "outgoing", "both"}:
@@ -363,27 +495,58 @@ def find_xrefs(job: Path, workspace: Path, caps: dict[str, Any], query: str, *, 
     ensure_index(job, workspace, caps)
     cap = max(1, min(int(limit), 1000))
     with connect(job) as conn:
-        ids = [row["id"] for row in conn.execute(
-            "SELECT id FROM methods WHERE instr(lower(class||' '||name||' '||descriptor||' '||id), ?) > 0 ORDER BY external LIMIT 200",
-            (query.lower(),),
-        )]
+        ids = [
+            row["id"]
+            for row in conn.execute(
+                "SELECT id FROM methods "
+                "WHERE instr(lower(class||' '||name||' '||descriptor||' '||id), ?) > 0 "
+                "ORDER BY external LIMIT 200",
+                (query.lower(),),
+            )
+        ]
         edges = []
         if ids:
             marks = ",".join("?" for _ in ids)
             if direction == "incoming":
-                sql, params = f"SELECT * FROM call_edges WHERE callee IN ({marks}) LIMIT ?", [*ids, cap]
+                sql = f"SELECT * FROM call_edges WHERE callee IN ({marks}) LIMIT ?"
+                params = [*ids, cap]
             elif direction == "outgoing":
-                sql, params = f"SELECT * FROM call_edges WHERE caller IN ({marks}) LIMIT ?", [*ids, cap]
+                sql = f"SELECT * FROM call_edges WHERE caller IN ({marks}) LIMIT ?"
+                params = [*ids, cap]
             else:
-                sql = f"SELECT * FROM call_edges WHERE callee IN ({marks}) OR caller IN ({marks}) LIMIT ?"
+                sql = (
+                    f"SELECT * FROM call_edges "
+                    f"WHERE callee IN ({marks}) OR caller IN ({marks}) LIMIT ?"
+                )
                 params = [*ids, *ids, cap]
             for row in conn.execute(sql, params):
-                edges.append({"from": row["caller"], "to": row["callee"], "offset": row["offset"], "confidence": row["confidence"], "kind": row["kind"]})
+                edges.append(
+                    {
+                        "from": row["caller"],
+                        "to": row["callee"],
+                        "offset": row["offset"],
+                        "confidence": row["confidence"],
+                        "kind": row["kind"],
+                    }
+                )
         kind = meta_get(conn, "analysis_kind")
-    return {"job_id": job.name, "query": query, "direction": direction, "matched_symbols": ids, "xrefs": edges, "analysis_kind": kind}
+    return {
+        "job_id": job.name,
+        "query": query,
+        "direction": direction,
+        "matched_symbols": ids,
+        "xrefs": edges,
+        "analysis_kind": kind,
+    }
 
 
-def get_cfg(job: Path, workspace: Path, query: str, *, max_blocks=500):
+def get_cfg(
+    job: Path,
+    workspace: Path,
+    query: str,
+    *,
+    max_blocks=500,
+):
     if not query or len(query) > 512:
         raise ValueError("query must be 1..512 characters")
     input_artifact = artifact(job, workspace)
@@ -393,7 +556,11 @@ def get_cfg(job: Path, workspace: Path, query: str, *, max_blocks=500):
     with androguard_analysis(input_artifact) as (analysis, class_members):
         for method in analysis.get_methods():
             record = method_record(method, class_members)
-            if needle not in f"{record['class']} {record['name']} {record['descriptor']} {record['id']}".lower():
+            haystack = (
+                f"{record['class']} {record['name']} "
+                f"{record['descriptor']} {record['id']}"
+            ).lower()
+            if needle not in haystack:
                 continue
             if hasattr(method, "is_external") and method.is_external():
                 continue
@@ -403,14 +570,38 @@ def get_cfg(job: Path, workspace: Path, query: str, *, max_blocks=500):
                     break
                 successors = []
                 for child in block.get_next():
-                    target = child[-1] if isinstance(child, (tuple, list)) and child else child
+                    target = (
+                        child[-1]
+                        if isinstance(child, (tuple, list)) and child
+                        else child
+                    )
                     try:
                         successors.append(int(target.get_start()))
                     except Exception:
                         pass
-                blocks.append({"start": int(block.get_start()), "end": int(block.get_end()), "name": str(block.get_name()), "successors": successors})
+                blocks.append(
+                    {
+                        "start": int(block.get_start()),
+                        "end": int(block.get_end()),
+                        "name": str(block.get_name()),
+                        "successors": successors,
+                    }
+                )
                 remaining -= 1
-            matches.append({"method": record, "blocks": blocks, "truncated": remaining <= 0})
+            matches.append(
+                {
+                    "method": record,
+                    "blocks": blocks,
+                    "truncated": remaining <= 0,
+                }
+            )
             if remaining <= 0 or len(matches) >= 20:
                 break
-    return {"job_id": job.name, "query": query, "matches": matches, "analyzer": "androguard", "confidence": 0.98, "truncated": remaining <= 0}
+    return {
+        "job_id": job.name,
+        "query": query,
+        "matches": matches,
+        "analyzer": "androguard",
+        "confidence": 0.98,
+        "truncated": remaining <= 0,
+    }
