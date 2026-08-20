@@ -33,6 +33,8 @@ jobs:
         run: python3 sandbox/tests.py
       - name: Test program understanding
         run: python3 sandbox/tests_program_understanding.py
+      - name: Test program understanding source scopes and cache integrity
+        run: PYTHONPATH=sandbox python3 sandbox/tests_program_understanding_scopes.py
       - name: Test extended MCP registration
         run: |
           export SAFE_REVERSER_WORKSPACE="$RUNNER_TEMP/safe-reverser-workspace"
@@ -60,7 +62,7 @@ jobs:
         run: bash sandbox/test_wrapper.sh
       - name: Validate Python syntax
         run: |
-          python3 -m py_compile sandbox/mcp_server.py sandbox/mcp_server_v2.py sandbox/program_understanding.py sandbox/program_understanding_v2.py sandbox/pu_source.py sandbox/pu_index.py sandbox/pu_network.py sandbox/tests_program_understanding.py
+          python3 -m py_compile sandbox/mcp_server.py sandbox/mcp_server_v2.py sandbox/program_understanding.py sandbox/program_understanding_v2.py sandbox/pu_source.py sandbox/pu_index.py sandbox/pu_network.py sandbox/tests_program_understanding.py sandbox/tests_program_understanding_scopes.py
       - name: Validate shell wrapper syntax
         run: bash -n plugins/safe-android-reverser/bin/safe-reverser-mcp
       - name: Validate JSON manifests
@@ -105,6 +107,23 @@ jobs:
             --entrypoint=python3 \
             safe-android-reverser:ci \
             /workspace/sandbox/tests_program_understanding.py
+
+      - name: Run source-scope/cache regression test inside image
+        run: |
+          mkdir -p "$RUNNER_TEMP/safe-reverser-scope-data"
+          docker run --rm \
+            --network=none \
+            --read-only \
+            --cap-drop=ALL \
+            --security-opt=no-new-privileges \
+            --tmpfs=/tmp:rw,nosuid,nodev,size=1g \
+            --tmpfs=/work:rw,nosuid,nodev,size=1g \
+            --user="$(id -u):$(id -g)" \
+            --volume="$PWD:/workspace:ro" \
+            --volume="$RUNNER_TEMP/safe-reverser-scope-data:/data:rw" \
+            --entrypoint=python3 \
+            safe-android-reverser:ci \
+            /workspace/sandbox/tests_program_understanding_scopes.py
 
       - name: Run MCP health smoke test inside image
         run: |
