@@ -6,7 +6,22 @@ from typing import Any
 
 import program_understanding as legacy
 from pu_index import connect, ensure_index, meta_get
-from pu_source import MODEL_NOISE, context, declaration_after, declarations, ranges, source_meta, sources, text
+from pu_source import (
+    MODEL_NOISE,
+    class_name_at_line,
+    class_scopes,
+    context,
+    declaration_after,
+    declarations,
+    ranges,
+    source_meta,
+    sources,
+    text,
+)
+
+
+def _fqn(package: str, class_name: str) -> str:
+    return f"{package}.{class_name}" if package else class_name
 
 
 def resolve_method(conn: sqlite3.Connection, class_name: str, method_name: str, arity: int | None) -> dict[str, Any]:
@@ -71,22 +86,26 @@ def extract_network_model(job: Path, workspace: Path, caps: dict[str, Any], *, m
                 continue
             scanned += 1
             relative = str(path.relative_to(job))
-            package, clazz = source_meta(value, path)
-            fqn = f"{package}.{clazz}" if package else clazz
-            items = declarations(value, clazz)
-            method_ranges = ranges(items, len(value.splitlines()))
+            package, default_class = source_meta(value, path)
+            scopes = class_scopes(value, default_class)
+            items = declarations(value, default_class)
+            method_ranges = ranges(items, len(value.splitlines()), scopes)
             lines = value.splitlines()
 
             if len(endpoints) < cap:
                 for match in legacy.RETROFIT_RE.finditer(value):
                     line = value.count("\n", 0, match.start()) + 1
-                    declaration = declaration_after(items, line)
+                    annotation_owner = class_name_at_line(scopes, line, default_class)
+                    declaration = declaration_after(items, line, class_name=annotation_owner)
+                    owner = declaration.get("class_name", annotation_owner) if declaration else annotation_owner
+                    declaring_class = _fqn(package, owner)
                     nearby = "\n".join(lines[max(0, line - 3):min(len(lines), line + 12)])
                     for model in legacy.TYPE_RE.findall(nearby):
                         if model not in MODEL_NOISE and len(model) <= 128:
                             models.add(model)
                     resolution = resolve_method(
-                        conn, fqn,
+                        conn,
+                        declaring_class,
                         declaration["name"] if declaration else "",
                         declaration["parameter_count"] if declaration else None,
                     )
@@ -96,7 +115,7 @@ def extract_network_model(job: Path, workspace: Path, caps: dict[str, Any], *, m
                         "http_method": match.group(1).upper(),
                         "path": match.group(2),
                         "kind": "retrofit",
-                        "declaring_class": fqn,
+                        "declaring_class": declaring_class,
                         "declaring_method": declaration["name"] if declaration else None,
                         "parameter_signature": declaration["params"] if declaration else None,
                         "parameter_count": declaration["parameter_count"] if declaration else None,
@@ -111,10 +130,11 @@ def extract_network_model(job: Path, workspace: Path, caps: dict[str, Any], *, m
             if len(urls) < cap:
                 for match in legacy.URL_RE.finditer(value):
                     line = value.count("\n", 0, match.start()) + 1
-                    declaration = context(method_ranges, line)
+                    owner = class_name_at_line(scopes, line, default_class)
+                    declaration = context(method_ranges, line, owner)
                     urls.append({
                         "url": match.group(0).rstrip(".,);]"),
-                        "declaring_class": fqn,
+                        "declaring_class": _fqn(package, owner),
                         "declaring_method": declaration["name"] if declaration else None,
                         "evidence": {"file": relative, "line": line, "confidence": 0.9},
                     })
@@ -124,17 +144,20 @@ def extract_network_model(job: Path, workspace: Path, caps: dict[str, Any], *, m
             if len(auth) < cap:
                 for match in legacy.AUTH_RE.finditer(value):
                     line = value.count("\n", 0, match.start()) + 1
-                    declaration = context(method_ranges, line) or declaration_after(items, line, 4)
+                    owner = class_name_at_line(scopes, line, default_class)
+                    declaration = context(method_ranges, line, owner) or declaration_after(
+                        items, line, 4, owner
+                    )
                     auth.append({
                         "signal": match.group(1),
-                        "declaring_class": fqn,
+                        "declaring_class": _fqn(package, owner),
                         "declaring_method": declaration["name"] if declaration else None,
                         "evidence": {"file": relative, "line": line, "confidence": 0.75},
                     })
                     if len(auth) >= cap:
                         break
     report = {
-        "schema_version": 2,
+        "schema_version": 3,
         "job_id": job.name,
         "source_files_scanned": scanned,
         "program_index_kind": kind,
@@ -145,6 +168,7 @@ def extract_network_model(job: Path, workspace: Path, caps: dict[str, Any], *, m
         "candidate_models": sorted(models)[:cap],
         "notes": [
             "Endpoint callers require unique class+method(+arity) resolution; ambiguous methods are never silently unioned.",
+            "Source evidence is attributed to lexical top-level/nested class scopes; nested JVM names use Outer$Inner.",
             "Simple-class fallback uses literal suffix matching rather than SQL wildcard matching.",
             "Cross-split XREFs use one Androguard Analysis graph when available.",
             "Auth evidence reports signal names/locations, not secret values.",
