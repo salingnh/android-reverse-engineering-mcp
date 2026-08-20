@@ -1,0 +1,98 @@
+# Safe Android Reverser
+
+A Claude Code plugin that exposes Android static reverse-engineering as a sandboxed MCP server.
+It is derived from ideas in the original `android-reverse-engineering` plugin while moving
+execution out of the host environment.
+
+## Why this plugin exists
+
+The original workflow can install dependencies and run decompilers directly on the host.
+This variant keeps the LLM-facing workflow but moves binary parsing/decompilation into an
+isolated container with an allow-listed MCP API.
+
+## Install from this repository's marketplace
+
+Inside Claude Code:
+
+```text
+/plugin marketplace add salingnh/android-reverse-engineering-skill
+/plugin install safe-android-reverser@salingnh-reverse-tools
+/reload-plugins
+```
+
+Claude Code plugins can bundle MCP servers; when the plugin is enabled, its `.mcp.json` server
+starts automatically.
+
+## Install the sandbox image
+
+Rootless Podman is recommended:
+
+```bash
+podman pull ghcr.io/salingnh/safe-android-reverser:0.1.0
+```
+
+Or Docker:
+
+```bash
+docker pull ghcr.io/salingnh/safe-android-reverser:0.1.0
+```
+
+The plugin intentionally does **not** auto-pull by default. To opt in:
+
+```bash
+export SAFE_REVERSER_AUTO_PULL=1
+```
+
+To use a locally built image:
+
+```bash
+export SAFE_REVERSER_IMAGE=safe-android-reverser:dev
+```
+
+To force a runtime:
+
+```bash
+export SAFE_REVERSER_RUNTIME=podman
+# or
+export SAFE_REVERSER_RUNTIME=docker
+```
+
+## MCP tools
+
+- `health`
+- `fingerprint`
+- `decompile`
+- `extract_api`
+- `search_source`
+- `read_source_file`
+- `recover_kotlin_names`
+- `list_jobs`
+
+All artifact paths are relative to the Claude project root. The project is mounted read-only;
+outputs are stored under `${CLAUDE_PLUGIN_DATA}` and exposed back through bounded MCP read/search
+tools rather than giving the model unrestricted filesystem execution inside the container.
+
+## Current static profile
+
+Included in the image:
+
+- Java 21 runtime
+- JADX 1.5.5
+- Vineflower 1.12.0
+- Python stdlib MCP server implementation
+
+Not included in this profile:
+
+- ADB / emulator access
+- Frida / Objection
+- network access
+- curl/wget in the runtime image
+- dex2jar APK conversion
+
+Dynamic analysis should be a separate image and MCP server with an explicitly different threat
+model.
+
+## Attribution
+
+This fork retains the repository's Apache-2.0 license and preserves the original plugin. The
+safe plugin is a new execution architecture maintained in this fork.

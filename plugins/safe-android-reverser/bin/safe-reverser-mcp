@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+IMAGE="${SAFE_REVERSER_IMAGE:-ghcr.io/salingnh/safe-android-reverser:0.1.0}"
+RUNTIME="${SAFE_REVERSER_RUNTIME:-auto}"
+PROJECT_DIR="${SAFE_REVERSER_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}"
+DATA_DIR="${SAFE_REVERSER_DATA_DIR:-${CLAUDE_PLUGIN_DATA:-$HOME/.local/share/safe-android-reverser}}"
+MEMORY="${SAFE_REVERSER_MEMORY:-4g}"
+CPUS="${SAFE_REVERSER_CPUS:-2}"
+PIDS="${SAFE_REVERSER_PIDS_LIMIT:-256}"
+AUTO_PULL="${SAFE_REVERSER_AUTO_PULL:-0}"
+
+fail() { printf 'safe-android-reverser: %s\n' "$*" >&2; exit 1; }
+
+choose_runtime() {
+  if [[ "$RUNTIME" != "auto" ]]; then
+    command -v "$RUNTIME" >/dev/null 2>&1 || fail "configured runtime '$RUNTIME' not found"
+    printf '%s' "$RUNTIME"
+    return
+  fi
+  if command -v podman >/dev/null 2>&1; then
+    printf 'podman'
+  elif command -v docker >/dev/null 2>&1; then
+    printf 'docker'
+  else
+    fail "Podman or Docker is required. Rootless Podman is recommended."
+  fi
+}
+
+RUNTIME="$(choose_runtime)"
+[[ -d "$PROJECT_DIR" ]] || fail "project directory not found: $PROJECT_DIR"
+mkdir -p "$DATA_DIR"
+PROJECT_DIR="$(cd "$PROJECT_DIR" && pwd -P)"
+DATA_DIR="$(cd "$DATA_DIR" && pwd -P)"
+
+if ! "$RUNTIME" image inspect "$IMAGE" >/dev/null 2>&1; then
+  if [[ "$AUTO_PULL" == "1" ]]; then
+    "$RUNTIME" pull "$IMAGE" >&2
+  else
+    fail "sandbox image is not installed: $IMAGE. Pull it explicitly with '$RUNTIME pull $IMAGE' or set SAFE_REVERSER_AUTO_PULL=1."
+  fi
+fi
+
+COMMON=(
+  run --rm --interactive
+  --network=none
+  --read-only
+  --cap-drop=ALL
+  --security-opt=no-new-privileges
+  --pids-limit="$PIDS"
+  --memory="$MEMORY"
+  --cpus="$CPUS"
+  --tmpfs=/tmp:rw,nosuid,nodev,size=1g
+  --tmpfs=/work:rw,nosuid,nodev,size=2g
+)
+
+if [[ "$RUNTIME" == "podman" ]]; then
+  exec podman "${COMMON[@]}" \
+    --userns=keep-id \
+    --mount="type=bind,src=$PROJECT_DIR,dst=/workspace,ro=true,relabel=shared" \
+    --mount="type=bind,src=$DATA_DIR,dst=/data,rw=true,relabel=shared" \
+    "$IMAGE"
+else
+  UID_GID="$(id -u):$(id -g)"
+  exec docker "${COMMON[@]}" \
+    --user="$UID_GID" \
+    --mount="type=bind,src=$PROJECT_DIR,dst=/workspace,readonly" \
+    --mount="type=bind,src=$DATA_DIR,dst=/data" \
+    "$IMAGE"
+fi

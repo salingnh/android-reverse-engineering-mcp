@@ -1,0 +1,19 @@
+{
+  "name": "safe-android-reverser",
+  "version": "0.1.0",
+  "description": "Sandboxed Android reverse engineering through an MCP server running in a locked-down container.",
+  "author": {
+    "name": "salingnh"
+  },
+  "repository": "https://github.com/salingnh/android-reverse-engineering-skill",
+  "license": "Apache-2.0",
+  "keywords": [
+    "android",
+    "reverse-engineering",
+    "apk",
+    "jadx",
+    "mcp",
+    "sandbox",
+    "security"
+  ]
+}
