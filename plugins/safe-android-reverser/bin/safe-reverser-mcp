@@ -8,9 +8,10 @@ DATA_DIR="${SAFE_REVERSER_DATA_DIR:-${CLAUDE_PLUGIN_DATA:-$HOME/.local/share/saf
 MEMORY="${SAFE_REVERSER_MEMORY:-4g}"
 CPUS="${SAFE_REVERSER_CPUS:-2}"
 PIDS="${SAFE_REVERSER_PIDS_LIMIT:-256}"
-AUTO_PULL="${SAFE_REVERSER_AUTO_PULL:-0}"
+AUTO_PULL="${SAFE_REVERSER_AUTO_PULL:-1}"
 
 fail() { printf 'safe-android-reverser: %s\n' "$*" >&2; exit 1; }
+info() { printf 'safe-android-reverser: %s\n' "$*" >&2; }
 
 choose_runtime() {
   if [[ "$RUNTIME" != "auto" ]]; then
@@ -32,13 +33,18 @@ RUNTIME="$(choose_runtime)"
 mkdir -p "$DATA_DIR"
 PROJECT_DIR="$(cd "$PROJECT_DIR" && pwd -P)"
 DATA_DIR="$(cd "$DATA_DIR" && pwd -P)"
+HOST_UID="$(id -u)"
+HOST_GID="$(id -g)"
 
 if ! "$RUNTIME" image inspect "$IMAGE" >/dev/null 2>&1; then
-  if [[ "$AUTO_PULL" == "1" ]]; then
-    "$RUNTIME" pull "$IMAGE" >&2
-  else
-    fail "sandbox image is not installed: $IMAGE. Pull it explicitly with '$RUNTIME pull $IMAGE' or set SAFE_REVERSER_AUTO_PULL=1."
+  if [[ "$AUTO_PULL" != "1" ]]; then
+    fail "sandbox image is not installed: $IMAGE. Pull it with '$RUNTIME pull $IMAGE' or allow automatic pull with SAFE_REVERSER_AUTO_PULL=1."
   fi
+  info "sandbox image not found locally; pulling $IMAGE with $RUNTIME (first start only)"
+  if ! "$RUNTIME" pull "$IMAGE" >&2; then
+    fail "failed to pull sandbox image: $IMAGE"
+  fi
+  "$RUNTIME" image inspect "$IMAGE" >/dev/null 2>&1 || fail "sandbox image is still unavailable after pull: $IMAGE"
 fi
 
 COMMON=(
@@ -55,15 +61,19 @@ COMMON=(
 )
 
 if [[ "$RUNTIME" == "podman" ]]; then
+  # The image declares USER 10001, but bind-mounted plugin data belongs to the
+  # host user. Override the runtime user and keep that UID/GID mapped into the
+  # rootless Podman user namespace so /data remains writable without chowning
+  # host files or running the container as root.
   exec podman "${COMMON[@]}" \
     --userns=keep-id \
+    --user="$HOST_UID:$HOST_GID" \
     --volume="$PROJECT_DIR:/workspace:ro,z" \
     --volume="$DATA_DIR:/data:rw,z" \
     "$IMAGE"
 else
-  UID_GID="$(id -u):$(id -g)"
   exec docker "${COMMON[@]}" \
-    --user="$UID_GID" \
+    --user="$HOST_UID:$HOST_GID" \
     --volume="$PROJECT_DIR:/workspace:ro" \
     --volume="$DATA_DIR:/data:rw" \
     "$IMAGE"

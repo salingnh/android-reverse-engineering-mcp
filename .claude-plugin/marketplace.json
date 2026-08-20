@@ -7,7 +7,7 @@
   },
   "metadata": {
     "description": "Android reverse-engineering plugins with safe containerized execution",
-    "version": "2.0.0"
+    "version": "2.0.1"
   },
   "plugins": [
     {
@@ -26,8 +26,8 @@
     {
       "name": "safe-android-reverser",
       "source": "./plugins/safe-android-reverser",
-      "description": "Sandboxed Android reverse engineering through a containerized MCP server with read-only project access and no runtime network.",
-      "version": "0.1.0",
+      "description": "Sandboxed Android reverse engineering through a containerized MCP server with automatic Podman/Docker startup, read-only project access, and no runtime network.",
+      "version": "0.1.1",
       "author": {
         "name": "salingnh"
       },

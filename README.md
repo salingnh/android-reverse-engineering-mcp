@@ -2,93 +2,44 @@
 
 **MCP-first, sandboxed Android reverse engineering for AI coding agents.**
 
-Safe Android Reverser is evolving this repository from host-executed reverse-engineering scripts into a **controlled reverse-engineering service** that AI agents access through MCP.
+Safe Android Reverser turns Android reverse-engineering into a controlled MCP service instead of running decompilers and installation scripts directly on the host.
 
 > **The agent reasons. The MCP server controls. The sandbox executes.**
-
-The primary path no longer requires the agent to install JADX/Java on the host, call `sudo`, modify shell profiles, or execute arbitrary reverse-engineering commands directly on the workstation.
 
 ---
 
 ## Quick start
 
-The full step-by-step guide is in **[`docs/INSTALL_MCP.md`](docs/INSTALL_MCP.md)**.
+Full guide: **[`docs/INSTALL_MCP.md`](docs/INSTALL_MCP.md)**.
 
-The intended first-run sequence is:
+The default installation path is now:
 
 ```text
-1. Install Podman/Docker
-2. Prepare the sandbox image
-3. Start Claude Code with SAFE_REVERSER_* variables
-4. Add the marketplace
-5. Install safe-android-reverser
-6. /reload-plugins
-7. /mcp
-8. Call health
-9. Fingerprint an APK
-10. Run a full safe analysis prompt
+1. Install Podman or Docker
+2. Add the marketplace
+3. Install safe-android-reverser
+4. /reload-plugins
+5. /mcp
+6. Call health
+7. Analyze an APK
 ```
 
-### 1. Prepare the sandbox image
+You do **not** need to manually run `podman pull`, `podman run`, export runtime variables, or register a separate MCP server for the normal path.
 
-After the production image is published, rootless Podman is recommended:
+### 1. Verify the container runtime
+
+Rootless Podman is recommended:
 
 ```bash
-podman pull ghcr.io/salingnh/safe-android-reverser:0.1.0
-podman image inspect ghcr.io/salingnh/safe-android-reverser:0.1.0 >/dev/null \
-  && echo "safe-android-reverser image is ready"
+podman --version
+podman info
 ```
 
-Docker is also supported:
+Docker is also supported. If both are installed, the wrapper prefers Podman.
 
-```bash
-docker pull ghcr.io/salingnh/safe-android-reverser:0.1.0
-```
+### 2. Install the plugin
 
-For the current `feat/safe-sandbox-plugin` branch, build the image locally instead:
-
-```bash
-git clone --branch feat/safe-sandbox-plugin \
-  https://github.com/salingnh/android-reverse-engineering-mcp.git
-cd android-reverse-engineering-mcp
-
-set -a
-source sandbox/tools.lock.env
-set +a
-
-podman build \
-  -f sandbox/Dockerfile \
-  --build-arg JADX_VERSION="$JADX_VERSION" \
-  --build-arg JADX_SHA256="$JADX_SHA256" \
-  --build-arg VINEFLOWER_VERSION="$VINEFLOWER_VERSION" \
-  -t safe-android-reverser:dev .
-```
-
-### 2. Start Claude Code with the runtime configuration
-
-Released image:
-
-```bash
-export SAFE_REVERSER_RUNTIME=podman
-export SAFE_REVERSER_IMAGE=ghcr.io/salingnh/safe-android-reverser:0.1.0
-claude
-```
-
-Feature-branch image:
-
-```bash
-export SAFE_REVERSER_RUNTIME=podman
-export SAFE_REVERSER_IMAGE=safe-android-reverser:dev
-claude
-```
-
-Use `docker` instead of `podman` when required.
-
-Set these variables **before starting Claude Code**. The bundled MCP server inherits them when the plugin starts.
-
-### 3. Add the marketplace and plugin
-
-Released/master:
+Inside Claude Code:
 
 ```text
 /plugin marketplace add salingnh/android-reverse-engineering-mcp
@@ -96,71 +47,54 @@ Released/master:
 /reload-plugins
 ```
 
-Current feature branch:
+The plugin bundles `.mcp.json`. On first MCP startup the wrapper automatically:
 
 ```text
-/plugin marketplace add salingnh/android-reverse-engineering-mcp@feat/safe-sandbox-plugin
-/plugin install safe-android-reverser@salingnh-reverse-tools
-/reload-plugins
+detects Podman/Docker
+→ creates the plugin data directory
+→ pulls ghcr.io/salingnh/safe-android-reverser:0.1.0 if missing
+→ starts an ephemeral locked-down container
+→ connects MCP over stdio
 ```
 
-The plugin bundles `.mcp.json`, so you do **not** need a separate `claude mcp add` command.
+The container is tied to the MCP session and is removed automatically when that session ends. It is not a persistent daemon.
 
-### 4. Verify the MCP is up
-
-Inside Claude Code:
+### 3. Verify the MCP
 
 ```text
 /mcp
 ```
 
-Verify that `safe-android-reverser` is listed and connected/healthy.
-
-Then run this prompt:
+Then:
 
 ```text
 Use only the safe-android-reverser MCP server.
-Call the health tool and report whether the sandbox is ready and which reverse-engineering tools are available.
-Do not decompile or analyze any artifact yet.
+Call health and report the server version and whether JADX, Java, and Vineflower are available.
+Do not analyze any artifact yet.
 ```
 
-If `health` succeeds, the end-to-end MCP path is working:
-
-```text
-Claude -> plugin -> MCP wrapper -> container -> MCP server
-```
-
-### 5. Put a test APK under the project root
+### 4. Put a test APK under the project root
 
 ```bash
 mkdir -p artifacts
 cp /path/to/app.apk artifacts/app.apk
 ```
 
-The project is mounted read-only into the sandbox, so artifact paths passed to MCP should be relative to the Claude project root.
+### 5. First smoke test
 
-### 6. First test prompt
+```text
+Use only the safe-android-reverser MCP server.
+Run health and then fingerprint artifacts/app.apk.
+Return the framework, HTTP stack, obfuscation level, native libraries, notable SDKs, and recommended next analyzer.
+Do not decompile yet.
+```
+
+For a full workflow:
 
 ```text
 Analyze artifacts/app.apk using only the safe-android-reverser MCP server.
-
-Required workflow:
-1. Call health first. If the MCP or sandbox is unavailable, stop and report the setup error.
-2. Call fingerprint on artifacts/app.apk.
-3. Report the detected framework, HTTP stack, obfuscation level, native libraries, and notable SDK signals.
-4. If it is a native Android/JVM application, decompile it with JADX.
-5. Run extract_api on the resulting analysis job.
-6. Summarize likely first-party hosts, endpoint paths, HTTP/authentication signals, and the strongest source evidence.
-7. Use search_source/read_source_file only for high-signal findings.
-8. Do not execute host shell commands, host JADX/Java, install-dep.sh, sudo, or a non-MCP reverse-engineering path.
-```
-
-For a cheaper fingerprint-only smoke test:
-
-```text
-Use only safe-android-reverser MCP.
-Run health and then fingerprint artifacts/app.apk.
-Return only the fingerprint summary and recommended next analyzer. Do not decompile yet.
+Fingerprint it first, decompile native Android/JVM code with JADX when appropriate, run extract_api, then inspect only high-signal source evidence using search_source/read_source_file.
+Do not use host reverse-engineering tools or legacy host scripts.
 ```
 
 The plugin also includes:
@@ -169,13 +103,40 @@ The plugin also includes:
 /safe-decompile artifacts/app.apk
 ```
 
-For first-time validation, the explicit prompt above is easier to diagnose because every MCP step is visible.
+---
+
+## Automatic Podman/Docker lifecycle
+
+The plugin is designed so users do not manage the sandbox container manually:
+
+```text
+Claude Code
+    │
+    │ bundled MCP config
+    ▼
+safe-reverser-mcp wrapper
+    │
+    ├─ runtime auto-detection
+    ├─ first-use image pull
+    ├─ host UID/GID mapping
+    ├─ read-only project mount
+    ├─ writable isolated data mount
+    └─ resource/security limits
+              │
+              ▼
+       ephemeral container
+              │
+              ▼
+       MCP server + analyzers
+```
+
+For rootless Podman the wrapper runs with both `--userns=keep-id` and the current host UID/GID. This keeps `/data` writable without changing host file ownership and fixes the previous `/data/jobs` permission failure.
+
+Manual `podman run` commands are documented only for troubleshooting in [`docs/INSTALL_MCP.md`](docs/INSTALL_MCP.md).
 
 ---
 
 ## Architecture
-
-The target architecture is a reusable reverse-engineering platform rather than a skill that simply knows how to call JADX:
 
 ```text
 AI Agent
@@ -208,13 +169,11 @@ Responsibilities are separated deliberately:
 - **MCP server** — stable tool API, path validation, job management, and bounded access to results.
 - **Sandbox image** — decompilers and binary-analysis tools with restricted host/network access.
 
-The MCP layer is intended to become the primary integration surface. Claude Code is the first client, not the only possible client.
+The MCP layer is the primary integration surface. Claude Code is the first client, not the only possible client.
 
 ---
 
 ## Current MCP API
-
-The static MCP currently exposes:
 
 ```text
 health
@@ -237,7 +196,6 @@ Checks MCP/sandbox readiness and the reverse-engineering toolchain.
 
 Performs cheap pre-decompilation triage:
 
-- artifact type;
 - native Android vs Flutter / React Native / Cordova / Xamarin markers;
 - HTTP stack hints;
 - DI / serialization libraries;
@@ -257,18 +215,11 @@ AAR                        -> classes.jar + libs/*.jar -> Vineflower
 
 ### `extract_api`
 
-Extracts high-signal network evidence:
-
-- Retrofit annotations;
-- OkHttp/Ktor-style calls;
-- hard-coded URLs;
-- endpoint-shaped path literals;
-- auth/header/signing indicators;
-- likely first-party vs third-party hosts.
+Extracts high-signal network evidence such as Retrofit annotations, URLs, endpoint-shaped paths, authentication/signing indicators, and likely first-party vs third-party hosts.
 
 ### `search_source` / `read_source_file`
 
-Lets the agent retrieve only relevant decompiled evidence instead of receiving unrestricted shell access to the analysis directory.
+Retrieves bounded decompiled evidence without giving the agent unrestricted shell/filesystem access to analysis output.
 
 ### `recover_kotlin_names`
 
@@ -277,8 +228,6 @@ Produces candidate original Kotlin names from surviving metadata/debug evidence 
 ---
 
 ## Security model
-
-The primary threat model is analyzing **untrusted mobile artifacts** without giving the artifact or reverse-engineering toolchain normal workstation access.
 
 The sandbox launcher applies:
 
@@ -304,17 +253,34 @@ Runtime layout:
 /tmp         ephemeral temporary area
 ```
 
-The safe path does not automatically:
+The safe path does not:
 
 - run `install-dep.sh`;
 - call `sudo`;
 - install host packages;
-- modify `.bashrc`, `.zshrc`, or host `PATH`;
+- modify shell profiles or host `PATH`;
 - fall back to host-installed JADX/Vineflower;
 - expose ADB, Frida, or a device to the static sandbox;
 - give the static analyzer normal network access.
 
-If the MCP path fails, the safe plugin should report the setup error and stop instead of silently falling back to legacy host execution.
+If the MCP path fails, the plugin reports the setup error instead of falling back to legacy host execution.
+
+---
+
+## Runtime defaults
+
+Normal users do not need to set these manually:
+
+```text
+SAFE_REVERSER_RUNTIME=auto
+SAFE_REVERSER_IMAGE=ghcr.io/salingnh/safe-android-reverser:0.1.0
+SAFE_REVERSER_AUTO_PULL=1
+SAFE_REVERSER_MEMORY=4g
+SAFE_REVERSER_CPUS=2
+SAFE_REVERSER_PIDS_LIMIT=256
+```
+
+Advanced users can override them before starting Claude Code. Set `SAFE_REVERSER_AUTO_PULL=0` to disable first-use image pulling.
 
 ---
 
@@ -331,8 +297,6 @@ Python      standard-library MCP implementation
 
 JADX is version-pinned and SHA-256 verified during image build. Runtime containers do not contain `curl`/`wget` and do not resolve `latest` releases during analysis.
 
-Further supply-chain hardening will pin and verify every downloaded build artifact and strengthen image provenance/release controls.
-
 ---
 
 ## Repository layout
@@ -346,19 +310,19 @@ android-reverse-engineering-mcp/
 ├── docs/
 │   └── INSTALL_MCP.md
 ├── plugins/
-│   ├── safe-android-reverser/          # primary direction
+│   ├── safe-android-reverser/
 │   │   ├── .claude-plugin/plugin.json
 │   │   ├── .mcp.json
 │   │   ├── bin/safe-reverser-mcp
 │   │   ├── commands/safe-decompile.md
 │   │   └── skills/safe-android-reverser/SKILL.md
-│   └── android-reverse-engineering/    # legacy/upstream-compatible plugin
+│   └── android-reverse-engineering/    # legacy/upstream-compatible
 ├── sandbox/
 │   ├── Dockerfile
 │   ├── mcp_server.py
 │   ├── tests.py
-│   ├── tools.lock.env
-│   └── README.md
+│   ├── test_wrapper.sh
+│   └── tools.lock.env
 ├── LICENSE
 └── README.md
 ```
@@ -367,13 +331,7 @@ android-reverse-engineering-mcp/
 
 ## Legacy upstream plugin
 
-The original `android-reverse-engineering` plugin and its shell/PowerShell workflow remain for compatibility and attribution, but they are **not** the preferred execution architecture for new development.
-
-If intentionally required:
-
-```text
-/plugin install android-reverse-engineering@salingnh-reverse-tools
-```
+The original `android-reverse-engineering` plugin and its shell/PowerShell workflow remain for compatibility and attribution, but they are not the preferred execution path.
 
 New analyzer functionality should normally be implemented behind MCP rather than as another host-executed script/install path.
 
@@ -381,17 +339,7 @@ New analyzer functionality should normally be implemented behind MCP rather than
 
 ## Roadmap
 
-The longer-term goal is a general reverse-engineering MCP platform.
-
-Planned directions include:
-
-- normalized JSON/evidence output;
-- Flutter and React Native analyzer profiles;
-- native `.so` analysis;
-- call graph and AST/data-flow analysis;
-- request/response model extraction;
-- gRPC/protobuf, WebSocket/SSE/MQTT discovery;
-- a **separate** dynamic-analysis MCP/profile for ADB, Frida/Objection, controlled proxying, and scoped network access.
+The longer-term goal is a general reverse-engineering MCP platform, including normalized evidence output, Flutter/React Native profiles, native `.so` analysis, semantic call/data-flow analysis, and a separate dynamic-analysis MCP for controlled ADB/Frida use.
 
 Static analysis will not automatically gain dynamic-analysis privileges.
 
@@ -402,7 +350,8 @@ Static analysis will not automatically gain dynamic-analysis privileges.
 `.github/workflows/build-safe-sandbox.yml` validates:
 
 - MCP tests;
-- shell wrapper syntax;
+- automatic runtime-wrapper behavior;
+- shell syntax;
 - plugin/marketplace JSON;
 - sandbox image build.
 
@@ -420,8 +369,6 @@ with BuildKit SBOM/provenance metadata from controlled `master`/release-tag work
 
 Use this project only for lawful reverse engineering, interoperability work, authorized security research, malware analysis, incident response, education, or systems you are authorized to inspect.
 
-You are responsible for compliance with applicable laws, licenses, and software terms.
-
 ---
 
 ## License and attribution
@@ -432,4 +379,4 @@ This repository originated from and still contains substantial work from:
 
 [SimoneAvogadro/android-reverse-engineering-skill](https://github.com/SimoneAvogadro/android-reverse-engineering-skill)
 
-The MCP-first sandbox architecture and `safe-android-reverser` plugin are the direction maintained by this fork.
+The MCP-first sandbox architecture and `safe-android-reverser` plugin are maintained in this fork.

@@ -1,6 +1,6 @@
 {
   "name": "safe-android-reverser",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Sandboxed Android reverse engineering through an MCP server running in a locked-down container.",
   "author": {
     "name": "salingnh"

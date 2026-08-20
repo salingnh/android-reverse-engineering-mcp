@@ -1,162 +1,79 @@
-# Install and verify Safe Android Reverser MCP
+# Install and use Safe Android Reverser MCP
 
-This guide installs the `safe-android-reverser` Claude Code plugin, starts its bundled MCP server through the sandbox wrapper, verifies that the MCP is healthy, and runs a first Android reverse-engineering prompt.
+This is the recommended installation path for `safe-android-reverser`.
 
-The runtime model is:
+The normal user flow is intentionally short:
+
+```text
+install Podman or Docker
+        ↓
+add marketplace
+        ↓
+install plugin
+        ↓
+/reload-plugins
+        ↓
+/mcp
+        ↓
+use the MCP tools
+```
+
+You do **not** need to run `podman pull`, `podman run`, `docker pull`, `docker run`, or `claude mcp add` during the normal installation flow.
+
+The plugin starts the container automatically when Claude Code starts/reconnects the bundled MCP server.
+
+## How automatic startup works
 
 ```text
 Claude Code
     │
-    │ MCP stdio
-    ▼
-safe-android-reverser plugin
-    │
+    │ starts plugin MCP command
     ▼
 safe-reverser-mcp wrapper
     │
-    ▼
-rootless Podman / Docker
-    │
-    ▼
-MCP server + JADX / Vineflower
+    ├─ detect Podman first, otherwise Docker
+    ├─ create the plugin data directory
+    ├─ check for ghcr.io/salingnh/safe-android-reverser:0.1.0
+    ├─ pull the pinned image automatically if it is missing
+    ├─ map the current host UID/GID for writable /data
+    └─ run an ephemeral locked-down container
+              │
+              ▼
+       Python MCP server
+       JADX / Vineflower
 ```
 
-The analyzed project is mounted read-only. Reverse-engineering output is written to the plugin data directory. The static sandbox has no normal network access and does not expose an arbitrary shell tool.
+The container is intentionally **not** a background daemon. MCP uses stdio, so the container lifetime is tied to the Claude Code MCP session. The wrapper launches it with `podman run --rm -i` (or Docker equivalent) and it is removed automatically when the MCP session ends.
 
 ## 1. Prerequisites
 
 You need:
 
-- Claude Code with plugin support;
-- Git;
-- either rootless Podman (recommended on Linux/Fedora) or Docker;
-- an APK/JAR/AAR file you are authorized to analyze.
+- Claude Code with plugin/marketplace support;
+- either Podman or Docker;
+- an APK/JAR/AAR that you are authorized to analyze.
 
-### Podman
+### Recommended: rootless Podman
 
-Check that Podman is available:
+Check that Podman works as your normal user:
 
 ```bash
 podman --version
 podman info
 ```
 
-Rootless Podman is preferred because the container runtime itself does not require the user to belong to a root-equivalent Docker group.
+Do not run Claude Code or this MCP plugin with `sudo`.
 
-### Docker
-
-Alternatively:
+Docker is also supported:
 
 ```bash
 docker --version
 docker info
 ```
 
-## 2. Choose the installation path
+If both Podman and Docker are installed, the wrapper prefers Podman.
 
-There are two supported paths.
-
-### A. Released/master installation
-
-Use this after `safe-android-reverser` has been merged and the GHCR image has been published.
-
-Podman:
-
-```bash
-podman pull ghcr.io/salingnh/safe-android-reverser:0.1.0
-podman image inspect ghcr.io/salingnh/safe-android-reverser:0.1.0 >/dev/null \
-  && echo "safe-android-reverser image is ready"
-```
-
-Docker:
-
-```bash
-docker pull ghcr.io/salingnh/safe-android-reverser:0.1.0
-docker image inspect ghcr.io/salingnh/safe-android-reverser:0.1.0 >/dev/null \
-  && echo "safe-android-reverser image is ready"
-```
-
-The plugin intentionally does not auto-pull executable images by default.
-
-### B. Current feature-branch installation
-
-Use this while testing `feat/safe-sandbox-plugin` before the production image is published.
-
-```bash
-git clone \
-  --branch feat/safe-sandbox-plugin \
-  https://github.com/salingnh/android-reverse-engineering-mcp.git
-
-cd android-reverse-engineering-mcp
-
-set -a
-source sandbox/tools.lock.env
-set +a
-```
-
-Build with Podman:
-
-```bash
-podman build \
-  -f sandbox/Dockerfile \
-  --build-arg JADX_VERSION="$JADX_VERSION" \
-  --build-arg JADX_SHA256="$JADX_SHA256" \
-  --build-arg VINEFLOWER_VERSION="$VINEFLOWER_VERSION" \
-  -t safe-android-reverser:dev .
-
-podman image inspect safe-android-reverser:dev >/dev/null \
-  && echo "development image is ready"
-```
-
-Or Docker:
-
-```bash
-docker build \
-  -f sandbox/Dockerfile \
-  --build-arg JADX_VERSION="$JADX_VERSION" \
-  --build-arg JADX_SHA256="$JADX_SHA256" \
-  --build-arg VINEFLOWER_VERSION="$VINEFLOWER_VERSION" \
-  -t safe-android-reverser:dev .
-
-docker image inspect safe-android-reverser:dev >/dev/null \
-  && echo "development image is ready"
-```
-
-## 3. Start Claude Code with the runtime configuration
-
-Environment variables must be visible to the Claude Code process because the plugin MCP wrapper inherits them when the MCP server starts.
-
-For a released image with Podman:
-
-```bash
-export SAFE_REVERSER_RUNTIME=podman
-export SAFE_REVERSER_IMAGE=ghcr.io/salingnh/safe-android-reverser:0.1.0
-claude
-```
-
-For a released image with Docker:
-
-```bash
-export SAFE_REVERSER_RUNTIME=docker
-export SAFE_REVERSER_IMAGE=ghcr.io/salingnh/safe-android-reverser:0.1.0
-claude
-```
-
-For the locally built feature-branch image:
-
-```bash
-export SAFE_REVERSER_RUNTIME=podman
-export SAFE_REVERSER_IMAGE=safe-android-reverser:dev
-claude
-```
-
-Replace `podman` with `docker` if required.
-
-If Claude Code was already running before these variables were exported, restart it so the plugin MCP process receives the new environment.
-
-## 4. Add the marketplace
-
-### Released/master
+## 2. Add the marketplace
 
 Inside Claude Code:
 
@@ -164,13 +81,7 @@ Inside Claude Code:
 /plugin marketplace add salingnh/android-reverse-engineering-mcp
 ```
 
-### Current feature branch
-
-```text
-/plugin marketplace add salingnh/android-reverse-engineering-mcp@feat/safe-sandbox-plugin
-```
-
-## 5. Install the plugin
+## 3. Install the plugin
 
 Inside Claude Code:
 
@@ -179,58 +90,73 @@ Inside Claude Code:
 /reload-plugins
 ```
 
-The plugin contains `.mcp.json`, so the `safe-android-reverser` MCP server is started automatically when the plugin is enabled.
+That is the complete normal installation.
 
-You do not need to run a separate `claude mcp add` command.
+No additional MCP registration command is required because the plugin already contains `.mcp.json`.
 
-## 6. Verify that the MCP server is up
+On the first MCP startup, if the sandbox image is not present locally, the wrapper automatically pulls:
 
-First open the MCP status view:
+```text
+ghcr.io/salingnh/safe-android-reverser:0.1.0
+```
+
+Subsequent starts reuse the local image.
+
+## 4. Verify that the MCP is up
+
+Inside Claude Code:
 
 ```text
 /mcp
 ```
 
-Verify that `safe-android-reverser` is listed and is connected/healthy. Exact status wording may vary by Claude Code version.
+Verify that `safe-android-reverser` is listed as connected/healthy.
 
-Then test the actual MCP tool surface with this prompt:
+Then run:
 
 ```text
 Use only the safe-android-reverser MCP server.
-Call the health tool and report whether the sandbox is ready and which reverse-engineering tools are available.
-Do not decompile or analyze any artifact yet.
+Call the health tool and report the server version and whether JADX, Java, and Vineflower are available.
+Do not analyze any artifact yet.
 ```
 
-A successful test means:
-
-1. Claude can see the `safe-android-reverser` MCP server;
-2. the `health` tool returns without an MCP transport/runtime error;
-3. the sandbox can see its installed reverse-engineering toolchain.
-
-At this point the MCP path is working end to end:
+A successful response confirms this complete path:
 
 ```text
-Claude -> plugin -> MCP wrapper -> container -> MCP server
+Claude Code
+  -> plugin
+      -> MCP wrapper
+          -> Podman/Docker
+              -> sandbox container
+                  -> MCP server
 ```
 
-## 7. Prepare a test APK
+## 5. Put an APK under the Claude project root
 
-The MCP server only accepts artifact paths under the Claude project root because the project is mounted into the sandbox read-only.
+The project is mounted read-only into the sandbox. Put artifacts under the project directory and use paths relative to that root.
 
-From your project directory:
+Example:
 
 ```bash
 mkdir -p artifacts
 cp /path/to/app.apk artifacts/app.apk
 ```
 
-Start Claude Code from that project root, or ensure `CLAUDE_PROJECT_DIR` resolves to it.
+Do not pass arbitrary absolute host paths to the MCP tools.
 
-Do not place the APK only in an unrelated host directory and pass an absolute host path; the sandbox intentionally restricts path access.
+## 6. First smoke-test prompt
 
-## 8. First test prompt
+Use this first because it is cheap and easy to diagnose:
 
-Use this prompt for a full safe static-analysis smoke test:
+```text
+Use only the safe-android-reverser MCP server.
+1. Call health.
+2. Fingerprint artifacts/app.apk.
+3. Report framework, HTTP stack, obfuscation level, native libraries, notable SDKs, and the recommended next analyzer.
+Do not decompile yet.
+```
+
+## 7. Full analysis prompt
 
 ```text
 Analyze artifacts/app.apk using only the safe-android-reverser MCP server.
@@ -242,48 +168,157 @@ Required workflow:
 4. If it is a native Android/JVM application, decompile it with JADX.
 5. Run extract_api on the resulting analysis job.
 6. Summarize likely first-party hosts, endpoint paths, HTTP/authentication signals, and the strongest source evidence.
-7. Use search_source/read_source_file only for the highest-signal findings.
-8. Do not execute host shell commands, host JADX/Java, install-dep.sh, sudo, or any non-MCP reverse-engineering path.
+7. Use search_source/read_source_file only for high-signal findings.
+8. Do not use host JADX/Java, install-dep.sh, sudo, or any non-MCP reverse-engineering path.
 ```
 
-For a lighter first test that stops before decompilation:
-
-```text
-Use only safe-android-reverser MCP.
-Run health and then fingerprint artifacts/app.apk.
-Return only the fingerprint summary and recommended next analyzer. Do not decompile yet.
-```
-
-## 9. Slash command
-
-The plugin also includes the safe workflow command:
+The bundled slash command is also available:
 
 ```text
 /safe-decompile artifacts/app.apk
 ```
 
-The natural-language prompt above is preferable for the first smoke test because it makes each MCP step explicit and easier to diagnose.
+## Runtime defaults
 
-## 10. Expected MCP tools
+For normal use you do not need to set any environment variables.
 
-The current static MCP exposes:
+Defaults:
 
 ```text
-health
-fingerprint
-decompile
-extract_api
-search_source
-read_source_file
-recover_kotlin_names
-list_jobs
+SAFE_REVERSER_RUNTIME=auto
+SAFE_REVERSER_IMAGE=ghcr.io/salingnh/safe-android-reverser:0.1.0
+SAFE_REVERSER_AUTO_PULL=1
+SAFE_REVERSER_MEMORY=4g
+SAFE_REVERSER_CPUS=2
+SAFE_REVERSER_PIDS_LIMIT=256
 ```
 
-It deliberately does not expose generic `shell`, `exec`, `bash`, `docker`, or `podman` tools.
+`SAFE_REVERSER_RUNTIME=auto` means:
 
-## 11. Troubleshooting
+```text
+Podman available -> use Podman
+otherwise Docker available -> use Docker
+otherwise -> fail with a setup error
+```
 
-### MCP server is not listed in `/mcp`
+To force a runtime:
+
+```bash
+export SAFE_REVERSER_RUNTIME=podman
+# or
+export SAFE_REVERSER_RUNTIME=docker
+```
+
+To prevent automatic image downloads:
+
+```bash
+export SAFE_REVERSER_AUTO_PULL=0
+```
+
+If you override these variables, start/restart Claude Code from a shell that has the variables set so the bundled MCP process inherits them.
+
+## What Podman is started automatically
+
+The wrapper effectively launches an ephemeral container equivalent to:
+
+```bash
+podman run \
+  --rm \
+  -i \
+  --network=none \
+  --read-only \
+  --cap-drop=ALL \
+  --security-opt=no-new-privileges \
+  --pids-limit=256 \
+  --memory=4g \
+  --cpus=2 \
+  --tmpfs=/tmp:rw,nosuid,nodev,size=1g \
+  --tmpfs=/work:rw,nosuid,nodev,size=2g \
+  --userns=keep-id \
+  --user="$(id -u):$(id -g)" \
+  --volume="$PWD:/workspace:ro,z" \
+  --volume="<plugin-data>:/data:rw,z" \
+  ghcr.io/salingnh/safe-android-reverser:0.1.0
+```
+
+The explicit `--user="$(id -u):$(id -g)"` is important for rootless Podman. It keeps the bind-mounted `/data` directory writable by the same host user while the container still runs non-root.
+
+This fixes the failure mode:
+
+```text
+PermissionError: [Errno 13] Permission denied: '/data/jobs'
+```
+
+## Troubleshooting
+
+### `CONNECTION_CLOSED`
+
+`CONNECTION_CLOSED` normally means the MCP wrapper or container exited before/during the MCP handshake.
+
+First check Podman/Docker itself:
+
+```bash
+podman info
+```
+
+Then check whether the image exists locally:
+
+```bash
+podman image inspect ghcr.io/salingnh/safe-android-reverser:0.1.0
+```
+
+If it is missing, normal plugin startup should pull it automatically. You can also pull it manually for diagnosis:
+
+```bash
+podman pull ghcr.io/salingnh/safe-android-reverser:0.1.0
+```
+
+### Manual Podman MCP smoke test
+
+Manual `podman run` is only needed for troubleshooting. From the project root:
+
+```bash
+mkdir -p "$HOME/.local/share/safe-android-reverser"
+
+printf '%s\n' \
+'{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"podman-smoke-test","version":"1.0"}}}' \
+'{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}' \
+'{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"health","arguments":{}}}' \
+| podman run \
+    --rm \
+    -i \
+    --network=none \
+    --read-only \
+    --cap-drop=ALL \
+    --security-opt=no-new-privileges \
+    --pids-limit=256 \
+    --memory=4g \
+    --cpus=2 \
+    --tmpfs=/tmp:rw,nosuid,nodev,size=1g \
+    --tmpfs=/work:rw,nosuid,nodev,size=2g \
+    --userns=keep-id \
+    --user="$(id -u):$(id -g)" \
+    --volume="$PWD:/workspace:ro,z" \
+    --volume="$HOME/.local/share/safe-android-reverser:/data:rw,z" \
+    ghcr.io/salingnh/safe-android-reverser:0.1.0
+```
+
+A successful test returns JSON-RPC responses for `id: 1` and `id: 2`, with the `health` result showing the reverse-engineering tool availability.
+
+### Verify `/data` permission separately
+
+```bash
+podman run \
+  --rm \
+  --userns=keep-id \
+  --user="$(id -u):$(id -g)" \
+  --volume="$HOME/.local/share/safe-android-reverser:/data:rw,z" \
+  --entrypoint /bin/sh \
+  ghcr.io/salingnh/safe-android-reverser:0.1.0 \
+  -lc 'id; mkdir -p /data/jobs; touch /data/jobs/write-test; ls -l /data/jobs/write-test'
+```
+
+### MCP is not listed in `/mcp`
 
 Run:
 
@@ -291,38 +326,7 @@ Run:
 /reload-plugins
 ```
 
-If it is still absent, confirm the plugin is installed and enabled, then restart Claude Code.
-
-### MCP starts but reports that the image is missing
-
-Check the exact image configured in the shell that launches Claude Code:
-
-```bash
-echo "$SAFE_REVERSER_IMAGE"
-echo "$SAFE_REVERSER_RUNTIME"
-```
-
-Then inspect it with the selected runtime:
-
-```bash
-podman image inspect "$SAFE_REVERSER_IMAGE"
-```
-
-or:
-
-```bash
-docker image inspect "$SAFE_REVERSER_IMAGE"
-```
-
-### Want the wrapper to pull automatically
-
-Explicitly opt in before starting Claude Code:
-
-```bash
-export SAFE_REVERSER_AUTO_PULL=1
-```
-
-The default is `0` so enabling a plugin does not silently download executable images.
+If it is still absent, restart Claude Code and verify the plugin is installed/enabled.
 
 ### Artifact path is rejected
 
@@ -332,27 +336,26 @@ Move the artifact under the project root, for example:
 <project>/artifacts/app.apk
 ```
 
-and call MCP with the relative path:
+and call the MCP with:
 
 ```text
 artifacts/app.apk
 ```
 
-### Docker permission error
+## Security boundary
 
-Use rootless Podman where possible. If Docker is required, configure Docker access according to your operating system's security policy rather than running the plugin with `sudo`.
+Automatic startup does not mean the agent receives Podman or shell access as an MCP tool.
 
-## 12. Security boundary reminder
-
-A healthy MCP session does not mean the agent receives unrestricted container access. The intended boundary remains:
+The boundary remains:
 
 ```text
 Agent
   -> allow-listed MCP tools
-      -> non-root sandbox
+      -> wrapper-controlled ephemeral container
+          -> non-root process
           -> read-only project input
           -> isolated writable analysis data
           -> no normal runtime network
 ```
 
-If the MCP path fails, the safe plugin should report the error. It must not silently fall back to the legacy host-executed reverse-engineering scripts.
+If this path fails, the plugin must report the setup error rather than falling back to the legacy host-executed reverse-engineering scripts.
