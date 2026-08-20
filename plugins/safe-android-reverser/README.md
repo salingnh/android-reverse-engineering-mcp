@@ -15,7 +15,7 @@ isolated container with an allow-listed MCP API.
 Inside Claude Code:
 
 ```text
-/plugin marketplace add salingnh/android-reverse-engineering-skill
+/plugin marketplace add salingnh/android-reverse-engineering-mcp
 /plugin install safe-android-reverser@salingnh-reverse-tools
 /reload-plugins
 ```
@@ -28,7 +28,7 @@ starts automatically.
 The marketplace can be pinned to the feature branch:
 
 ```text
-/plugin marketplace add salingnh/android-reverse-engineering-skill@feat/safe-sandbox-plugin
+/plugin marketplace add salingnh/android-reverse-engineering-mcp@feat/safe-sandbox-plugin
 /plugin install safe-android-reverser@salingnh-reverse-tools
 /reload-plugins
 ```
@@ -37,8 +37,8 @@ The feature branch CI builds the image but deliberately does not publish a produ
 Build a local image from the branch and point the plugin at it:
 
 ```bash
-git clone --branch feat/safe-sandbox-plugin https://github.com/salingnh/android-reverse-engineering-skill.git
-cd android-reverse-engineering-skill
+git clone --branch feat/safe-sandbox-plugin https://github.com/salingnh/android-reverse-engineering-mcp.git
+cd android-reverse-engineering-mcp
 set -a
 source sandbox/tools.lock.env
 set +a
