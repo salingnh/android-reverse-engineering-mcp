@@ -57,14 +57,14 @@ COMMON=(
 if [[ "$RUNTIME" == "podman" ]]; then
   exec podman "${COMMON[@]}" \
     --userns=keep-id \
-    --mount="type=bind,src=$PROJECT_DIR,dst=/workspace,ro=true,relabel=shared" \
-    --mount="type=bind,src=$DATA_DIR,dst=/data,rw=true,relabel=shared" \
+    --volume="$PROJECT_DIR:/workspace:ro,z" \
+    --volume="$DATA_DIR:/data:rw,z" \
     "$IMAGE"
 else
   UID_GID="$(id -u):$(id -g)"
   exec docker "${COMMON[@]}" \
     --user="$UID_GID" \
-    --mount="type=bind,src=$PROJECT_DIR,dst=/workspace,readonly" \
-    --mount="type=bind,src=$DATA_DIR,dst=/data" \
+    --volume="$PROJECT_DIR:/workspace:ro" \
+    --volume="$DATA_DIR:/data:rw" \
     "$IMAGE"
 fi
