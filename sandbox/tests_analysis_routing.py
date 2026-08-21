@@ -55,8 +55,11 @@ class AnalysisRoutingTests(unittest.TestCase):
         )
         self.assertEqual(route["framework_id"], "flutter")
         self.assertEqual(route["primary_profile"], "framework-flutter")
-        self.assertEqual(route["primary_profile_status"], "partial")
+        self.assertEqual(route["primary_profile_status"], "available")
         self.assertFalse(route["allow_java_decompile_as_primary"])
+        self.assertTrue(
+            any("runtime-cache image" in item for item in route["limitations"])
+        )
         secondary = {
             item["profile"]: item["purpose"] for item in route["secondary_profiles"]
         }
@@ -124,7 +127,9 @@ class AnalysisRoutingTests(unittest.TestCase):
         self.assertEqual(
             result["analysis_route"]["primary_profile"], "framework-flutter"
         )
-        self.assertEqual(result["analysis_route"]["primary_profile_status"], "partial")
+        self.assertEqual(
+            result["analysis_route"]["primary_profile_status"], "available"
+        )
         self.assertFalse(result["analysis_route"]["allow_java_decompile_as_primary"])
 
     def test_route_analysis_tool_is_registered(self):
@@ -142,9 +147,15 @@ class AnalysisRoutingTests(unittest.TestCase):
             "available",
         )
         flutter = result["analysis_routing"]["profiles"]["framework-flutter"]
-        self.assertEqual(flutter["status"], "partial")
+        self.assertEqual(flutter["status"], "available")
+        self.assertEqual(
+            flutter["capability_server"], "safe-android-reverser-flutter"
+        )
         self.assertIn("artifact-inventory", flutter["available_capabilities"])
-        self.assertIn("dart-aot-index", flutter["planned_capabilities"])
+        self.assertIn("dart-aot-index", flutter["available_capabilities"])
+        self.assertIn("dart-xrefs", flutter["available_capabilities"])
+        self.assertIn("flutter-network-model", flutter["available_capabilities"])
+        self.assertNotIn("dart-aot-index", flutter["planned_capabilities"])
         self.assertEqual(
             result["analysis_routing"]["profiles"]["framework-react-native"][
                 "status"
