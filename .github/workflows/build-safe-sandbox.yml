@@ -5,6 +5,8 @@ on:
     paths:
       - 'sandbox/**'
       - 'plugins/safe-android-reverser/**'
+      - 'scripts/check_release_consistency.py'
+      - '.claude-plugin/marketplace.json'
       - '.github/workflows/build-safe-sandbox.yml'
   push:
     branches:
@@ -15,6 +17,8 @@ on:
     paths:
       - 'sandbox/**'
       - 'plugins/safe-android-reverser/**'
+      - 'scripts/check_release_consistency.py'
+      - '.claude-plugin/marketplace.json'
       - '.github/workflows/build-safe-sandbox.yml'
   workflow_dispatch:
 
@@ -29,19 +33,38 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+
+      - name: Read release version
+        id: version
+        shell: bash
+        run: |
+          version="$(tr -d '[:space:]' < plugins/safe-android-reverser/VERSION)"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Check release consistency
+        run: python3 scripts/check_release_consistency.py
+
       - name: Test MCP server
         run: python3 sandbox/tests.py
+
       - name: Test program understanding
         run: python3 sandbox/tests_program_understanding.py
+
       - name: Test program understanding source scopes and cache integrity
         run: PYTHONPATH=sandbox python3 sandbox/tests_program_understanding_scopes.py
-      - name: Test extended MCP registration
+
+      - name: Test extended MCP registration and release metadata
+        env:
+          SAFE_REVERSER_IMAGE_VERSION: ${{ steps.version.outputs.version }}
+          SAFE_REVERSER_PLUGIN_VERSION: ${{ steps.version.outputs.version }}
+          SAFE_REVERSER_BUILD_COMMIT: ${{ github.sha }}
         run: |
           export SAFE_REVERSER_WORKSPACE="$RUNNER_TEMP/safe-reverser-workspace"
           export SAFE_REVERSER_DATA_ROOT="$RUNNER_TEMP/safe-reverser-data"
           mkdir -p "$SAFE_REVERSER_WORKSPACE" "$SAFE_REVERSER_DATA_ROOT"
           PYTHONPATH=sandbox python3 - <<'PY'
-          import mcp_server_v2 as server
+          import mcp_entrypoint as entry
+          server = entry.server
           names = {tool["name"] for tool in server.core.TOOLS}
           expected = {
               "build_program_index",
@@ -53,18 +76,37 @@ jobs:
           }
           missing = expected - names
           assert not missing, f"missing semantic MCP tools: {sorted(missing)}"
-          health = server.health({})
-          assert health["version"] == "0.2.0"
+          health = entry.health({})
+          assert health["version"] == entry.RELEASE_VERSION, health
+          assert health["release"]["server_version"] == entry.RELEASE_VERSION, health
+          assert health["release"]["plugin_version"] == entry.RELEASE_VERSION, health
+          assert health["release"]["image_version"] == entry.RELEASE_VERSION, health
+          assert health["release"]["version_consistent"] is True, health
           assert health["program_understanding"]["program_index"] is True
           assert health["program_understanding"]["index_storage"] == "sqlite"
           PY
+
       - name: Test automatic runtime wrapper
         run: bash sandbox/test_wrapper.sh
+
       - name: Validate Python syntax
         run: |
-          python3 -m py_compile sandbox/mcp_server.py sandbox/mcp_server_v2.py sandbox/program_understanding.py sandbox/program_understanding_v2.py sandbox/pu_source.py sandbox/pu_index.py sandbox/pu_network.py sandbox/tests_program_understanding.py sandbox/tests_program_understanding_scopes.py
+          python3 -m py_compile \
+            sandbox/mcp_server.py \
+            sandbox/mcp_server_v2.py \
+            sandbox/mcp_entrypoint.py \
+            sandbox/program_understanding.py \
+            sandbox/program_understanding_v2.py \
+            sandbox/pu_source.py \
+            sandbox/pu_index.py \
+            sandbox/pu_network.py \
+            sandbox/tests_program_understanding.py \
+            sandbox/tests_program_understanding_scopes.py \
+            scripts/check_release_consistency.py
+
       - name: Validate shell wrapper syntax
         run: bash -n plugins/safe-android-reverser/bin/safe-reverser-mcp
+
       - name: Validate JSON manifests
         run: |
           python3 -m json.tool plugins/safe-android-reverser/.claude-plugin/plugin.json >/dev/null
@@ -77,6 +119,13 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      - name: Read release version
+        id: version
+        shell: bash
+        run: |
+          version="$(tr -d '[:space:]' < plugins/safe-android-reverser/VERSION)"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
@@ -88,6 +137,9 @@ jobs:
           load: true
           push: false
           tags: safe-android-reverser:ci
+          build-args: |
+            SAFE_REVERSER_VERSION=${{ steps.version.outputs.version }}
+            SAFE_REVERSER_BUILD_COMMIT=${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -126,6 +178,8 @@ jobs:
             /workspace/sandbox/tests_program_understanding_scopes.py
 
       - name: Run MCP health smoke test inside image
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
           mkdir -p "$RUNNER_TEMP/safe-reverser-mcp-data"
           output="$RUNNER_TEMP/safe-reverser-health.jsonl"
@@ -141,16 +195,25 @@ jobs:
               --tmpfs=/tmp:rw,nosuid,nodev,size=1g \
               --tmpfs=/work:rw,nosuid,nodev,size=1g \
               --user="$(id -u):$(id -g)" \
+              --env="SAFE_REVERSER_PLUGIN_VERSION=$VERSION" \
+              --env="SAFE_REVERSER_IMAGE_REF=safe-android-reverser:ci" \
+              --env="SAFE_REVERSER_IMAGE_ID=ci-test" \
               --volume="$PWD:/workspace:ro" \
               --volume="$RUNNER_TEMP/safe-reverser-mcp-data:/data:rw" \
               safe-android-reverser:ci > "$output"
-          python3 - "$output" <<'PY'
+          python3 - "$output" "$VERSION" <<'PY'
           import json
           import sys
           responses = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8") if line.strip()]
+          expected_version = sys.argv[2]
           health_response = next(item for item in responses if item.get("id") == 2)
           payload = json.loads(health_response["result"]["content"][0]["text"])
-          assert payload["version"] == "0.2.0", payload
+          assert payload["version"] == expected_version, payload
+          assert payload["release"]["server_version"] == expected_version, payload
+          assert payload["release"]["plugin_version"] == expected_version, payload
+          assert payload["release"]["image_version"] == expected_version, payload
+          assert payload["release"]["version_consistent"] is True, payload
+          assert payload["release"]["build_commit"] == "${{ github.sha }}", payload
           assert payload["tools"]["androguard"] is True, payload
           assert payload["program_understanding"]["cfg"] is True, payload
           assert payload["program_understanding"]["index_storage"] == "sqlite", payload
@@ -164,15 +227,25 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Refuse to overwrite an existing semver image
+        if: startsWith(github.ref, 'refs/tags/safe-v')
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          image="ghcr.io/${{ github.repository_owner }}/safe-android-reverser:$VERSION"
+          if docker buildx imagetools inspect "$image" >/dev/null 2>&1; then
+            echo "::error::release image already exists and is immutable: $image"
+            exit 1
+          fi
+
       - name: Docker metadata
         id: meta
         uses: docker/metadata-action@v6
         with:
           images: ghcr.io/${{ github.repository_owner }}/safe-android-reverser
           tags: |
-            type=raw,value=0.2.0
             type=ref,event=branch
-            type=ref,event=pr
+            type=sha,prefix=sha-
             type=match,pattern=safe-v(.*),group=1
 
       - name: Publish tested image
@@ -184,6 +257,9 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            SAFE_REVERSER_VERSION=${{ steps.version.outputs.version }}
+            SAFE_REVERSER_BUILD_COMMIT=${{ github.sha }}
           provenance: mode=max
           sbom: true
           cache-from: type=gha
