@@ -4,20 +4,29 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
+import resource
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
+
+from cache_identity import runtime_cache_tag, validate_runtime_identity
 
 BLUTTER_ROOT = Path(os.environ.get("SAFE_BLUTTER_ROOT", "/opt/blutter")).resolve()
 INPUT_ROOT = Path(os.environ.get("SAFE_FLUTTER_INPUT", "/input")).resolve()
 OUTPUT_ROOT = Path(os.environ.get("SAFE_FLUTTER_OUTPUT", "/output")).resolve()
-BLUTTER_COMMIT = os.environ.get("SAFE_BLUTTER_COMMIT", "unknown")
+BLUTTER_COMMIT = os.environ.get("SAFE_BLUTTER_COMMIT", "unknown").strip().lower()
 IMAGE_REPOSITORY = os.environ.get(
     "SAFE_FLUTTER_IMAGE_REPOSITORY",
     "ghcr.io/salingnh/safe-android-reverser-flutter",
 ).strip()
 MAX_PROCESS_OUTPUT = 120_000
+MAX_GENERATED_FILES = 20_000
+MAX_GENERATED_FILE_BYTES = 512 * 1024 * 1024
+REQUIRED_OUTPUT_VOLUME_BYTES = 4 * 1024 * 1024 * 1024
+ENGINE_ID_RE = re.compile(r"^[0-9a-fA-F]{40}$")
 
 
 class AdapterError(Exception):
@@ -54,21 +63,36 @@ def _import_runtime_helpers():
     try:
         from blutter import BlutterInput  # type: ignore
         from dartvm_fetch_build import DartLibInfo  # type: ignore
-        from extract_dart_info import extract_libflutter_info, extract_snapshot_hash_flags  # type: ignore
+        from extract_dart_info import (  # type: ignore
+            extract_libflutter_info,
+            extract_snapshot_hash_flags,
+        )
     except Exception as exc:
-        raise AdapterError(f"cannot import pinned Blutter source: {type(exc).__name__}: {exc}") from exc
+        raise AdapterError(
+            f"cannot import pinned Blutter source: {type(exc).__name__}: {exc}"
+        ) from exc
     return BlutterInput, DartLibInfo, extract_snapshot_hash_flags, extract_libflutter_info
 
 
-def _runtime_cache_tag(
-    dart_version: str, arch: str, snapshot_hash: str, compressed_pointers: bool
-) -> str:
-    safe_version = "".join(
-        ch.lower() if ch.isalnum() or ch in ".-_" else "-" for ch in dart_version
-    )[:64]
-    safe_arch = "".join(ch.lower() if ch.isalnum() else "-" for ch in arch)[:32]
-    mode = "cp" if compressed_pointers else "ncp"
-    return f"dart-{safe_version}-{safe_arch}-{mode}-{snapshot_hash.lower()[:12]}"
+def _bounded_engine_ids(values: Any) -> list[str]:
+    result = []
+    for value in list(values or [])[:16]:
+        text = str(value).strip().lower()
+        if not ENGINE_ID_RE.fullmatch(text):
+            raise AdapterError("Blutter returned an invalid Flutter engine commit id")
+        result.append(text)
+    return result
+
+
+def _bounded_flags(values: Any) -> list[str]:
+    result = []
+    for value in list(values or [])[:200]:
+        text = str(value).strip()
+        if len(text) > 256:
+            raise AdapterError("Blutter returned an oversized Dart runtime flag")
+        if text:
+            result.append(text)
+    return result
 
 
 def _runtime_info(libdir: Path) -> dict[str, Any]:
@@ -85,22 +109,30 @@ def _runtime_info(libdir: Path) -> dict[str, Any]:
         _import_runtime_helpers()
     )
     try:
-        snapshot_hash, flags = extract_snapshot_hash_flags(str(libapp))
+        snapshot_hash, raw_flags = extract_snapshot_hash_flags(str(libapp))
         engine_ids, dart_version, arch, os_name = extract_libflutter_info(str(libflutter))
     except SystemExit as exc:
         raise AdapterError(f"Blutter runtime identification failed: {exc}") from exc
     except Exception as exc:
-        raise AdapterError(f"Blutter runtime identification failed: {type(exc).__name__}: {exc}") from exc
+        raise AdapterError(
+            f"Blutter runtime identification failed: {type(exc).__name__}: {exc}"
+        ) from exc
 
+    flags = _bounded_flags(raw_flags)
     compressed = "compressed-pointers" in flags
-    snapshot_hash = str(snapshot_hash)
+    engine_ids = _bounded_engine_ids(engine_ids)
+    snapshot_hash = str(snapshot_hash or "").strip().lower()
+    arch = str(arch or "").strip().lower()
+    os_name = str(os_name or "").strip().lower()
+    dart_version = str(dart_version or "").strip() or None
+
     base = {
         "dart_version": dart_version,
-        "os": str(os_name),
-        "arch": str(arch),
+        "os": os_name,
+        "arch": arch,
         "snapshot_hash": snapshot_hash,
-        "engine_ids": [str(item) for item in engine_ids],
-        "flags": [str(item) for item in flags[:200]],
+        "engine_ids": engine_ids,
+        "flags": flags,
         "compressed_pointers": compressed,
         "runtime_key": None,
         "cache_tag": None,
@@ -110,18 +142,43 @@ def _runtime_info(libdir: Path) -> dict[str, Any]:
         "identity_status": "identified" if dart_version else "runtime_identity_incomplete",
     }
     if not dart_version:
+        # The snapshot/arch values are still evidence, but an exact runtime
+        # analyzer must not be selected until the Dart version is known locally
+        # or resolved by the controlled builder.
         return base
 
+    try:
+        identity = validate_runtime_identity(
+            dart_version=dart_version,
+            snapshot_hash=snapshot_hash,
+            arch=arch,
+            os_name=os_name,
+            blutter_commit=BLUTTER_COMMIT,
+        )
+        cache_tag = runtime_cache_tag(
+            **identity,
+            compressed_pointers=compressed,
+        )
+    except ValueError as exc:
+        raise AdapterError(f"invalid runtime identity from Flutter ELF: {exc}") from exc
+
     info = DartLibInfo(
-        str(dart_version), str(os_name), str(arch), compressed, snapshot_hash
+        identity["dart_version"],
+        identity["os"],
+        identity["arch"],
+        compressed,
+        identity["snapshot_hash"],
     )
     probe = BlutterInput(str(libapp), info, "/output/probe", False, False, False)
     binary = Path(probe.blutter_file).resolve()
     if binary != BLUTTER_ROOT and BLUTTER_ROOT not in binary.parents:
         raise AdapterError("derived Blutter binary path escapes pinned analyzer root")
-    cache_tag = _runtime_cache_tag(str(dart_version), str(arch), snapshot_hash, compressed)
     base.update(
         {
+            "dart_version": identity["dart_version"],
+            "os": identity["os"],
+            "arch": identity["arch"],
+            "snapshot_hash": identity["snapshot_hash"],
             "runtime_key": str(info.lib_name),
             "cache_tag": cache_tag,
             "recommended_image": f"{IMAGE_REPOSITORY}:{cache_tag}",
@@ -130,6 +187,23 @@ def _runtime_info(libdir: Path) -> dict[str, Any]:
         }
     )
     return base
+
+
+def _limit_child_files() -> None:
+    # Blutter writes multiple outputs. The container launcher must still put
+    # /output on a bounded filesystem for an aggregate quota, while RLIMIT_FSIZE
+    # prevents any one generated file from growing without bound.
+    resource.setrlimit(
+        resource.RLIMIT_FSIZE,
+        (MAX_GENERATED_FILE_BYTES, MAX_GENERATED_FILE_BYTES),
+    )
+
+
+def _tail_binary_file(stream, limit: int) -> str:
+    stream.flush()
+    size = stream.tell()
+    stream.seek(max(0, size - limit))
+    return stream.read(limit).decode("utf-8", "replace")
 
 
 def health() -> dict[str, Any]:
@@ -153,6 +227,16 @@ def health() -> dict[str, Any]:
         "build_on_demand_allowed": False,
         "cached_binary_count": len(binaries),
         "cached_binaries": binaries,
+        "required_runtime_constraints": {
+            "network": "none",
+            "read_only_root": True,
+            "drop_all_capabilities": True,
+            "no_new_privileges": True,
+            "input_mount": "read-only",
+            "output_mount": "writable-bounded",
+            "recommended_output_volume_bytes": REQUIRED_OUTPUT_VOLUME_BYTES,
+            "max_generated_file_bytes": MAX_GENERATED_FILE_BYTES,
+        },
     }
 
 
@@ -163,7 +247,10 @@ def inspect(libdir_value: str) -> dict[str, Any]:
     runtime = _runtime_info(libdir)
     if runtime["identity_status"] != "identified":
         status = "runtime_identity_incomplete"
-        next_action = "resolve the engine/Dart version in a controlled builder; network lookup stays disabled during analysis"
+        next_action = (
+            "resolve the engine/Dart version in a controlled builder; network lookup "
+            "stays disabled during analysis"
+        )
     elif runtime["binary_cached"]:
         status = "ready"
         next_action = "run_analyze"
@@ -219,37 +306,36 @@ def analyze(libdir_value: str, output_value: str, timeout: int) -> dict[str, Any
         "TMPDIR": "/tmp",
     }
     Path("/tmp/home").mkdir(parents=True, exist_ok=True)
-    try:
-        proc = subprocess.run(
-            [str(binary), "-i", str(libapp), "-o", str(output)],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            errors="replace",
-            env=env,
-            timeout=timeout,
-            check=False,
-        )
-    except subprocess.TimeoutExpired as exc:
-        raw = exc.stdout or ""
-        if isinstance(raw, bytes):
-            raw = raw.decode("utf-8", "replace")
-        return {
-            "status": "timeout",
-            "profile": "framework-flutter",
-            "runtime": runtime,
-            "executed": True,
-            "exit_code": 124,
-            "output": raw[-MAX_PROCESS_OUTPUT:],
-        }
+    with tempfile.TemporaryFile() as process_log:
+        try:
+            proc = subprocess.run(
+                [str(binary), "-i", str(libapp), "-o", str(output)],
+                stdin=subprocess.DEVNULL,
+                stdout=process_log,
+                stderr=subprocess.STDOUT,
+                env=env,
+                timeout=timeout,
+                check=False,
+                preexec_fn=_limit_child_files,
+            )
+            process_output = _tail_binary_file(process_log, MAX_PROCESS_OUTPUT)
+        except subprocess.TimeoutExpired:
+            process_output = _tail_binary_file(process_log, MAX_PROCESS_OUTPUT)
+            return {
+                "status": "timeout",
+                "profile": "framework-flutter",
+                "runtime": runtime,
+                "executed": True,
+                "exit_code": 124,
+                "output": process_output,
+            }
 
     all_files = []
     if output.is_dir():
         for path in output.rglob("*"):
             if path.is_file():
                 all_files.append(str(path.relative_to(output)))
-                if len(all_files) > 20_000:
+                if len(all_files) > MAX_GENERATED_FILES:
                     break
     return {
         "status": "ok" if proc.returncode == 0 else "failed",
@@ -258,9 +344,15 @@ def analyze(libdir_value: str, output_value: str, timeout: int) -> dict[str, Any
         "runtime": runtime,
         "executed": True,
         "exit_code": proc.returncode,
-        "output": proc.stdout[-MAX_PROCESS_OUTPUT:],
-        "generated_files": sorted(all_files[:20_000]),
-        "generated_files_truncated": len(all_files) > 20_000,
+        "output": process_output,
+        "generated_files": sorted(all_files[:MAX_GENERATED_FILES]),
+        "generated_files_truncated": len(all_files) > MAX_GENERATED_FILES,
+        "limits": {
+            "max_process_output_bytes": MAX_PROCESS_OUTPUT,
+            "max_generated_files": MAX_GENERATED_FILES,
+            "max_generated_file_bytes": MAX_GENERATED_FILE_BYTES,
+            "required_bounded_output_volume": True,
+        },
     }
 
 
