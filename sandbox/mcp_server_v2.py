@@ -257,13 +257,13 @@ core.TOOLS.extend([
     },
     {
         "name": "trace_call_path",
-        "description": "Find bounded shortest method-call paths between source and target symbol queries using the indexed DEX XREF graph. Broad queries remain explicit candidate sets; call paths are not data-flow proof.",
+        "description": "Find bounded shortest method-call paths between source and target symbol queries using the indexed DEX XREF graph. Exact symbol IDs may be longer than broad search queries; call paths are not data-flow proof.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "job_id": {"type": "string"},
-                "source": {"type": "string", "minLength": 1, "maxLength": 512},
-                "target": {"type": "string", "minLength": 1, "maxLength": 512},
+                "source": {"type": "string", "minLength": 1, "maxLength": 8192},
+                "target": {"type": "string", "minLength": 1, "maxLength": 8192},
                 "direction": {"type": "string", "enum": ["forward", "reverse"], "default": "forward"},
                 "max_depth": {"type": "integer", "minimum": 1, "maximum": 32, "default": 12},
                 "max_paths": {"type": "integer", "minimum": 1, "maximum": 50, "default": 20},
