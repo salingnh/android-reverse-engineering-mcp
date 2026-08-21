@@ -12,9 +12,20 @@ PROFILE_REGISTRY: dict[str, dict[str, Any]] = {
         "representation": "APK/DEX/Java/Kotlin/resources",
     },
     "framework-flutter": {
-        "status": "planned",
+        "status": "partial",
         "trust_boundary": "framework-static",
         "representation": "Dart AOT/libapp.so/flutter_assets",
+        "available_capabilities": [
+            "artifact-inventory",
+            "asset-inventory",
+            "bounded-runtime-marker-scan",
+        ],
+        "planned_capabilities": [
+            "dart-aot-index",
+            "dart-xrefs",
+            "dart-to-native-map",
+            "flutter-network-model",
+        ],
     },
     "framework-react-native": {
         "status": "planned",
@@ -103,18 +114,15 @@ def route_fingerprint(fingerprint: dict[str, Any]) -> dict[str, Any]:
     """Choose an analysis profile from bounded fingerprint evidence.
 
     Framework identification and analyzer availability are deliberately separate.
-    A planned framework profile remains primary instead of silently falling back
-    to JADX and pretending host-shell code contains the application's business
-    logic.
+    A partial/planned framework profile remains primary instead of silently
+    falling back to JADX and pretending host-shell code contains the
+    application's business logic.
     """
 
     framework = fingerprint.get("framework") or {}
     framework_type = str(framework.get("type") or "Unknown")
     normalized = framework_type.lower()
 
-    # IL2CPP can otherwise look like a native Android shell when only DEX
-    # descriptors are considered. Native-library evidence is strong enough to
-    # route it explicitly even before the dedicated IL2CPP analyzer exists.
     if _contains_native_library(fingerprint, "libil2cpp.so"):
         return _route(
             framework_id="unity-il2cpp",
@@ -151,8 +159,8 @@ def route_fingerprint(fingerprint: dict[str, Any]) -> dict[str, Any]:
                 "assets/flutter_assets",
             ],
             strategy=(
-                "Use Dart AOT-aware analysis of libapp.so and Flutter assets; "
-                "inspect Java/Kotlin only as host-shell evidence."
+                "Inspect Flutter artifacts/runtime first, then use Dart AOT-aware "
+                "analysis of libapp.so; Java/Kotlin remains host-shell evidence only."
             ),
             secondary_profiles=[
                 _secondary(
@@ -168,7 +176,7 @@ def route_fingerprint(fingerprint: dict[str, Any]) -> dict[str, Any]:
             ],
             allow_java_decompile_as_primary=False,
             limitations=[
-                "The framework-flutter analyzer profile is the next P0 capability and may not yet be available in this release."
+                "Flutter artifact/runtime inspection is available, but Dart AOT semantic indexing is not yet available in this profile."
             ],
         )
 
@@ -202,9 +210,6 @@ def route_fingerprint(fingerprint: dict[str, Any]) -> dict[str, Any]:
                 ],
             )
 
-        # React Native does not imply Hermes. A bundle marker or
-        # libreactnativejni.so can also belong to a JavaScriptCore build. Keep a
-        # generic RN route until the bundle/runtime is positively identified.
         return _route(
             framework_id="react-native",
             framework_type=framework_type,

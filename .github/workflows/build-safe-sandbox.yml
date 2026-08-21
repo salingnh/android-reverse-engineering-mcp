@@ -53,6 +53,9 @@ jobs:
       - name: Test Program Evidence Graph schema
         run: PYTHONPATH=sandbox python3 sandbox/tests_peg_schema.py
 
+      - name: Test Flutter artifact/runtime inspection
+        run: PYTHONPATH=sandbox python3 sandbox/tests_flutter_analysis.py
+
       - name: Test program understanding
         run: python3 sandbox/tests_program_understanding.py
 
@@ -74,6 +77,9 @@ jobs:
           names = {tool["name"] for tool in server.core.TOOLS}
           expected = {
               "route_analysis",
+              "inspect_flutter",
+              "identify_dart_runtime",
+              "extract_flutter_assets",
               "build_program_index",
               "find_symbols",
               "find_xrefs",
@@ -93,9 +99,11 @@ jobs:
           assert health["program_understanding"]["index_storage"] == "sqlite"
           assert health["analysis_routing"]["enabled"] is True
           assert health["analysis_routing"]["profiles"]["static-core"]["status"] == "available"
-          assert health["analysis_routing"]["profiles"]["framework-flutter"]["status"] == "planned"
+          assert health["analysis_routing"]["profiles"]["framework-flutter"]["status"] == "partial"
           assert health["program_evidence_graph"]["schema_version"] == 2
           assert health["program_evidence_graph"]["status"] == "foundation"
+          assert health["framework_analysis"]["flutter"]["artifact_inspection"] is True
+          assert health["framework_analysis"]["flutter"]["dart_aot_index"] is False
           PY
 
       - name: Test automatic runtime wrapper
@@ -109,6 +117,7 @@ jobs:
             sandbox/mcp_entrypoint.py \
             sandbox/analysis_routing.py \
             sandbox/peg_schema.py \
+            sandbox/flutter_analysis.py \
             sandbox/program_understanding.py \
             sandbox/program_understanding_v2.py \
             sandbox/pu_source.py \
@@ -116,6 +125,7 @@ jobs:
             sandbox/pu_network.py \
             sandbox/tests_analysis_routing.py \
             sandbox/tests_peg_schema.py \
+            sandbox/tests_flutter_analysis.py \
             sandbox/tests_program_understanding.py \
             sandbox/tests_program_understanding_scopes.py \
             scripts/check_release_consistency.py
@@ -175,6 +185,23 @@ jobs:
             --entrypoint=python3 \
             safe-android-reverser:ci \
             /workspace/sandbox/tests_analysis_routing.py
+
+      - name: Run Flutter inspector integration test inside image
+        run: |
+          mkdir -p "$RUNNER_TEMP/safe-reverser-flutter-data"
+          docker run --rm \
+            --network=none \
+            --read-only \
+            --cap-drop=ALL \
+            --security-opt=no-new-privileges \
+            --tmpfs=/tmp:rw,nosuid,nodev,size=1g \
+            --tmpfs=/work:rw,nosuid,nodev,size=1g \
+            --user="$(id -u):$(id -g)" \
+            --volume="$PWD:/workspace:ro" \
+            --volume="$RUNNER_TEMP/safe-reverser-flutter-data:/data:rw" \
+            --entrypoint=python3 \
+            safe-android-reverser:ci \
+            /workspace/sandbox/tests_flutter_analysis.py
 
       - name: Run real DEX semantic integration test inside image
         run: |
@@ -251,7 +278,9 @@ jobs:
           assert payload["program_understanding"]["cfg"] is True, payload
           assert payload["program_understanding"]["index_storage"] == "sqlite", payload
           assert payload["analysis_routing"]["enabled"] is True, payload
+          assert payload["analysis_routing"]["profiles"]["framework-flutter"]["status"] == "partial", payload
           assert payload["program_evidence_graph"]["schema_version"] == 2, payload
+          assert payload["framework_analysis"]["flutter"]["artifact_inspection"] is True, payload
           PY
 
       - name: Log in to GHCR
