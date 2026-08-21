@@ -7,7 +7,7 @@
   },
   "metadata": {
     "description": "Android reverse-engineering plugins with safe containerized execution",
-    "version": "2.1.0"
+    "version": "2.1.1"
   },
   "plugins": [
     {
@@ -27,7 +27,7 @@
       "name": "safe-android-reverser",
       "source": "./plugins/safe-android-reverser",
       "description": "Sandboxed Android reverse engineering with automatic Podman/Docker startup, semantic program indexing, XREF/CFG queries and structured network evidence.",
-      "version": "0.2.0",
+      "version": "0.2.1",
       "author": {
         "name": "salingnh"
       },
