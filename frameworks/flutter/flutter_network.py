@@ -239,7 +239,10 @@ def _query_keys(query: str) -> list[str]:
             query, keep_blank_values=True, strict_parsing=False, max_num_fields=100
         ):
             clean = key[:128]
-            if clean and not SAFE_QUERY_KEY_RE.fullmatch(clean):
+            if clean and (
+                SECRET_SEGMENT_RE.fullmatch(clean)
+                or not SAFE_QUERY_KEY_RE.fullmatch(clean)
+            ):
                 clean = "{redacted-key}"
             if clean and clean not in keys:
                 keys.append(clean)
