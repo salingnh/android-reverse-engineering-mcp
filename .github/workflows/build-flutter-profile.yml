@@ -49,6 +49,9 @@ jobs:
       - name: Test Flutter network model
         run: PYTHONPATH=frameworks/flutter python3 frameworks/flutter/tests_flutter_network.py
 
+      - name: Test Flutter orchestration primitives
+        run: PYTHONPATH=frameworks/flutter python3 frameworks/flutter/tests_flutter_orchestration.py
+
       - name: Validate Python syntax
         run: |
           python3 -m py_compile \
@@ -57,10 +60,13 @@ jobs:
             frameworks/flutter/safe_blutter_adapter.py \
             frameworks/flutter/flutter_semantic.py \
             frameworks/flutter/flutter_network.py \
+            frameworks/flutter/flutter_artifact.py \
+            frameworks/flutter/flutter_export.py \
             frameworks/flutter/flutter_entrypoint.py \
             frameworks/flutter/tests_safe_blutter_adapter.py \
             frameworks/flutter/tests_flutter_semantic.py \
-            frameworks/flutter/tests_flutter_network.py
+            frameworks/flutter/tests_flutter_network.py \
+            frameworks/flutter/tests_flutter_orchestration.py
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -120,6 +126,14 @@ jobs:
               "extract_flutter_network_model",
           }
           assert expected == set(semantic["operations"]), payload
+          orchestration = payload["orchestration"]
+          assert orchestration["prepare_artifact"] is True, payload
+          assert orchestration["analyze_export"] is True, payload
+          assert orchestration["supported_abi"] == "arm64-v8a", payload
+          assert orchestration["persistent_export_max_bytes"] == 4 * 1024**3, payload
+          assert orchestration["persistent_export_max_files"] == 20_000, payload
+          assert orchestration["runtime_download_inside_sandbox"] is False, payload
+          assert orchestration["runtime_build_inside_sandbox"] is False, payload
           PY
 
       - name: Verify pinned upstream license is preserved
