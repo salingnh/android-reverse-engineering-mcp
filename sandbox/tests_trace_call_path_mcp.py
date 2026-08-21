@@ -1,10 +1,16 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import json
+import tempfile
 import time
 import unittest
+from pathlib import Path
+from unittest import mock
 
 import mcp_server_v2 as server
+import pu_call_path
+import pu_index
 
 
 class TraceCallPathMcpTests(unittest.TestCase):
@@ -29,6 +35,14 @@ class TraceCallPathMcpTests(unittest.TestCase):
         self.assertTrue(health["program_understanding"]["call_path"])
         self.assertTrue(health["program_understanding"]["wall_clock_deadlines"])
 
+    def test_call_path_budget_stays_below_core_text_limit(self):
+        self.assertLess(pu_call_path.MAX_RESPONSE_CHARS, server.core.MAX_TOOL_TEXT)
+        sample = {"text": "x" * 1000}
+        self.assertEqual(
+            pu_call_path._response_chars(sample),
+            len(json.dumps(sample, ensure_ascii=False, indent=2, sort_keys=True)),
+        )
+
     def test_deadline_interrupts_bounded_work(self):
         started = time.monotonic()
         with self.assertRaises(TimeoutError):
@@ -42,6 +56,28 @@ class TraceCallPathMcpTests(unittest.TestCase):
 
         with self.assertRaises(server.core.ToolError):
             server._pu_call(fail)
+
+    def test_program_index_does_not_swallow_wall_clock_timeout(self):
+        tmp = tempfile.TemporaryDirectory()
+        try:
+            root = Path(tmp.name)
+            workspace = root / "workspace"
+            job = root / "job"
+            workspace.mkdir()
+            job.mkdir()
+            (workspace / "app.apk").write_bytes(b"fixture")
+            (job / "job.json").write_text(
+                json.dumps({"artifact": "app.apk"}), encoding="utf-8"
+            )
+
+            with mock.patch.object(
+                pu_index, "_dex_index", side_effect=TimeoutError("deadline")
+            ), mock.patch.object(pu_index, "_source_index") as fallback:
+                with self.assertRaises(TimeoutError):
+                    pu_index.build_program_index(job, workspace, {}, force=True)
+                fallback.assert_not_called()
+        finally:
+            tmp.cleanup()
 
 
 if __name__ == "__main__":
