@@ -34,7 +34,9 @@ It traverses the SQLite DEX XREF graph produced by `build_program_index`. It doe
 
 Endpoint queries are resolved against exact method symbols. A broad query may match multiple methods/classes/overloads; those remain an explicit candidate set. They are never collapsed into one synthetic method.
 
-An exact full symbol ID takes priority over substring search.
+An exact full symbol ID takes priority over substring search. If method metadata was omitted because the method index was truncated but the exact symbol still exists as a `call_edges` caller/callee, that exact XREF symbol remains a valid traversal anchor. The response still carries `index_methods_truncated`, so incomplete metadata is never presented as a complete index.
+
+Candidate search is capped at 200 symbol IDs. When more candidates exist, `truncated=true`, `candidate_count_is_lower_bound=true`, and `candidate_count_lower_bound` reports the minimum number known to exist. Traversal over a truncated candidate set is therefore never marked complete.
 
 ## Traversal semantics
 
@@ -84,7 +86,7 @@ response_budget
 
 A negative result (`found=false`) is conclusive only when `truncated=false`, both endpoint queries resolved, and the current program index is a complete `dex-xref` index within its configured limits.
 
-The tool also applies an internal response budget below the MCP core text limit. If detailed paths or candidate IDs would exceed that budget, `found` and `shortest_depth` are preserved while path/candidate detail is omitted explicitly and `response_budget` is reported. This prevents silent mid-JSON truncation.
+The tool also applies an internal response budget below the MCP core text limit using the same pretty-JSON serializer as the MCP core. If detailed paths or candidate IDs would exceed that budget, `found` and `shortest_depth` are preserved while path/candidate detail is omitted explicitly and `response_budget` is reported. This prevents silent mid-JSON truncation.
 
 A `source-fallback` index exposes no call graph, so `trace_call_path` returns `available=false` rather than fabricating call paths from lexical source proximity.
 
@@ -101,7 +103,7 @@ response detail    150000 JSON characters
 wall-clock timeout 3600s
 ```
 
-Default limits are intentionally lower.
+Default limits are intentionally lower. Semantic wall-clock cancellation uses an MCP-boundary control-flow exception that normal analyzer `except Exception` handlers cannot swallow. A stricter already-active outer deadline is preserved when semantic scopes are nested.
 
 ## Test gate
 
@@ -112,14 +114,17 @@ M1 cannot progress to M2 until the Senior Tester gate passes:
 - duplicate-callsite collapse;
 - cycles and recursion;
 - same-name methods and overloads;
+- exact edge-only XREF anchors;
 - forward/reverse traversal;
 - unresolved endpoints;
 - fallback index behavior;
 - depth/node/edge/path/response budgets;
+- candidate-cap lower-bound semantics;
 - truncated-index semantics;
 - intermediate symbols absent from method metadata;
 - synthetic 100k-method / 250k-edge graph;
 - real DEX -> Androguard XREF -> `trace_call_path` integration;
+- semantic timeout propagation and nested-deadline behavior;
 - final locked-down Docker image execution;
 - MCP registration/schema/health regression;
 - documentation/version consistency.
