@@ -21,7 +21,9 @@ Use the bundled `safe-android-reverser` MCP server for all reverse-engineering e
 
 ### Phase 0 — Health
 
-Call `health` first. Expect `jadx`, `java`, `vineflower`, and on image 0.2.0 `androguard` to be available. The wrapper automatically detects Podman/Docker, pulls the pinned image on first use, and starts the ephemeral MCP container.
+Call `health` first. Require `release.version_consistent=true` for a normal release installation, then verify `jadx`, `java`, `vineflower`, and `androguard` availability. The wrapper automatically detects Podman/Docker, derives the sandbox image tag from the bundled plugin `VERSION`, verifies default-image release metadata, and starts the ephemeral MCP container.
+
+If plugin/image/server release versions disagree, stop and report the setup problem instead of continuing analysis.
 
 ### Phase 1 — Fingerprint and routing
 
