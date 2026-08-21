@@ -12,20 +12,21 @@ PROFILE_REGISTRY: dict[str, dict[str, Any]] = {
         "representation": "APK/DEX/Java/Kotlin/resources",
     },
     "framework-flutter": {
-        "status": "partial",
+        "status": "available",
         "trust_boundary": "framework-static",
         "representation": "Dart AOT/libapp.so/flutter_assets",
+        "capability_server": "safe-android-reverser-flutter",
         "available_capabilities": [
             "artifact-inventory",
             "asset-inventory",
             "bounded-runtime-marker-scan",
-        ],
-        "planned_capabilities": [
             "dart-aot-index",
             "dart-xrefs",
             "dart-to-native-map",
             "flutter-network-model",
+            "verified-runtime-cache-dispatch",
         ],
+        "planned_capabilities": ["true-data-flow"],
     },
     "framework-react-native": {
         "status": "planned",
@@ -159,8 +160,9 @@ def route_fingerprint(fingerprint: dict[str, Any]) -> dict[str, Any]:
                 "assets/flutter_assets",
             ],
             strategy=(
-                "Inspect Flutter artifacts/runtime first, then use Dart AOT-aware "
-                "analysis of libapp.so; Java/Kotlin remains host-shell evidence only."
+                "Inspect Flutter artifacts/runtime first, then use the separate "
+                "safe-android-reverser-flutter capability server for bounded Dart "
+                "AOT analysis of libapp.so; Java/Kotlin remains host-shell evidence only."
             ),
             secondary_profiles=[
                 _secondary(
@@ -176,7 +178,8 @@ def route_fingerprint(fingerprint: dict[str, Any]) -> dict[str, Any]:
             ],
             allow_java_decompile_as_primary=False,
             limitations=[
-                "Flutter artifact/runtime inspection is available, but Dart AOT semantic indexing is not yet available in this profile."
+                "Exact Dart AOT analysis requires a matching immutable runtime-cache image; a cache miss is reported explicitly and never triggers an in-sandbox build or download.",
+                "Dart call/XREF adjacency is not proof of interprocedural value flow; true data-flow analysis remains a later capability.",
             ],
         )
 
