@@ -68,6 +68,8 @@ class Auth extends Object {
             artifact_sha256="a" * 64,
             blutter_commit="c" * 40,
             runtime={"dart_version": "3.5.4", "arch": "arm64"},
+            image_version="0.3.0-test",
+            build_commit="f" * 40,
         )
 
     def test_builds_bounded_sqlite_index_with_provenance(self):
@@ -84,6 +86,8 @@ class Auth extends Object {
         self.assertEqual(meta["artifact_sha256"], "a" * 64)
         self.assertEqual(meta["artifact_kind"], "libapp.so")
         self.assertEqual(meta["blutter_commit"], "c" * 40)
+        self.assertEqual(meta["image_version"], "0.3.0-test")
+        self.assertEqual(meta["build_commit"], "f" * 40)
 
     def test_symbol_search_returns_native_offset_without_raw_body(self):
         self.build()
@@ -94,6 +98,7 @@ class Auth extends Object {
         self.assertEqual(row["native_offset"], 0x1234)
         self.assertNotIn("body", row)
         self.assertEqual(result["provenance"]["evidence_state"], "derived")
+        self.assertEqual(result["provenance"]["image_version"], "0.3.0-test")
 
     def test_object_pool_strings_are_indexed(self):
         self.build()
@@ -133,6 +138,42 @@ class Auth extends Object {
         self.assertIsNone(by_name["sign"]["target_native_offset"])
         self.assertIn("not proof of value flow", result["limitations"][0])
 
+    def test_top_level_xref_uses_empty_class_identity_from_blutter(self):
+        top = self.root / "asm" / "app" / "top.dart"
+        top.write_text(
+            """// lib: , url: package:app/top.dart
+// class id: 103, size: 0x10
+class :: {
+  void helper() {
+    // ** addr: 0x3000, size: 0x20
+  }
+}
+""",
+            encoding="utf-8",
+        )
+        api = self.root / "asm" / "app" / "api.dart"
+        text = api.read_text(encoding="utf-8")
+        text = text.replace(
+            "    0x1238: bl 0x2100 ; [package:app/auth.dart] Auth::sign -> String\n",
+            "    0x1238: bl 0x2100 ; [package:app/auth.dart] Auth::sign -> String\n"
+            "    0x1240: bl 0x3000 ; [package:app/top.dart] ::helper -> void\n",
+        )
+        api.write_text(text, encoding="utf-8")
+        self.build()
+        login = semantic.find_dart_symbols(self.index, "login")["results"][0]
+        result = semantic.find_dart_xrefs(
+            self.index, login["id"], direction="outgoing"
+        )
+        helper = next(edge for edge in result["outgoing"] if edge["target_name"] == "helper")
+        self.assertEqual(helper["target_class_name"], "")
+        self.assertEqual(helper["target_native_offset"], 0x3000)
+
+    def test_anonymous_closure_name_matches_blutter_full_name(self):
+        self.assertEqual(
+            semantic._function_name("[closure] void <anonymous closure>() {"),
+            "<anonymous closure>",
+        )
+
     def test_ambiguous_symbol_requires_function_id(self):
         self.build()
         with self.assertRaises(semantic.FlutterIndexError):
@@ -162,6 +203,18 @@ class Auth extends Object {
         result = semantic.find_dart_symbols(self.index, "package:app", limit=999999)
         self.assertEqual(result["limit"], semantic.MAX_QUERY_LIMIT)
 
+    def test_symlink_inside_asm_is_rejected(self):
+        real = self.root / "outside.dart"
+        real.write_text("// not trusted as asm", encoding="utf-8")
+        link = self.root / "asm" / "app" / "linked.dart"
+        try:
+            link.symlink_to(real)
+        except (OSError, NotImplementedError):
+            self.skipTest("symlinks are unavailable")
+        with self.assertRaises(semantic.FlutterIndexError):
+            self.build()
+        self.assertFalse(self.index.exists())
+
 
 class FlutterSemanticEntrypointTests(unittest.TestCase):
     @classmethod
@@ -180,6 +233,8 @@ class FlutterSemanticEntrypointTests(unittest.TestCase):
         os.environ["SAFE_FLUTTER_OUTPUT"] = str(cls.output_root)
         os.environ["SAFE_BLUTTER_ROOT"] = str(cls.blutter_root)
         os.environ["SAFE_BLUTTER_COMMIT"] = "d" * 40
+        os.environ["SAFE_REVERSER_IMAGE_VERSION"] = "0.3.0-test"
+        os.environ["SAFE_REVERSER_BUILD_COMMIT"] = "e" * 40
         cls.adapter = importlib.import_module("safe_blutter_adapter")
         cls.entry = importlib.import_module("flutter_entrypoint")
 
@@ -230,6 +285,11 @@ class Api extends Object {
         self.assertTrue((self.job / self.entry.INDEX_NAME).is_file())
         self.assertEqual(result["artifact_sha256"], manifest["artifact_sha256"])
         self.assertEqual(result["analysis_id"], manifest["analysis_id"])
+        queried = semantic.find_dart_symbols(
+            self.job / self.entry.INDEX_NAME, "ping"
+        )
+        self.assertEqual(queried["provenance"]["image_version"], "0.3.0-test")
+        self.assertEqual(queried["provenance"]["build_commit"], "e" * 40)
 
     def test_successful_analyze_automatically_builds_semantic_index(self):
         args = mock.Mock(libdir="libs", output=self.job_name, timeout=10)
@@ -261,13 +321,23 @@ class Api extends Object {
             with self.assertRaises(self.adapter.AdapterError):
                 self.entry._analyze_command(args)
 
+    def test_analysis_output_must_be_dedicated_child_directory(self):
+        args = mock.Mock(libdir="libs", output=".", timeout=10)
+        with mock.patch.object(
+            self.adapter,
+            "analyze",
+            side_effect=AssertionError("analyzer must not run in output root"),
+        ):
+            with self.assertRaises(self.adapter.AdapterError):
+                self.entry._analyze_command(args)
+
     def test_manifest_rejects_different_blutter_revision(self):
         manifest = self.entry._write_manifest(
             self.job, self.input_root / "libs", self.runtime()
         )
         path = self.job / self.entry.MANIFEST_NAME
         os.chmod(path, 0o644)
-        manifest["blutter_commit"] = "e" * 40
+        manifest["blutter_commit"] = "f" * 40
         path.write_text(__import__("json").dumps(manifest), encoding="utf-8")
         with self.assertRaises(self.adapter.AdapterError):
             self.entry._read_manifest(self.job)
