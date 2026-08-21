@@ -25,6 +25,7 @@ MANIFEST_NAME = "safe-flutter-analysis.json"
 MANIFEST_SCHEMA_VERSION = 1
 MAX_HASH_INPUT_BYTES = 1024 * 1024 * 1024
 MAX_MANIFEST_BYTES = 64 * 1024
+MAX_BUILD_IDENTITY_LENGTH = 128
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 
@@ -45,6 +46,13 @@ def _sha256(path: Path) -> str:
                 break
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _build_identity(env_name: str) -> str:
+    value = str(os.environ.get(env_name, "unknown") or "unknown").strip()
+    if not value or len(value) > MAX_BUILD_IDENTITY_LENGTH:
+        raise adapter.AdapterError(f"invalid {env_name} provenance value")
+    return value
 
 
 def _lexical_under_without_symlinks(root: Path, value: str) -> Path:
@@ -77,6 +85,10 @@ def _output_dir(value: str, *, must_exist: bool = True) -> Path:
 
 def _fresh_analysis_output(value: str) -> Path:
     output = _output_dir(value, must_exist=False)
+    if output == adapter.OUTPUT_ROOT:
+        raise adapter.AdapterError(
+            "analysis output must be a dedicated child directory under /output"
+        )
     if output.exists():
         if not output.is_dir():
             raise adapter.AdapterError("analysis output must be a directory")
@@ -122,6 +134,8 @@ def _write_manifest(output: Path, libdir: Path, runtime: dict) -> dict:
         "artifact_kind": "libapp.so",
         "blutter_commit": adapter.BLUTTER_COMMIT,
         "runtime": runtime,
+        "image_version": _build_identity("SAFE_REVERSER_IMAGE_VERSION"),
+        "build_commit": _build_identity("SAFE_REVERSER_BUILD_COMMIT"),
     }
     target = _manifest_path(output)
     if target.is_symlink() or target.exists():
@@ -193,6 +207,10 @@ def _read_manifest(output: Path) -> dict:
     expected_id = f"flutter-aot:{payload['artifact_sha256']}"
     if analysis_id != expected_id:
         raise adapter.AdapterError("analysis manifest has inconsistent analysis_id")
+    for key in ("image_version", "build_commit"):
+        value = payload.get(key)
+        if not isinstance(value, str) or not value or len(value) > MAX_BUILD_IDENTITY_LENGTH:
+            raise adapter.AdapterError(f"analysis manifest has invalid {key}")
     return payload
 
 
@@ -208,6 +226,8 @@ def _build_index_from_manifest(output: Path) -> dict:
         artifact_sha256=manifest["artifact_sha256"],
         blutter_commit=manifest["blutter_commit"],
         runtime=manifest["runtime"],
+        image_version=manifest["image_version"],
+        build_commit=manifest["build_commit"],
     )
 
 
@@ -215,7 +235,7 @@ def _analyze_command(args: argparse.Namespace) -> dict:
     libdir = adapter._safe_under(adapter.INPUT_ROOT, args.libdir)
     if not libdir.is_dir():
         raise adapter.AdapterError("libdir must be a directory")
-    output = _fresh_analysis_output(args.output)
+    _fresh_analysis_output(args.output)
 
     payload = adapter.analyze(args.libdir, args.output, args.timeout)
     if payload.get("status") != "ok":
@@ -233,7 +253,7 @@ def _analyze_command(args: argparse.Namespace) -> dict:
         }
 
     # adapter.analyze creates the output directory. Re-resolve it after execution,
-    # but keep the no-symlink path policy enforced before execution.
+    # while the no-symlink/fresh-output policy was already enforced before execution.
     output = _output_dir(args.output)
     manifest = _write_manifest(output, libdir, runtime)
     try:
