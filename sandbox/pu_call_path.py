@@ -158,7 +158,9 @@ def _enumerate_paths(
 
 
 def _response_chars(value: dict[str, Any]) -> int:
-    return len(json.dumps(value, ensure_ascii=False, separators=(",", ":")))
+    # Mirror mcp_server._json_text so the inner budget stays safely below the
+    # MCP core's 200k-character truncation boundary.
+    return len(json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True))
 
 
 def _fit_response(response: dict[str, Any]) -> dict[str, Any]:
