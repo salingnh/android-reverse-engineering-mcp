@@ -51,7 +51,7 @@ class AnalysisRoutingTests(unittest.TestCase):
         })
         self.assertEqual(route["framework_id"], "flutter")
         self.assertEqual(route["primary_profile"], "framework-flutter")
-        self.assertEqual(route["primary_profile_status"], "planned")
+        self.assertEqual(route["primary_profile_status"], "partial")
         self.assertFalse(route["allow_java_decompile_as_primary"])
         secondary = {item["profile"]: item["purpose"] for item in route["secondary_profiles"]}
         self.assertIn("static-core", secondary)
@@ -79,6 +79,7 @@ class AnalysisRoutingTests(unittest.TestCase):
         result = self.server.fingerprint({"artifact": "flutter.apk"})
         self.assertEqual(result["framework"]["type"], "Flutter")
         self.assertEqual(result["analysis_route"]["primary_profile"], "framework-flutter")
+        self.assertEqual(result["analysis_route"]["primary_profile_status"], "partial")
         self.assertFalse(result["analysis_route"]["allow_java_decompile_as_primary"])
 
     def test_route_analysis_tool_is_registered(self):
@@ -93,10 +94,10 @@ class AnalysisRoutingTests(unittest.TestCase):
             result["analysis_routing"]["profiles"]["static-core"]["status"],
             "available",
         )
-        self.assertEqual(
-            result["analysis_routing"]["profiles"]["framework-flutter"]["status"],
-            "planned",
-        )
+        flutter = result["analysis_routing"]["profiles"]["framework-flutter"]
+        self.assertEqual(flutter["status"], "partial")
+        self.assertIn("artifact-inventory", flutter["available_capabilities"])
+        self.assertIn("dart-aot-index", flutter["planned_capabilities"])
 
 
 if __name__ == "__main__":
