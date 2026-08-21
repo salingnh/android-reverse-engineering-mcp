@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import re
 import sqlite3
+import time
 import urllib.parse
 from pathlib import Path
 from typing import Any
@@ -18,6 +19,9 @@ MAX_XREF_CANDIDATES = 20_000
 MAX_URLS_PER_STRING = 8
 MAX_ENDPOINT_TEXT = 1024
 MAX_HEADER_NAME = 128
+MAX_CANDIDATE_TEXT_BYTES = 32 * 1024 * 1024
+MAX_NETWORK_SECONDS = 30.0
+SQL_PROGRESS_OPS = 10_000
 
 URL_RE = re.compile(r"(?i)\b(?:https?|wss?)://[^\s\"'<>]+")
 SECRET_SEGMENT_RE = re.compile(
@@ -158,6 +162,25 @@ CLIENT_RULES = (
 
 class FlutterNetworkError(semantic.FlutterIndexError):
     pass
+
+
+class _Budget:
+    def __init__(self) -> None:
+        self.deadline = time.monotonic() + MAX_NETWORK_SECONDS
+        self.expired = False
+
+    def check(self) -> None:
+        if time.monotonic() > self.deadline:
+            self.expired = True
+            raise FlutterNetworkError(
+                f"Flutter network model exceeded {MAX_NETWORK_SECONDS:.0f}s wall-clock budget"
+            )
+
+    def progress(self) -> int:
+        if time.monotonic() > self.deadline:
+            self.expired = True
+            return 1
+        return 0
 
 
 class _Collector:
@@ -353,7 +376,10 @@ def _header_name(value: str) -> str | None:
     return HEADER_NAMES.get(candidate)
 
 
-def _fetch_string_candidates(conn: sqlite3.Connection) -> tuple[list[sqlite3.Row], dict[str, Any]]:
+def _fetch_string_candidates(
+    conn: sqlite3.Connection,
+    budget: _Budget,
+) -> tuple[list[sqlite3.Row], dict[str, Any]]:
     queries = (
         (
             "url",
@@ -413,16 +439,38 @@ def _fetch_string_candidates(conn: sqlite3.Connection) -> tuple[list[sqlite3.Row
     )
     seen: set[str] = set()
     rows: list[sqlite3.Row] = []
-    scan: dict[str, Any] = {}
-    for name, cap, sql in queries:
-        selected = conn.execute(sql, (cap + 1,)).fetchall()
-        scan[f"{name}_candidate_count"] = min(len(selected), cap)
-        scan[f"{name}_candidates_truncated"] = len(selected) > cap
-        for row in selected[:cap]:
+    scan: dict[str, Any] = {
+        "candidate_text_bytes": 0,
+        "candidate_text_bytes_limit": MAX_CANDIDATE_TEXT_BYTES,
+        "candidate_text_bytes_truncated": False,
+    }
+    for query_name, _, _ in queries:
+        scan[f"{query_name}_candidate_count"] = 0
+        scan[f"{query_name}_candidates_truncated"] = False
+
+    stop = False
+    for query_name, cap, sql in queries:
+        cursor = conn.execute(sql, (cap + 1,))
+        selected = 0
+        for row in cursor:
+            budget.check()
+            selected += 1
+            if selected > cap:
+                scan[f"{query_name}_candidates_truncated"] = True
+                break
+            scan[f"{query_name}_candidate_count"] = selected
             if row["id"] in seen:
                 continue
+            size = len(row["value"].encode("utf-8", "replace"))
+            if scan["candidate_text_bytes"] + size > MAX_CANDIDATE_TEXT_BYTES:
+                scan["candidate_text_bytes_truncated"] = True
+                stop = True
+                break
+            scan["candidate_text_bytes"] += size
             seen.add(row["id"])
             rows.append(row)
+        if stop:
+            break
     scan["unique_string_candidates"] = len(rows)
     return rows, scan
 
@@ -432,7 +480,9 @@ def extract_flutter_network_model(
     limit: int = 100,
 ) -> dict[str, Any]:
     limit = _limit(limit)
+    budget = _Budget()
     conn = semantic._open_db(index_path)
+    conn.set_progress_handler(budget.progress, SQL_PROGRESS_OPS)
     try:
         meta = semantic._metadata(conn)
         hosts = _Collector(limit)
@@ -444,8 +494,9 @@ def extract_flutter_network_model(
         clients = _Collector(limit)
         function_cache: dict[str, dict[str, Any] | None] = {}
 
-        rows, scan = _fetch_string_candidates(conn)
+        rows, scan = _fetch_string_candidates(conn, budget)
         for row in rows:
+            budget.check()
             value = row["value"]
             function = _function_context(conn, row["function_id"], function_cache)
             evidence = _string_evidence(row, function)
@@ -534,7 +585,7 @@ def extract_flutter_network_model(
                     },
                 )
 
-        function_rows = conn.execute(
+        function_cursor = conn.execute(
             """SELECT id,library_url,class_name,name,signature,native_offset,
                       source_file,line
                FROM functions
@@ -557,10 +608,15 @@ def extract_flutter_network_model(
                   OR instr(lower(library_url),'package:grpc/')>0
                ORDER BY library_url,native_offset LIMIT ?""",
             (MAX_FUNCTION_CANDIDATES + 1,),
-        ).fetchall()
-        scan["function_candidates"] = min(len(function_rows), MAX_FUNCTION_CANDIDATES)
-        scan["function_candidates_truncated"] = len(function_rows) > MAX_FUNCTION_CANDIDATES
-        for row in function_rows[:MAX_FUNCTION_CANDIDATES]:
+        )
+        function_count = 0
+        scan["function_candidates_truncated"] = False
+        for row in function_cursor:
+            budget.check()
+            function_count += 1
+            if function_count > MAX_FUNCTION_CANDIDATES:
+                scan["function_candidates_truncated"] = True
+                break
             client = _client_name(
                 row["library_url"], row["class_name"], row["name"], row["signature"]
             )
@@ -576,8 +632,9 @@ def extract_flutter_network_model(
                     "function": function,
                 },
             )
+        scan["function_candidates"] = min(function_count, MAX_FUNCTION_CANDIDATES)
 
-        xref_rows = conn.execute(
+        xref_cursor = conn.execute(
             """SELECT x.id,x.caller_id,x.target_library_url,x.target_class_name,
                       x.target_name,x.source_file,x.line,
                       f.library_url AS caller_library_url,
@@ -605,10 +662,15 @@ def extract_flutter_network_model(
                   OR instr(lower(x.target_library_url),'package:grpc/')>0
                ORDER BY x.id LIMIT ?""",
             (MAX_XREF_CANDIDATES + 1,),
-        ).fetchall()
-        scan["xref_candidates"] = min(len(xref_rows), MAX_XREF_CANDIDATES)
-        scan["xref_candidates_truncated"] = len(xref_rows) > MAX_XREF_CANDIDATES
-        for row in xref_rows[:MAX_XREF_CANDIDATES]:
+        )
+        xref_count = 0
+        scan["xref_candidates_truncated"] = False
+        for row in xref_cursor:
+            budget.check()
+            xref_count += 1
+            if xref_count > MAX_XREF_CANDIDATES:
+                scan["xref_candidates_truncated"] = True
+                break
             client = _client_name(
                 row["target_library_url"],
                 row["target_class_name"],
@@ -640,6 +702,7 @@ def extract_flutter_network_model(
                     "line": row["line"],
                 },
             )
+        scan["xref_candidates"] = min(xref_count, MAX_XREF_CANDIDATES)
 
         return {
             "status": "ok",
@@ -658,7 +721,10 @@ def extract_flutter_network_model(
             "signing_signals_truncated": signing.truncated,
             "crypto_signals": crypto.items,
             "crypto_signals_truncated": crypto.truncated,
-            "scan": scan,
+            "scan": {
+                **scan,
+                "wall_clock_seconds_limit": MAX_NETWORK_SECONDS,
+            },
             "limit_per_category": limit,
             "limitations": [
                 "This is deterministic static string/symbol/XREF reconstruction, not proof of value flow.",
@@ -669,6 +735,11 @@ def extract_flutter_network_model(
             ],
         }
     except sqlite3.DatabaseError as exc:
+        if budget.expired:
+            raise FlutterNetworkError(
+                f"Flutter network model exceeded {MAX_NETWORK_SECONDS:.0f}s wall-clock budget"
+            ) from exc
         raise FlutterNetworkError("invalid Flutter semantic index") from exc
     finally:
+        conn.set_progress_handler(None, 0)
         conn.close()
