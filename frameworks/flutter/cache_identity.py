@@ -54,15 +54,22 @@ def runtime_cache_tag(
     dart_version: str,
     snapshot_hash: str,
     arch: str,
-    os_name: str,
     compressed_pointers: bool,
     blutter_commit: str,
+    os_name: str | None = None,
+    os: str | None = None,
 ) -> str:
+    # `validate_runtime_identity()` returns the normalized field as `os` so its
+    # mapping can be passed here directly. CLI/build callers may use `os_name`.
+    # Accept exactly one semantic value and normalize it before hashing.
+    runtime_os = os_name if os_name is not None else os
+    if os_name is not None and os is not None and os_name != os:
+        raise ValueError("conflicting Flutter runtime operating-system values")
     identity = validate_runtime_identity(
         dart_version=dart_version,
         snapshot_hash=snapshot_hash,
         arch=arch,
-        os_name=os_name,
+        os_name=str(runtime_os or ""),
         blutter_commit=blutter_commit,
     )
     canonical = {
