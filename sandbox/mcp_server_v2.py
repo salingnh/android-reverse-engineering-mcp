@@ -8,6 +8,7 @@ from contextlib import contextmanager
 
 import analysis_routing
 import mcp_server as core
+import peg_schema
 import program_understanding_v2 as pu
 
 core.SERVER_VERSION = "0.2.0"
@@ -107,6 +108,7 @@ def health(args):
         "profiles": analysis_routing.profile_registry(),
         "principle": "detect-framework-then-analyze-business-logic-representation",
     }
+    result["program_evidence_graph"] = peg_schema.schema_descriptor()
     return result
 
 
