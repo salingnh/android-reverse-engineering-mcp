@@ -18,6 +18,7 @@ Use the bundled `safe-android-reverser` MCP server for all reverse-engineering e
 6. Prefer semantic graph/evidence queries over dumping the full JADX source tree into model context.
 7. Do not silently substitute a Java/Kotlin analyzer when the framework router identifies another representation as primary business logic.
 8. Preserve PEG evidence states (`observed`, `derived`, `hypothesized`) and do not invent numeric confidence values.
+9. An unknown or incompletely identified framework does **not** authorize Java/Kotlin decompilation as primary business-logic evidence.
 
 ## Recommended workflow
 
@@ -34,15 +35,18 @@ For APK/XAPK/APKS/APKM call `fingerprint` before choosing an analyzer. The resul
 Treat the route as authoritative for **primary representation selection**:
 
 ```text
-Native Android      -> static-core / DEX / Java / Kotlin
-Flutter             -> framework-flutter / Dart AOT / libapp.so / flutter assets
-React Native/Hermes -> framework-hermes / Hermes or JavaScript bundle
-Unity IL2CPP        -> framework-il2cpp / metadata + native code
-Xamarin/.NET MAUI   -> framework-dotnet / managed assemblies
-Cordova/Capacitor   -> web-assets / packaged HTML + JavaScript
+Native Android             -> static-core / DEX / Java / Kotlin
+Flutter                    -> framework-flutter / Dart AOT / libapp.so / flutter assets
+React Native, runtime TBD  -> framework-react-native / JavaScript bundle + source maps
+React Native + Hermes      -> framework-hermes / Hermes bytecode + JavaScript evidence
+Unity IL2CPP               -> framework-il2cpp / metadata + native code
+Xamarin/.NET MAUI          -> framework-dotnet / managed assemblies
+Cordova/Capacitor          -> web-assets / packaged HTML + JavaScript
 ```
 
-A profile may be reported as `partial` or `planned`. Explicitly report unsupported primary capabilities. Do **not** reinterpret an incomplete Flutter/Hermes/IL2CPP/.NET profile as permission to use JADX as the primary business-logic analyzer.
+Do not infer Hermes from React Native alone. Select `framework-hermes` only when positive Hermes evidence is present, such as `libhermes.so` or an explicitly identified Hermes runtime.
+
+A profile may be reported as `partial` or `planned`. Explicitly report unsupported primary capabilities. Do **not** reinterpret an incomplete Flutter/React-Native/Hermes/IL2CPP/.NET profile as permission to use JADX as the primary business-logic analyzer.
 
 Java/Kotlin analysis may still be used as a secondary route for Android host shell, manifest, plugin bridge, component, or JNI evidence when the route says so.
 
@@ -56,11 +60,11 @@ identify_dart_runtime
 extract_flutter_assets
 ```
 
-`inspect_flutter` inventories `libapp.so`, `libflutter.so`, ABIs, split APK members, Flutter assets, directly observable Dart VM/snapshot markers, and capability limitations.
+`inspect_flutter` inventories `libapp.so`, `libflutter.so`, ABIs, split APK members, Flutter assets, and directly observable Dart VM version markers with explicit scan/archive budgets.
 
-`identify_dart_runtime` performs bounded streaming scans and returns `unknown` when no supported runtime marker is observed. Never infer or invent a Dart version from unrelated strings.
+`identify_dart_runtime` performs bounded streaming scans of `libflutter.so` and returns `unknown` when no supported Dart VM version marker is observed. The partial inspector **does not claim a Dart snapshot hash** from raw strings. Exact snapshot-hash recovery is deferred to the ELF-aware Flutter AOT profile, which reads the corresponding structure from `libapp.so`.
 
-`extract_flutter_assets` returns bounded asset inventories and bounded previews of text-like manifest/config files with PEG provenance.
+`extract_flutter_assets` returns bounded asset inventories and bounded streaming previews of text-like manifest/config files with PEG provenance.
 
 The current partial Flutter profile does **not** yet provide Dart AOT semantic indexing, Dart XREFs, Dart-to-native mapping, or a Flutter network model. Do not claim those capabilities until `health.framework_analysis.flutter.dart_aot_index=true` and the corresponding MCP operations exist.
 
@@ -73,7 +77,7 @@ Call `decompile` and retain `job_id` only when Java/Kotlin/JVM bytecode is the p
 | Artifact / route | Engine / behavior |
 |---|---|
 | Native Android APK/XAPK/APKS/APKM | `jadx` |
-| Flutter/Hermes/IL2CPP/.NET host shell | optional targeted `jadx`, never primary business-logic evidence |
+| Flutter/React Native/Hermes/IL2CPP/.NET host shell | optional targeted `jadx`, never primary business-logic evidence |
 | JAR | `vineflower` or `both` |
 | AAR | `vineflower` or `both` |
 
@@ -119,7 +123,7 @@ For Kotlin + moderate/high obfuscation, `recover_kotlin_names` may provide candi
 
 ### Phase 7 — Report with provenance
 
-Report selected route, primary representation, unsupported capabilities, relevant symbols/functions, endpoint or binary locations, analyzer identity, PEG evidence state, and limitations.
+Report selected route, primary representation, unsupported capabilities, relevant symbols/functions, endpoint or binary locations, analyzer identity, PEG evidence state, image/build identity when available, and limitations.
 
 ## Current semantic MCP tools
 
