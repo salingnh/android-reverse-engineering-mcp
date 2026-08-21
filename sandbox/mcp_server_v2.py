@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import signal
 import sqlite3
+import time
 from contextlib import contextmanager
 
 import mcp_server as core
@@ -18,7 +19,7 @@ class SemanticDeadlineExceeded(BaseException):
 
 @contextmanager
 def _deadline(seconds: int):
-    """Bound semantic work in the Linux sandbox without exposing a worker shell."""
+    """Bound semantic work while preserving any stricter already-active timer."""
     seconds = max(1, min(int(seconds), 3600))
     if not hasattr(signal, "SIGALRM") or not hasattr(signal, "setitimer"):
         yield
@@ -29,15 +30,32 @@ def _deadline(seconds: int):
 
     old_handler = signal.getsignal(signal.SIGALRM)
     old_timer = signal.setitimer(signal.ITIMER_REAL, 0)
+
+    # If an outer scope already has an earlier deadline, keep it untouched.
+    # This prevents a nested semantic operation from extending the outer SLA.
+    if old_timer and old_timer[0] > 0 and old_timer[0] <= seconds:
+        signal.setitimer(signal.ITIMER_REAL, old_timer[0], old_timer[1])
+        yield
+        return
+
+    started = time.monotonic()
     signal.signal(signal.SIGALRM, on_alarm)
     signal.setitimer(signal.ITIMER_REAL, seconds)
     try:
         yield
     finally:
         signal.setitimer(signal.ITIMER_REAL, 0)
+        elapsed = time.monotonic() - started
         signal.signal(signal.SIGALRM, old_handler)
         if old_timer and old_timer[0] > 0:
-            signal.setitimer(signal.ITIMER_REAL, old_timer[0], old_timer[1])
+            remaining = old_timer[0] - elapsed
+            # If the outer timer would have expired while the inner scope ran,
+            # restore it as an immediate alarm rather than silently extending it.
+            signal.setitimer(
+                signal.ITIMER_REAL,
+                max(remaining, 1e-6),
+                old_timer[1],
+            )
 
 
 def _timeout(args, default: int) -> int:
