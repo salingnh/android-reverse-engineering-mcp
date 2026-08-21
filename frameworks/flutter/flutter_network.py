@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import ipaddress
 import re
 import sqlite3
 import time
@@ -19,6 +20,7 @@ MAX_XREF_CANDIDATES = 20_000
 MAX_URLS_PER_STRING = 8
 MAX_ENDPOINT_TEXT = 1024
 MAX_HEADER_NAME = 128
+MAX_HOST_LENGTH = 253
 MAX_CANDIDATE_TEXT_BYTES = 32 * 1024 * 1024
 MAX_NETWORK_SECONDS = 30.0
 SQL_PROGRESS_OPS = 10_000
@@ -32,6 +34,7 @@ SECRET_SEGMENT_RE = re.compile(
     r")$"
 )
 SAFE_QUERY_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]{0,63}$")
+DNS_HOST_RE = re.compile(r"^[a-z0-9.-]+$")
 PATH_HINT_RE = re.compile(
     r"(?i)^/(?:"
     r"api(?:/|$)|v\d+(?:/|$)|graphql(?:/|$)|rest(?:/|$)|"
@@ -204,6 +207,25 @@ def _limit(value: int) -> int:
     return max(1, min(int(value), MAX_MODEL_ITEMS))
 
 
+def _safe_host(host: str) -> tuple[str, bool] | None:
+    host = host.strip().lower().rstrip(".")
+    if not host or len(host) > MAX_HOST_LENGTH:
+        return None
+    if any(ord(ch) < 33 or ord(ch) == 127 for ch in host):
+        return None
+    try:
+        address = ipaddress.ip_address(host)
+        return str(address), address.version == 6
+    except ValueError:
+        pass
+    if not DNS_HOST_RE.fullmatch(host):
+        return None
+    labels = host.split(".")
+    if any(not label or len(label) > 63 or label.startswith("-") or label.endswith("-") for label in labels):
+        return None
+    return host, False
+
+
 def _is_third_party(host: str) -> bool:
     host = host.lower().rstrip(".")
     return any(
@@ -259,15 +281,17 @@ def _safe_endpoint_from_url(raw_url: str) -> dict[str, Any] | None:
         return None
     try:
         parsed = urllib.parse.urlsplit(raw_url)
-        host = (parsed.hostname or "").lower().rstrip(".")
+        raw_host = parsed.hostname or ""
         port = parsed.port
     except (ValueError, UnicodeError):
         return None
-    if parsed.scheme.lower() not in {"http", "https", "ws", "wss"} or not host:
+    safe_host = _safe_host(raw_host)
+    if parsed.scheme.lower() not in {"http", "https", "ws", "wss"} or safe_host is None:
         return None
-    netloc = host
+    host, ipv6 = safe_host
+    netloc = f"[{host}]" if ipv6 else host
     if port is not None:
-        netloc = f"{host}:{port}"
+        netloc = f"{netloc}:{port}"
     path = _redact_path(parsed.path or "/")
     return {
         "scheme": parsed.scheme.lower(),
@@ -510,19 +534,14 @@ def extract_flutter_network_model(
                 if endpoint is None:
                     continue
                 url_count += 1
-                host_item = {
-                    "host": endpoint["host"],
-                    "classification": endpoint["classification"],
-                    "evidence": evidence,
-                }
                 hosts.add(
-                    (endpoint["host"], row["source_file"], row["line"], row["id"]),
-                    host_item,
+                    (endpoint["host"],),
+                    {
+                        "host": endpoint["host"],
+                        "classification": endpoint["classification"],
+                        "evidence": evidence,
+                    },
                 )
-                endpoint_item = {
-                    **endpoint,
-                    "evidence": evidence,
-                }
                 endpoints.add(
                     (
                         endpoint["scheme"],
@@ -530,11 +549,8 @@ def extract_flutter_network_model(
                         endpoint["port"],
                         endpoint["path"],
                         tuple(endpoint["query_keys"]),
-                        row["source_file"],
-                        row["line"],
-                        row["id"],
                     ),
-                    endpoint_item,
+                    {**endpoint, "evidence": evidence},
                 )
                 if url_count >= MAX_URLS_PER_STRING:
                     break
@@ -546,9 +562,6 @@ def extract_flutter_network_model(
                         "path",
                         path_candidate["path"],
                         tuple(path_candidate["query_keys"]),
-                        row["source_file"],
-                        row["line"],
-                        row["id"],
                     ),
                     {**path_candidate, "evidence": evidence},
                 )
@@ -556,13 +569,13 @@ def extract_flutter_network_model(
             header = _header_name(value)
             if header is not None:
                 headers.add(
-                    (header.lower(), row["source_file"], row["line"], row["id"]),
+                    (header.lower(),),
                     {"name": header, "evidence": evidence},
                 )
 
             for signal in _keyword_hits(value, AUTH_TERMS):
                 auth.add(
-                    (signal, row["source_file"], row["line"], row["id"]),
+                    (signal,),
                     {
                         "signal": signal,
                         "evidence": evidence,
@@ -571,7 +584,7 @@ def extract_flutter_network_model(
                 )
             for signal in _keyword_hits(value, SIGNING_TERMS):
                 signing.add(
-                    (signal, row["source_file"], row["line"], row["id"]),
+                    (signal,),
                     {
                         "signal": signal,
                         "evidence": evidence,
@@ -580,7 +593,7 @@ def extract_flutter_network_model(
                 )
             for signal in _keyword_hits(value, CRYPTO_TERMS):
                 crypto.add(
-                    (signal, row["source_file"], row["line"], row["id"]),
+                    (signal,),
                     {
                         "signal": signal,
                         "evidence": evidence,
@@ -588,55 +601,8 @@ def extract_flutter_network_model(
                     },
                 )
 
-        function_cursor = conn.execute(
-            """SELECT id,library_url,class_name,name,signature,native_offset,
-                      source_file,line
-               FROM functions
-               WHERE instr(lower(library_url),'package:dio/')>0
-                  OR instr(lower(library_url),'package:http/')>0
-                  OR (
-                       (instr(lower(library_url),'dart:io')>0
-                        OR instr(lower(library_url),'dart:_http')>0)
-                       AND (
-                           instr(lower(class_name),'httpclient')>0
-                           OR instr(lower(name),'httpclient')>0
-                           OR instr(lower(signature),'httpclient')>0
-                       )
-                     )
-                  OR instr(lower(library_url),'package:retrofit/')>0
-                  OR instr(lower(library_url),'package:chopper/')>0
-                  OR instr(lower(library_url),'package:graphql/')>0
-                  OR instr(lower(library_url),'package:gql/')>0
-                  OR instr(lower(library_url),'package:web_socket_channel/')>0
-                  OR instr(lower(library_url),'package:grpc/')>0
-               ORDER BY library_url,native_offset LIMIT ?""",
-            (MAX_FUNCTION_CANDIDATES + 1,),
-        )
-        function_count = 0
-        scan["function_candidates_truncated"] = False
-        for row in function_cursor:
-            budget.check()
-            function_count += 1
-            if function_count > MAX_FUNCTION_CANDIDATES:
-                scan["function_candidates_truncated"] = True
-                break
-            client = _client_name(
-                row["library_url"], row["class_name"], row["name"], row["signature"]
-            )
-            if client is None:
-                continue
-            function = dict(row)
-            function["native_offset_hex"] = hex(function["native_offset"])
-            clients.add(
-                ("symbol", client, row["id"]),
-                {
-                    "client": client,
-                    "evidence_kind": "library-symbol-presence",
-                    "function": function,
-                },
-            )
-        scan["function_candidates"] = min(function_count, MAX_FUNCTION_CANDIDATES)
-
+        # Prefer app call-site evidence over package-internal symbol presence so
+        # useful caller context cannot be crowded out by a large client library.
         xref_cursor = conn.execute(
             """SELECT x.id,x.caller_id,x.target_library_url,x.target_class_name,
                       x.target_name,x.source_file,x.line,
@@ -691,7 +657,14 @@ def extract_flutter_network_model(
                 "native_offset_hex": hex(row["caller_native_offset"]),
             }
             clients.add(
-                ("xref", client, row["caller_id"], row["id"]),
+                (
+                    "xref",
+                    client,
+                    row["caller_id"],
+                    row["target_library_url"],
+                    row["target_class_name"],
+                    row["target_name"],
+                ),
                 {
                     "client": client,
                     "evidence_kind": "xref-call-adjacency",
@@ -706,6 +679,55 @@ def extract_flutter_network_model(
                 },
             )
         scan["xref_candidates"] = min(xref_count, MAX_XREF_CANDIDATES)
+
+        function_cursor = conn.execute(
+            """SELECT id,library_url,class_name,name,signature,native_offset,
+                      source_file,line
+               FROM functions
+               WHERE instr(lower(library_url),'package:dio/')>0
+                  OR instr(lower(library_url),'package:http/')>0
+                  OR (
+                       (instr(lower(library_url),'dart:io')>0
+                        OR instr(lower(library_url),'dart:_http')>0)
+                       AND (
+                           instr(lower(class_name),'httpclient')>0
+                           OR instr(lower(name),'httpclient')>0
+                           OR instr(lower(signature),'httpclient')>0
+                       )
+                     )
+                  OR instr(lower(library_url),'package:retrofit/')>0
+                  OR instr(lower(library_url),'package:chopper/')>0
+                  OR instr(lower(library_url),'package:graphql/')>0
+                  OR instr(lower(library_url),'package:gql/')>0
+                  OR instr(lower(library_url),'package:web_socket_channel/')>0
+                  OR instr(lower(library_url),'package:grpc/')>0
+               ORDER BY library_url,native_offset LIMIT ?""",
+            (MAX_FUNCTION_CANDIDATES + 1,),
+        )
+        function_count = 0
+        scan["function_candidates_truncated"] = False
+        for row in function_cursor:
+            budget.check()
+            function_count += 1
+            if function_count > MAX_FUNCTION_CANDIDATES:
+                scan["function_candidates_truncated"] = True
+                break
+            client = _client_name(
+                row["library_url"], row["class_name"], row["name"], row["signature"]
+            )
+            if client is None:
+                continue
+            function = dict(row)
+            function["native_offset_hex"] = hex(function["native_offset"])
+            clients.add(
+                ("library", client),
+                {
+                    "client": client,
+                    "evidence_kind": "library-symbol-presence",
+                    "function": function,
+                },
+            )
+        scan["function_candidates"] = min(function_count, MAX_FUNCTION_CANDIDATES)
 
         return {
             "status": "ok",
@@ -732,7 +754,8 @@ def extract_flutter_network_model(
             "limitations": [
                 "This is deterministic static string/symbol/XREF reconstruction, not proof of value flow.",
                 "first-party-candidate means the host is not in the bundled known-third-party suffix registry; it is not proof of ownership.",
-                "Auth/signing/crypto evidence returns identifiers and locations only; secret/token values are deliberately not returned.",
+                "Query/header/auth literal values are not returned; secret-like path segments and query keys are redacted conservatively.",
+                "Logical hosts/endpoints/headers/signals are deduplicated and retain one representative evidence location in this bounded model.",
                 "Object-pool strings without function_id cannot be attributed to an owning Dart function.",
                 "Endpoints assembled dynamically from multiple values can be missed until data-flow analysis is available.",
             ],
