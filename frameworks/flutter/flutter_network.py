@@ -27,6 +27,7 @@ SECRET_SEGMENT_RE = re.compile(
     r"eyJ[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{8,}(?:\.[A-Za-z0-9_-]{8,})?"
     r")$"
 )
+SAFE_QUERY_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]{0,63}$")
 PATH_HINT_RE = re.compile(
     r"(?i)^/(?:"
     r"api(?:/|$)|v\d+(?:/|$)|graphql(?:/|$)|rest(?:/|$)|"
@@ -192,10 +193,16 @@ def _redact_path(path: str) -> str:
     if not path:
         return "/"
     parts = path.split("/")
-    redacted = [
-        "{redacted}" if SECRET_SEGMENT_RE.fullmatch(part) else part[:256]
-        for part in parts
-    ]
+    redacted = []
+    for part in parts:
+        try:
+            decoded = urllib.parse.unquote(part)
+        except (ValueError, UnicodeError):
+            decoded = part
+        if SECRET_SEGMENT_RE.fullmatch(part) or SECRET_SEGMENT_RE.fullmatch(decoded):
+            redacted.append("{redacted}")
+        else:
+            redacted.append(part[:256])
     value = "/".join(redacted)
     if len(value) > MAX_ENDPOINT_TEXT:
         value = value[:MAX_ENDPOINT_TEXT]
@@ -209,6 +216,8 @@ def _query_keys(query: str) -> list[str]:
             query, keep_blank_values=True, strict_parsing=False, max_num_fields=100
         ):
             clean = key[:128]
+            if clean and not SAFE_QUERY_KEY_RE.fullmatch(clean):
+                clean = "{redacted-key}"
             if clean and clean not in keys:
                 keys.append(clean)
             if len(keys) >= 32:
@@ -307,10 +316,14 @@ def _client_name(library_url: str, class_name: str, name: str, signature: str = 
     for label, library_markers, symbol_markers in CLIENT_RULES:
         library_match = any(marker in library for marker in library_markers)
         symbol_match = any(marker in text for marker in symbol_markers)
-        if library_match and symbol_match:
-            return label
-        if label in {"dio", "graphql", "chopper", "web_socket_channel", "grpc"} and library_match:
-            return label
+        if not library_match:
+            continue
+        if label == "dart:io HttpClient":
+            if symbol_match:
+                return label
+            continue
+        # A package-specific Dart library is already strong framework evidence.
+        return label
     return None
 
 
@@ -318,7 +331,14 @@ def _keyword_hits(value: str, registry: dict[str, str]) -> list[str]:
     lower = value.lower()
     hits: list[str] = []
     for term, label in registry.items():
-        if term in lower and label not in hits:
+        if len(term) <= 3 and term.isalnum():
+            matched = re.search(
+                rf"(?<![a-z0-9]){re.escape(term)}(?![a-z0-9])",
+                lower,
+            ) is not None
+        else:
+            matched = term in lower
+        if matched and label not in hits:
             hits.append(label)
     return hits
 
@@ -381,6 +401,12 @@ def _fetch_string_candidates(conn: sqlite3.Connection) -> tuple[list[sqlite3.Row
                   OR instr(lower(value),'decrypt')>0
                   OR instr(lower(value),'content-type')>0
                   OR instr(lower(value),'user-agent')>0
+                  OR instr(lower(value),'cookie')>0
+                  OR instr(lower(value),'accept')>0
+                  OR instr(lower(value),'cache-control')>0
+                  OR instr(lower(value),'x-auth-token')>0
+                  OR instr(lower(value),'x-csrf-token')>0
+                  OR instr(lower(value),'x-xsrf-token')>0
                   OR instr(lower(value),'x-request-id')>0
                ORDER BY source_file,line,id LIMIT ?""",
         ),
@@ -514,8 +540,15 @@ def extract_flutter_network_model(
                FROM functions
                WHERE instr(lower(library_url),'package:dio/')>0
                   OR instr(lower(library_url),'package:http/')>0
-                  OR instr(lower(library_url),'dart:io')>0
-                  OR instr(lower(library_url),'dart:_http')>0
+                  OR (
+                       (instr(lower(library_url),'dart:io')>0
+                        OR instr(lower(library_url),'dart:_http')>0)
+                       AND (
+                           instr(lower(class_name),'httpclient')>0
+                           OR instr(lower(name),'httpclient')>0
+                           OR instr(lower(signature),'httpclient')>0
+                       )
+                     )
                   OR instr(lower(library_url),'package:retrofit/')>0
                   OR instr(lower(library_url),'package:chopper/')>0
                   OR instr(lower(library_url),'package:graphql/')>0
@@ -556,8 +589,14 @@ def extract_flutter_network_model(
                JOIN functions f ON f.id=x.caller_id
                WHERE instr(lower(x.target_library_url),'package:dio/')>0
                   OR instr(lower(x.target_library_url),'package:http/')>0
-                  OR instr(lower(x.target_library_url),'dart:io')>0
-                  OR instr(lower(x.target_library_url),'dart:_http')>0
+                  OR (
+                       (instr(lower(x.target_library_url),'dart:io')>0
+                        OR instr(lower(x.target_library_url),'dart:_http')>0)
+                       AND (
+                           instr(lower(x.target_class_name),'httpclient')>0
+                           OR instr(lower(x.target_name),'httpclient')>0
+                       )
+                     )
                   OR instr(lower(x.target_library_url),'package:retrofit/')>0
                   OR instr(lower(x.target_library_url),'package:chopper/')>0
                   OR instr(lower(x.target_library_url),'package:graphql/')>0
