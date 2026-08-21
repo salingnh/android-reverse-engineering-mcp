@@ -7,7 +7,7 @@ on:
       - 'plugins/safe-android-reverser/VERSION'
       - '.github/workflows/build-flutter-profile.yml'
   push:
-    branches: [master]
+    branches: [master, 'feat/**']
     tags: ['safe-v*']
     paths:
       - 'frameworks/flutter/**'
