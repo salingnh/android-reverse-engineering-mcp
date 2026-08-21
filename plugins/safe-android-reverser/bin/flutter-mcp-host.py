@@ -11,6 +11,7 @@ import json
 import os
 import re
 import secrets
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -23,7 +24,7 @@ SERVER_VERSION = str(os.environ.get("SAFE_REVERSER_PLUGIN_VERSION", "unknown")).
 RUNTIME = str(os.environ.get("SAFE_REVERSER_RUNTIME", "")).strip()
 PROJECT_DIR = Path(os.environ.get("SAFE_REVERSER_PROJECT_DIR", ".")).resolve()
 DATA_DIR = Path(os.environ.get("SAFE_REVERSER_DATA_DIR", ".")).resolve()
-FLUTTER_DATA = (DATA_DIR / "flutter").resolve()
+FLUTTER_DATA = DATA_DIR / "flutter"
 FLUTTER_REPOSITORY = str(
     os.environ.get(
         "SAFE_REVERSER_FLUTTER_REPOSITORY",
@@ -47,7 +48,8 @@ OUTPUT_TMPFS_SIZE = str(os.environ.get("SAFE_REVERSER_FLUTTER_OUTPUT_TMPFS", "4g
 MAX_TOOL_TEXT = 300_000
 MAX_RUNTIME_LOG = 512_000
 MAX_JOB_META = 128 * 1024
-MAX_QUERY_TEXT = 1024
+MAX_QUERY_TEXT = 512
+MAX_SYMBOL_TEXT = 1024
 MAX_QUERY_LIMIT = 200
 ALLOWED_ARTIFACT_EXTS = {".apk", ".xapk", ".apks", ".apkm"}
 JOB_ID_RE = re.compile(r"^[0-9a-f]{12}$")
@@ -55,7 +57,8 @@ TAG_RE = re.compile(r"^[A-Za-z0-9_.-]{1,128}$")
 REPOSITORY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{1,199}$")
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 SNAPSHOT_RE = re.compile(r"^[0-9a-f]{32,64}$")
-RESOURCE_RE = re.compile(r"^[0-9]+(?:\.[0-9]+)?[kKmMgG]?$|^[0-9]+(?:\.[0-9]+)?$")
+MEMORY_RE = re.compile(r"^[1-9][0-9]*[kKmMgG]?$|^0\.[0-9]*[1-9][0-9]*[kKmMgG]$")
+CPU_RE = re.compile(r"^(?:[1-9][0-9]*(?:\.[0-9]+)?|0\.[0-9]*[1-9][0-9]*)$")
 
 
 class ControllerError(Exception):
@@ -69,6 +72,20 @@ def _json_text(value: Any) -> str:
     return text
 
 
+def _flutter_data_root(*, create: bool = True) -> Path:
+    root = FLUTTER_DATA
+    if root.is_symlink():
+        raise ControllerError("Flutter data directory must not be a symlink")
+    if create:
+        root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if not root.exists() or not root.is_dir():
+        raise ControllerError("Flutter data directory is unavailable")
+    resolved = root.resolve()
+    if resolved.parent != DATA_DIR:
+        raise ControllerError("Flutter data directory escapes plugin data root")
+    return resolved
+
+
 def _validate_config() -> None:
     if RUNTIME not in {"docker", "podman"}:
         raise ControllerError("SAFE_REVERSER_RUNTIME must be docker or podman")
@@ -78,6 +95,7 @@ def _validate_config() -> None:
         raise ControllerError("project directory does not exist")
     if not DATA_DIR.is_dir():
         raise ControllerError("plugin data directory does not exist")
+    _flutter_data_root(create=False) if FLUTTER_DATA.exists() else None
     if not REPOSITORY_RE.fullmatch(FLUTTER_REPOSITORY):
         raise ControllerError("invalid Flutter image repository")
     if not BASE_IMAGE.startswith(FLUTTER_REPOSITORY + ":"):
@@ -89,13 +107,12 @@ def _validate_config() -> None:
         raise ControllerError("invalid host uid/gid")
     if not PIDS.isdigit() or int(PIDS) < 16 or int(PIDS) > 4096:
         raise ControllerError("invalid PID limit")
-    for name, value in {
-        "SAFE_REVERSER_FLUTTER_MEMORY": MEMORY,
-        "SAFE_REVERSER_FLUTTER_CPUS": CPUS,
-        "SAFE_REVERSER_FLUTTER_OUTPUT_TMPFS": OUTPUT_TMPFS_SIZE,
-    }.items():
-        if not RESOURCE_RE.fullmatch(value):
-            raise ControllerError(f"invalid {name}")
+    if not MEMORY_RE.fullmatch(MEMORY):
+        raise ControllerError("invalid SAFE_REVERSER_FLUTTER_MEMORY")
+    if not MEMORY_RE.fullmatch(OUTPUT_TMPFS_SIZE):
+        raise ControllerError("invalid SAFE_REVERSER_FLUTTER_OUTPUT_TMPFS")
+    if not CPU_RE.fullmatch(CPUS):
+        raise ControllerError("invalid SAFE_REVERSER_FLUTTER_CPUS")
 
 
 def _safe_relative(root: Path, value: str, *, must_exist: bool = True) -> Path:
@@ -132,11 +149,15 @@ def _artifact(value: str) -> tuple[Path, str]:
 
 
 def _jobs_root() -> Path:
-    root = FLUTTER_DATA / "jobs"
+    flutter_root = _flutter_data_root()
+    root = flutter_root / "jobs"
+    if root.is_symlink():
+        raise ControllerError("Flutter jobs directory must not be a symlink")
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
-    if root.is_symlink() or root.resolve().parent != FLUTTER_DATA:
+    resolved = root.resolve()
+    if resolved.parent != flutter_root:
         raise ControllerError("invalid Flutter jobs directory")
-    return root.resolve()
+    return resolved
 
 
 def _new_job() -> tuple[str, Path]:
@@ -166,12 +187,16 @@ def _write_job(job: Path, payload: dict[str, Any]) -> None:
     target = job / "job.json"
     if target.is_symlink():
         raise ControllerError("Flutter job metadata must not be a symlink")
-    encoded = (json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n").encode("utf-8")
+    encoded = (
+        json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n"
+    ).encode("utf-8")
     if len(encoded) > MAX_JOB_META:
         raise ControllerError("Flutter job metadata exceeds safe size")
     temp: Path | None = None
     try:
-        with tempfile.NamedTemporaryFile(dir=job, prefix=".job.", suffix=".tmp", delete=False) as handle:
+        with tempfile.NamedTemporaryFile(
+            dir=job, prefix=".job.", suffix=".tmp", delete=False
+        ) as handle:
             temp = Path(handle.name)
             handle.write(encoded)
             handle.flush()
@@ -195,6 +220,17 @@ def _read_job(job: Path) -> dict[str, Any]:
     if not isinstance(payload, dict) or payload.get("job_id") != job.name:
         raise ControllerError("Flutter job metadata does not match its directory")
     return payload
+
+
+def _remove_prepared_input(job: Path) -> None:
+    path = job / "input"
+    if not path.exists() and not path.is_symlink():
+        return
+    if path.is_symlink() or path.resolve().parent != job:
+        raise ControllerError("prepared Flutter input path is unsafe")
+    if not path.is_dir():
+        raise ControllerError("prepared Flutter input is not a directory")
+    shutil.rmtree(path)
 
 
 def _tail(handle, limit: int) -> str:
@@ -322,7 +358,9 @@ def _ensure_base_image() -> dict[str, str]:
     return labels
 
 
-def _runtime_image_reference(prepared: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+def _runtime_image_reference(
+    prepared: dict[str, Any],
+) -> tuple[str, dict[str, Any]]:
     runtime = prepared.get("runtime")
     if not isinstance(runtime, dict) or runtime.get("identity_status") != "identified":
         raise ControllerError("Flutter runtime identity is incomplete")
@@ -330,8 +368,13 @@ def _runtime_image_reference(prepared: dict[str, Any]) -> tuple[str, dict[str, A
     if not TAG_RE.fullmatch(tag):
         raise ControllerError("Flutter runtime cache tag is invalid")
     expected = f"{FLUTTER_REPOSITORY}:{tag}"
-    if prepared.get("recommended_image") != expected or runtime.get("recommended_image") != expected:
-        raise ControllerError("Flutter capability returned an unexpected runtime image reference")
+    if (
+        prepared.get("recommended_image") != expected
+        or runtime.get("recommended_image") != expected
+    ):
+        raise ControllerError(
+            "Flutter capability returned an unexpected runtime image reference"
+        )
     if runtime.get("arch") != "arm64" or runtime.get("os") != "android":
         raise ControllerError("Flutter runtime architecture/OS is unsupported")
     snapshot = str(runtime.get("snapshot_hash") or "").lower()
@@ -340,7 +383,9 @@ def _runtime_image_reference(prepared: dict[str, Any]) -> tuple[str, dict[str, A
     return expected, runtime
 
 
-def _ensure_runtime_image(image: str, runtime: dict[str, Any], blutter_commit: str) -> tuple[bool, str]:
+def _ensure_runtime_image(
+    image: str, runtime: dict[str, Any], blutter_commit: str
+) -> tuple[bool, str]:
     info = _inspect_image(image)
     if info is None:
         ok, reason = _pull_image(image)
@@ -386,7 +431,9 @@ def _prepare(job: Path, artifact_rel: str) -> dict[str, Any]:
     if run["timed_out"]:
         raise ControllerError("Flutter artifact preparation timed out")
     if run["exit_code"] != 0 and payload.get("status") == "error":
-        raise ControllerError(str(payload.get("error") or "Flutter artifact preparation failed"))
+        raise ControllerError(
+            str(payload.get("error") or "Flutter artifact preparation failed")
+        )
     return payload
 
 
@@ -418,7 +465,9 @@ def _execute_analysis(
     if run["timed_out"]:
         return {"status": "timeout", "executed": True, "exit_code": 124}
     if run["exit_code"] != 0 and payload.get("status") == "error":
-        raise ControllerError(str(payload.get("error") or "Flutter AOT analysis failed"))
+        raise ControllerError(
+            str(payload.get("error") or "Flutter AOT analysis failed")
+        )
     return payload
 
 
@@ -427,15 +476,19 @@ def _analysis_dir(job: Path) -> Path:
     if path.is_symlink() or not path.is_dir() or path.resolve().parent != job:
         raise ControllerError("Flutter semantic analysis output is unavailable")
     index = path / "flutter-index.sqlite"
-    if index.is_symlink() or not index.is_file() or index.resolve().parent != path.resolve():
+    if (
+        index.is_symlink()
+        or not index.is_file()
+        or index.resolve().parent != path.resolve()
+    ):
         raise ControllerError("Flutter semantic index is unavailable")
     return path.resolve()
 
 
-def _query_text(value: Any, field: str) -> str:
+def _query_text(value: Any, field: str, limit: int) -> str:
     text = str(value or "").strip()
-    if not text or len(text) > MAX_QUERY_TEXT or "\x00" in text:
-        raise ControllerError(f"{field} must be 1..{MAX_QUERY_TEXT} characters")
+    if not text or len(text) > limit or "\x00" in text:
+        raise ControllerError(f"{field} must be 1..{limit} characters")
     return text
 
 
@@ -447,7 +500,9 @@ def _query_limit(value: Any, default: int) -> int:
     return max(1, min(parsed, MAX_QUERY_LIMIT))
 
 
-def _run_semantic(job: Path, command: str, argv: list[str], *, timeout: int = 120) -> dict[str, Any]:
+def _run_semantic(
+    job: Path, command: str, argv: list[str], *, timeout: int = 120
+) -> dict[str, Any]:
     analysis = _analysis_dir(job)
     args = _common_container_args()
     args.extend(
@@ -511,8 +566,10 @@ def analyze_flutter_aot(args: dict[str, Any]) -> dict[str, Any]:
         "status": "preparing",
     }
     _write_job(job, meta)
+    prepared_created = False
     try:
         prepared = _prepare(job, artifact_rel)
+        prepared_created = (job / "input").is_dir()
         meta["prepare"] = prepared
         meta["status"] = str(prepared.get("status") or "unknown")
         _write_job(job, meta)
@@ -525,13 +582,17 @@ def analyze_flutter_aot(args: dict[str, Any]) -> dict[str, Any]:
                 "job_id": job_id,
                 **prepared,
                 "executed": False,
-                "limitation": "exact Dart runtime identity is required before AOT analysis",
+                "limitation": (
+                    "exact Dart runtime identity is required before AOT analysis"
+                ),
             }
 
         image, runtime = _runtime_image_reference(prepared)
         blutter_commit = str(prepared.get("blutter_commit") or "").lower()
         if not COMMIT_RE.fullmatch(blutter_commit):
-            raise ControllerError("prepared Flutter evidence has invalid Blutter commit")
+            raise ControllerError(
+                "prepared Flutter evidence has invalid Blutter commit"
+            )
         ready, reason = _ensure_runtime_image(image, runtime, blutter_commit)
         if not ready:
             meta["status"] = "runtime_cache_unavailable"
@@ -546,7 +607,10 @@ def analyze_flutter_aot(args: dict[str, Any]) -> dict[str, Any]:
                 "recommended_image": image,
                 "cache_tag": runtime.get("cache_tag"),
                 "reason": reason[-4000:],
-                "next_action": "build/publish the exact runtime cache through the controlled GitHub workflow; analysis stays offline",
+                "next_action": (
+                    "build/publish the exact runtime cache through the controlled "
+                    "GitHub workflow; analysis stays offline"
+                ),
             }
 
         analysis = _execute_analysis(job, image, timeout_seconds=timeout)
@@ -562,25 +626,28 @@ def analyze_flutter_aot(args: dict[str, Any]) -> dict[str, Any]:
         except Exception:
             pass
         raise
+    finally:
+        if prepared_created:
+            _remove_prepared_input(job)
 
 
 def find_dart_symbols(args: dict[str, Any]) -> dict[str, Any]:
     job = _job(str(args.get("job_id") or ""))
-    query = _query_text(args.get("query"), "query")
+    query = _query_text(args.get("query"), "query", MAX_QUERY_TEXT)
     limit = _query_limit(args.get("limit"), 50)
     return _run_semantic(job, "find_dart_symbols", [query, "--limit", str(limit)])
 
 
 def find_dart_strings(args: dict[str, Any]) -> dict[str, Any]:
     job = _job(str(args.get("job_id") or ""))
-    query = _query_text(args.get("query"), "query")
+    query = _query_text(args.get("query"), "query", MAX_QUERY_TEXT)
     limit = _query_limit(args.get("limit"), 50)
     return _run_semantic(job, "find_dart_strings", [query, "--limit", str(limit)])
 
 
 def find_dart_xrefs(args: dict[str, Any]) -> dict[str, Any]:
     job = _job(str(args.get("job_id") or ""))
-    symbol = _query_text(args.get("symbol"), "symbol")
+    symbol = _query_text(args.get("symbol"), "symbol", MAX_SYMBOL_TEXT)
     direction = str(args.get("direction") or "both")
     if direction not in {"incoming", "outgoing", "both"}:
         raise ControllerError("direction must be incoming, outgoing, or both")
@@ -594,14 +661,19 @@ def find_dart_xrefs(args: dict[str, Any]) -> dict[str, Any]:
 
 def map_dart_to_native(args: dict[str, Any]) -> dict[str, Any]:
     job = _job(str(args.get("job_id") or ""))
-    symbol = _query_text(args.get("symbol"), "symbol")
+    symbol = _query_text(args.get("symbol"), "symbol", MAX_SYMBOL_TEXT)
     return _run_semantic(job, "map_dart_to_native", [symbol])
 
 
 def extract_flutter_network_model(args: dict[str, Any]) -> dict[str, Any]:
     job = _job(str(args.get("job_id") or ""))
     limit = _query_limit(args.get("limit"), 100)
-    return _run_semantic(job, "extract_flutter_network_model", ["--limit", str(limit)], timeout=180)
+    return _run_semantic(
+        job,
+        "extract_flutter_network_model",
+        ["--limit", str(limit)],
+        timeout=180,
+    )
 
 
 def list_flutter_jobs(_args: dict[str, Any]) -> dict[str, Any]:
@@ -642,17 +714,39 @@ TOOL_HANDLERS = {
 TOOLS = [
     {
         "name": "health",
-        "description": "Check the host Flutter capability controller, pinned base image and trust-boundary configuration.",
-        "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+        "description": (
+            "Check the host Flutter capability controller, pinned base image "
+            "and trust-boundary configuration."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {},
+            "additionalProperties": False,
+        },
     },
     {
         "name": "analyze_flutter_aot",
-        "description": "Prepare a Flutter APK/bundle, identify its exact Dart AOT runtime, select a verified immutable runtime-cache image, run offline Blutter analysis, and persist a bounded semantic index. Returns an explicit cache-miss state when the exact prebuilt runtime is unavailable.",
+        "description": (
+            "Prepare a Flutter APK/bundle, identify its exact Dart AOT runtime, "
+            "select a verified immutable runtime-cache image, run offline Blutter "
+            "analysis, and persist a bounded semantic index. Returns an explicit "
+            "cache-miss state when the exact prebuilt runtime is unavailable."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
-                "artifact": {"type": "string", "description": "APK/XAPK/APKS/APKM path relative to the project root."},
-                "timeout_seconds": {"type": "integer", "minimum": 30, "maximum": 3480, "default": 900},
+                "artifact": {
+                    "type": "string",
+                    "description": (
+                        "APK/XAPK/APKS/APKM path relative to the project root."
+                    ),
+                },
+                "timeout_seconds": {
+                    "type": "integer",
+                    "minimum": 30,
+                    "maximum": 3480,
+                    "default": 900,
+                },
             },
             "required": ["artifact"],
             "additionalProperties": False,
@@ -660,34 +754,70 @@ TOOLS = [
     },
     {
         "name": "find_dart_symbols",
-        "description": "Search the persisted bounded Flutter Dart semantic index for libraries, classes, functions and signatures.",
+        "description": (
+            "Search the persisted bounded Flutter Dart semantic index for "
+            "libraries, classes, functions and signatures."
+        ),
         "inputSchema": {
             "type": "object",
-            "properties": {"job_id": {"type": "string"}, "query": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 50}},
+            "properties": {
+                "job_id": {"type": "string"},
+                "query": {"type": "string", "maxLength": MAX_QUERY_TEXT},
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 200,
+                    "default": 50,
+                },
+            },
             "required": ["job_id", "query"],
             "additionalProperties": False,
         },
     },
     {
         "name": "find_dart_strings",
-        "description": "Search bounded Dart AOT/object-pool string evidence in a Flutter analysis job.",
+        "description": (
+            "Search bounded Dart AOT/object-pool string evidence in a Flutter "
+            "analysis job."
+        ),
         "inputSchema": {
             "type": "object",
-            "properties": {"job_id": {"type": "string"}, "query": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 50}},
+            "properties": {
+                "job_id": {"type": "string"},
+                "query": {"type": "string", "maxLength": MAX_QUERY_TEXT},
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 200,
+                    "default": 50,
+                },
+            },
             "required": ["job_id", "query"],
             "additionalProperties": False,
         },
     },
     {
         "name": "find_dart_xrefs",
-        "description": "Query bounded Dart call/XREF adjacency. XREFs are evidence of adjacency, not proof of value flow.",
+        "description": (
+            "Query bounded Dart call/XREF adjacency. XREFs are evidence of "
+            "adjacency, not proof of value flow."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "job_id": {"type": "string"},
-                "symbol": {"type": "string"},
-                "direction": {"type": "string", "enum": ["incoming", "outgoing", "both"], "default": "both"},
-                "limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 100},
+                "symbol": {"type": "string", "maxLength": MAX_SYMBOL_TEXT},
+                "direction": {
+                    "type": "string",
+                    "enum": ["incoming", "outgoing", "both"],
+                    "default": "both",
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 200,
+                    "default": 100,
+                },
             },
             "required": ["job_id", "symbol"],
             "additionalProperties": False,
@@ -695,20 +825,37 @@ TOOLS = [
     },
     {
         "name": "map_dart_to_native",
-        "description": "Map a uniquely resolved Dart function to its libapp.so-relative native offset with provenance.",
+        "description": (
+            "Map a uniquely resolved Dart function to its libapp.so-relative "
+            "native offset with provenance."
+        ),
         "inputSchema": {
             "type": "object",
-            "properties": {"job_id": {"type": "string"}, "symbol": {"type": "string"}},
+            "properties": {
+                "job_id": {"type": "string"},
+                "symbol": {"type": "string", "maxLength": MAX_SYMBOL_TEXT},
+            },
             "required": ["job_id", "symbol"],
             "additionalProperties": False,
         },
     },
     {
         "name": "extract_flutter_network_model",
-        "description": "Reconstruct bounded Flutter host/endpoint/client/header/auth/signing/crypto evidence from the Dart semantic index without claiming value flow.",
+        "description": (
+            "Reconstruct bounded Flutter host/endpoint/client/header/auth/signing/"
+            "crypto evidence from the Dart semantic index without claiming value flow."
+        ),
         "inputSchema": {
             "type": "object",
-            "properties": {"job_id": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 100}},
+            "properties": {
+                "job_id": {"type": "string"},
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 200,
+                    "default": 100,
+                },
+            },
             "required": ["job_id"],
             "additionalProperties": False,
         },
@@ -716,18 +863,27 @@ TOOLS = [
     {
         "name": "list_flutter_jobs",
         "description": "List recent Flutter capability jobs and their coarse status.",
-        "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+        "inputSchema": {
+            "type": "object",
+            "properties": {},
+            "additionalProperties": False,
+        },
     },
 ]
 
 
 def _send(payload: dict[str, Any]) -> None:
-    sys.stdout.write(json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n")
+    sys.stdout.write(
+        json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n"
+    )
     sys.stdout.flush()
 
 
 def _tool_result(data: Any, *, is_error: bool = False) -> dict[str, Any]:
-    return {"content": [{"type": "text", "text": _json_text(data)}], "isError": is_error}
+    return {
+        "content": [{"type": "text", "text": _json_text(data)}],
+        "isError": is_error,
+    }
 
 
 def _handle(req: dict[str, Any]) -> dict[str, Any] | None:
@@ -741,8 +897,9 @@ def _handle(req: dict[str, Any]) -> dict[str, Any] | None:
             "capabilities": {"tools": {"listChanged": False}},
             "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION},
             "instructions": (
-                "Flutter/Dart AOT capability controller. It selects verified capability images on the host; "
-                "all artifact parsing and analyzer execution stay inside network-disabled containers."
+                "Flutter/Dart AOT capability controller. It selects verified "
+                "capability images on the host; all artifact parsing and analyzer "
+                "execution stay inside network-disabled containers."
             ),
         }
     elif method in {"notifications/initialized", "notifications/cancelled"}:
@@ -758,7 +915,9 @@ def _handle(req: dict[str, Any]) -> dict[str, Any] | None:
         if handler is None:
             result = _tool_result({"error": f"unknown tool: {name}"}, is_error=True)
         elif not isinstance(arguments, dict):
-            result = _tool_result({"error": "tool arguments must be an object"}, is_error=True)
+            result = _tool_result(
+                {"error": "tool arguments must be an object"}, is_error=True
+            )
         else:
             try:
                 result = _tool_result(handler(arguments))
@@ -767,7 +926,11 @@ def _handle(req: dict[str, Any]) -> dict[str, Any] | None:
     else:
         if request_id is None:
             return None
-        return {"jsonrpc": "2.0", "id": request_id, "error": {"code": -32601, "message": f"method not found: {method}"}}
+        return {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "error": {"code": -32601, "message": f"method not found: {method}"},
+        }
     if request_id is None:
         return None
     return {"jsonrpc": "2.0", "id": request_id, "result": result}
@@ -776,7 +939,7 @@ def _handle(req: dict[str, Any]) -> dict[str, Any] | None:
 def main() -> int:
     try:
         _validate_config()
-        FLUTTER_DATA.mkdir(parents=True, exist_ok=True, mode=0o700)
+        _flutter_data_root()
     except (ControllerError, OSError) as exc:
         print(f"safe-android-reverser-flutter: {exc}", file=sys.stderr)
         return 2
@@ -784,18 +947,32 @@ def main() -> int:
         raw = raw.strip()
         if not raw:
             continue
+        req: dict[str, Any] | None = None
         try:
-            req = json.loads(raw)
-            if not isinstance(req, dict):
+            decoded = json.loads(raw)
+            if not isinstance(decoded, dict):
                 raise ValueError("request must be a JSON object")
+            req = decoded
             response = _handle(req)
             if response is not None:
                 _send(response)
         except json.JSONDecodeError as exc:
-            _send({"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": f"parse error: {exc.msg}"}})
+            _send(
+                {
+                    "jsonrpc": "2.0",
+                    "id": None,
+                    "error": {"code": -32700, "message": f"parse error: {exc.msg}"},
+                }
+            )
         except Exception as exc:
-            request_id = req.get("id") if isinstance(locals().get("req"), dict) else None
-            _send({"jsonrpc": "2.0", "id": request_id, "error": {"code": -32603, "message": str(exc)}})
+            request_id = req.get("id") if isinstance(req, dict) else None
+            _send(
+                {
+                    "jsonrpc": "2.0",
+                    "id": request_id,
+                    "error": {"code": -32603, "message": str(exc)},
+                }
+            )
     return 0
 
 
