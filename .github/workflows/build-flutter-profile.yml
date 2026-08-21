@@ -46,6 +46,8 @@ jobs:
       - name: Validate Python syntax
         run: |
           python3 -m py_compile \
+            frameworks/flutter/cache_identity.py \
+            frameworks/flutter/build_runtime.py \
             frameworks/flutter/safe_blutter_adapter.py \
             frameworks/flutter/tests_safe_blutter_adapter.py
 
@@ -90,6 +92,9 @@ jobs:
           assert payload["network_required_at_runtime"] is False, payload
           assert payload["network_capable_upstream_path_used"] is False, payload
           assert payload["build_on_demand_allowed"] is False, payload
+          constraints = payload["required_runtime_constraints"]
+          assert constraints["network"] == "none", payload
+          assert constraints["output_mount"] == "writable-bounded", payload
           PY
 
       - name: Verify pinned upstream license is preserved
