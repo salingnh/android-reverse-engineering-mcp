@@ -52,6 +52,38 @@ MCP server version
 
 Current release: **0.2.1**.
 
+## Current development focus
+
+**In development: framework-aware routing with Flutter AOT analysis as the first priority.**
+
+The current semantic DEX pipeline works well for native Android Java/Kotlin applications, but a Flutter release moves most Dart business logic into AOT-compiled native code, typically `libapp.so`. Continuing to run JADX after Flutter has already been detected only analyzes the Android host shell and misses the main application logic.
+
+The current development track therefore changes the analysis pipeline from "decompile every APK with the same tools" to **detect → route → analyze the representation that actually contains the business logic**:
+
+```text
+artifact
+   ↓
+fingerprint / framework router
+   ├─ Native Android      → DEX / JADX / Androguard semantics
+   ├─ Flutter             → Dart AOT-aware analysis of libapp.so + flutter assets
+   ├─ React Native/Hermes → Hermes / JavaScript bytecode analysis
+   ├─ Unity IL2CPP        → metadata + native analysis
+   └─ .NET MAUI/Xamarin   → managed assembly analysis
+```
+
+The immediate Flutter work is:
+
+- identify `libapp.so`, `libflutter.so`, Flutter assets, ABI, and Dart/Flutter runtime metadata;
+- add a dedicated `framework-flutter` capability profile rather than treating Flutter as generic ELF only;
+- integrate a Dart AOT-aware analyzer such as **Blutter** behind bounded semantic MCP operations;
+- normalize recovered Dart strings, object-pool data, classes/functions, code offsets, endpoints, auth/crypto signals and evidence into the common Program Evidence Graph;
+- map important Dart-level findings back to native offsets so Rizin/Ghidra can be used only when deeper native CFG/XREF analysis is required;
+- keep runtime patching, reFlutter, Frida, proxying and device access in the separate explicit-opt-in dynamic trust boundary.
+
+Generic native reverse engineering remains an important substrate, but for Flutter the key requirement is **Dart AOT-aware native analysis**, not merely disassembling `libapp.so` as an ordinary stripped ELF.
+
+See [`docs/ROADMAP.md`](docs/ROADMAP.md) for the prioritized implementation plan.
+
 ## Why semantic program understanding
 
 The 0.1.x baseline could answer questions such as:
@@ -178,19 +210,17 @@ health
   ↓
 fingerprint
   ↓
+route by detected framework
+  ├─ Java/Kotlin → decompile + program index
+  └─ framework-specific representation → specialized analyzer
+  ↓
 identify_protector (if available)
   ↓
-decompile
+semantic localization / XREF / network model
   ↓
-build_program_index
+CFG or native/framework-specific analysis only where needed
   ↓
-find_symbols / find_xrefs
-  ↓
-extract_network_model
-  ↓
-get_cfg only for ambiguous control flow
-  ↓
-search_source / read_source_file for evidence verification
+read only high-signal evidence for verification
 ```
 
 Example prompt:
@@ -199,14 +229,14 @@ Example prompt:
 Analyze artifacts/app.xapk using only safe-android-reverser MCP.
 
 1. Call health and require release.version_consistent=true.
-2. Fingerprint the artifact.
-3. Decompile when the detected framework makes Java/Kotlin analysis appropriate.
-4. Build the program index.
+2. Fingerprint the artifact and route analysis according to the detected framework.
+3. Use Java/Kotlin decompilation only when it contains the relevant business logic.
+4. Build the available semantic program/framework index.
 5. Build the network model.
-6. For important first-party endpoints, trace their declaring methods and incoming/outgoing XREFs.
-7. Inspect CFG only where branch behavior is relevant.
-8. Read only high-signal source ranges needed to verify graph evidence.
-9. Report call-flow evidence, model hints, auth/signature signals, evidence locations and confidence.
+6. For important first-party endpoints, trace their declaring functions and incoming/outgoing references.
+7. Inspect CFG/native code only where branch behavior or framework-specific AOT logic is relevant.
+8. Read only high-signal source/binary evidence needed to verify graph evidence.
+9. Report call-flow evidence, model hints, auth/signature signals, evidence locations and confidence state.
 10. Do not describe XREF adjacency as proven data-flow.
 ```
 
@@ -341,9 +371,11 @@ android-reverse-engineering-mcp/
 
 ## Roadmap
 
-The next high-value capabilities are semantic code-intelligence primitives rather than simply more reverse-engineering CLIs:
+The next high-value capabilities are framework-aware and semantic code-intelligence primitives rather than simply more reverse-engineering CLIs:
 
 ```text
+Framework Router
+Flutter Dart AOT analysis
 trace_value
 find_auth_flow
 find_signing_logic
@@ -351,7 +383,7 @@ Android lifecycle/component graph
 feature/module summaries
 JNI cross-language mapping
 native evidence graph
-framework-specific analyzers
+Hermes / IL2CPP / managed-runtime analyzers
 static ↔ dynamic evidence correlation
 ```
 
