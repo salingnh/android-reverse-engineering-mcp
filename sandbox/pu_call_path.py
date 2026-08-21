@@ -13,6 +13,8 @@ MAX_PATHS = 50
 MAX_VISITED_NODES = 200_000
 MAX_SCANNED_EDGES = 500_000
 MAX_CANDIDATES = 200
+MAX_BROAD_QUERY_CHARS = 512
+MAX_EXACT_QUERY_CHARS = 8192
 MAX_RESPONSE_CHARS = 150_000
 SQL_BATCH = 400
 
@@ -33,8 +35,10 @@ def _chunks(values: list[str], size: int = SQL_BATCH) -> Iterable[list[str]]:
 
 def _query(value: Any, label: str) -> str:
     text = str(value or "").strip()
-    if not text or len(text) > 512:
-        raise ValueError(f"{label} must be 1..512 characters")
+    if not text or len(text) > MAX_EXACT_QUERY_CHARS:
+        raise ValueError(
+            f"{label} must be 1..{MAX_EXACT_QUERY_CHARS} characters"
+        )
     return text
 
 
@@ -54,6 +58,13 @@ def _candidate_rows(conn, query: str) -> tuple[list[Any], bool]:
     ).fetchall()
     if edge_exact:
         return edge_exact, False
+
+    # Long values are accepted only when they are exact symbol IDs. Broad
+    # substring localization stays intentionally small and bounded.
+    if len(query) > MAX_BROAD_QUERY_CHARS:
+        raise ValueError(
+            f"non-exact symbol query must be <= {MAX_BROAD_QUERY_CHARS} characters"
+        )
 
     rows = conn.execute(
         "SELECT id FROM methods "
