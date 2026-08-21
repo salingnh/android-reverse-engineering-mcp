@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+set -euo pipefail
+umask 077
+
+fail() { printf 'safe-android-reverser-flutter: %s\n' "$*" >&2; exit 1; }
+
+PLUGIN_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+VERSION_FILE="$PLUGIN_ROOT/VERSION"
+[[ -r "$VERSION_FILE" ]] || fail "missing plugin VERSION file: $VERSION_FILE"
+VERSION="$(tr -d '[:space:]' < "$VERSION_FILE")"
+[[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail "invalid plugin version: $VERSION"
+
+command -v python3 >/dev/null 2>&1 || fail "python3 is required for the host Flutter MCP controller"
+
+RUNTIME="${SAFE_REVERSER_RUNTIME:-auto}"
+PROJECT_DIR="${SAFE_REVERSER_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}"
+DATA_DIR="${SAFE_REVERSER_DATA_DIR:-${CLAUDE_PLUGIN_DATA:-$HOME/.local/share/safe-android-reverser}}"
+FLUTTER_REPOSITORY="${SAFE_REVERSER_FLUTTER_REPOSITORY:-ghcr.io/salingnh/safe-android-reverser-flutter}"
+FLUTTER_IMAGE="${SAFE_REVERSER_FLUTTER_IMAGE:-$FLUTTER_REPOSITORY:$VERSION}"
+
+choose_runtime() {
+  if [[ "$RUNTIME" != "auto" ]]; then
+    command -v "$RUNTIME" >/dev/null 2>&1 || fail "configured runtime '$RUNTIME' not found"
+    [[ "$RUNTIME" == "podman" || "$RUNTIME" == "docker" ]] || fail "runtime must be podman, docker, or auto"
+    printf '%s' "$RUNTIME"
+    return
+  fi
+  if command -v podman >/dev/null 2>&1; then
+    printf 'podman'
+  elif command -v docker >/dev/null 2>&1; then
+    printf 'docker'
+  else
+    fail "Podman or Docker is required. Rootless Podman is recommended."
+  fi
+}
+
+RUNTIME="$(choose_runtime)"
+[[ -d "$PROJECT_DIR" ]] || fail "project directory not found: $PROJECT_DIR"
+mkdir -p "$DATA_DIR" || fail "cannot create data directory: $DATA_DIR"
+PROJECT_DIR="$(cd "$PROJECT_DIR" && pwd -P)"
+DATA_DIR="$(cd "$DATA_DIR" && pwd -P)"
+[[ -w "$DATA_DIR" ]] || fail "data directory is not writable: $DATA_DIR"
+mkdir -p "$DATA_DIR/flutter/jobs" || fail "cannot create Flutter jobs directory"
+[[ -w "$DATA_DIR/flutter/jobs" ]] || fail "Flutter jobs directory is not writable"
+
+export SAFE_REVERSER_PLUGIN_VERSION="$VERSION"
+export SAFE_REVERSER_RUNTIME="$RUNTIME"
+export SAFE_REVERSER_PROJECT_DIR="$PROJECT_DIR"
+export SAFE_REVERSER_DATA_DIR="$DATA_DIR"
+export SAFE_REVERSER_HOST_UID="$(id -u)"
+export SAFE_REVERSER_HOST_GID="$(id -g)"
+export SAFE_REVERSER_FLUTTER_REPOSITORY="$FLUTTER_REPOSITORY"
+export SAFE_REVERSER_FLUTTER_IMAGE="$FLUTTER_IMAGE"
+
+exec python3 "$PLUGIN_ROOT/bin/flutter-mcp-host.py"
