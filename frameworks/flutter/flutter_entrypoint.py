@@ -10,6 +10,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+import flutter_artifact as artifact
+import flutter_export as exporter
 import flutter_network as network
 import flutter_semantic as semantic
 import safe_blutter_adapter as adapter
@@ -254,8 +256,6 @@ def _analyze_command(args: argparse.Namespace) -> dict:
             },
         }
 
-    # adapter.analyze creates the output directory. Re-resolve it after execution,
-    # while the no-symlink/fresh-output policy was already enforced before execution.
     output = _output_dir(args.output)
     manifest = _write_manifest(output, libdir, runtime)
     try:
@@ -275,6 +275,19 @@ def _analyze_command(args: argparse.Namespace) -> dict:
         "analysis_id": manifest["analysis_id"],
         "artifact_sha256": manifest["artifact_sha256"],
         "semantic_index": index_result,
+    }
+
+
+def _analyze_export_command(args: argparse.Namespace) -> dict:
+    payload = _analyze_command(args)
+    if payload.get("status") not in {"ok", "partial"}:
+        return payload
+    source = _output_dir(args.output)
+    export_result = exporter.export_analysis(source, args.output)
+    return {
+        **payload,
+        "exported_output": args.output,
+        "export": export_result,
     }
 
 
@@ -346,6 +359,13 @@ def _parse_analyze_args() -> argparse.Namespace:
     return parser.parse_args(sys.argv[2:])
 
 
+def _parse_prepare_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Prepare Flutter AOT libraries from an Android artifact")
+    parser.add_argument("artifact")
+    parser.add_argument("output")
+    return parser.parse_args(sys.argv[2:])
+
+
 def main() -> int:
     command = sys.argv[1] if len(sys.argv) > 1 else ""
     try:
@@ -361,10 +381,28 @@ def main() -> int:
                 "max_scan_bytes": semantic.MAX_SCAN_BYTES,
                 "network_model_max_items": network.MAX_MODEL_ITEMS,
             }
+            payload["orchestration"] = {
+                "prepare_artifact": True,
+                "analyze_export": True,
+                "supported_abi": artifact.SUPPORTED_ABI,
+                "persistent_export_max_bytes": exporter.MAX_EXPORT_BYTES,
+                "persistent_export_max_files": exporter.MAX_EXPORT_FILES,
+                "runtime_download_inside_sandbox": False,
+                "runtime_build_inside_sandbox": False,
+            }
             adapter._emit(payload)
             return 0
+        if command == "prepare_artifact":
+            args = _parse_prepare_args()
+            payload = artifact.prepare_artifact(args.artifact, args.output)
+            adapter._emit(payload)
+            return 0 if payload.get("status") != "error" else 2
         if command == "analyze":
             payload = _analyze_command(_parse_analyze_args())
+            adapter._emit(payload)
+            return 0 if payload.get("status") not in {"failed", "timeout", "error"} else 2
+        if command == "analyze_export":
+            payload = _analyze_export_command(_parse_analyze_args())
             adapter._emit(payload)
             return 0 if payload.get("status") not in {"failed", "timeout", "error"} else 2
         if command in SEMANTIC_COMMANDS:
