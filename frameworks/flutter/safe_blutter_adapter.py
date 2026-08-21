@@ -13,6 +13,10 @@ BLUTTER_ROOT = Path(os.environ.get("SAFE_BLUTTER_ROOT", "/opt/blutter")).resolve
 INPUT_ROOT = Path(os.environ.get("SAFE_FLUTTER_INPUT", "/input")).resolve()
 OUTPUT_ROOT = Path(os.environ.get("SAFE_FLUTTER_OUTPUT", "/output")).resolve()
 BLUTTER_COMMIT = os.environ.get("SAFE_BLUTTER_COMMIT", "unknown")
+IMAGE_REPOSITORY = os.environ.get(
+    "SAFE_FLUTTER_IMAGE_REPOSITORY",
+    "ghcr.io/salingnh/safe-android-reverser-flutter",
+).strip()
 MAX_PROCESS_OUTPUT = 120_000
 
 
@@ -56,6 +60,17 @@ def _import_runtime_helpers():
     return BlutterInput, DartLibInfo, extract_snapshot_hash_flags, extract_libflutter_info
 
 
+def _runtime_cache_tag(
+    dart_version: str, arch: str, snapshot_hash: str, compressed_pointers: bool
+) -> str:
+    safe_version = "".join(
+        ch.lower() if ch.isalnum() or ch in ".-_" else "-" for ch in dart_version
+    )[:64]
+    safe_arch = "".join(ch.lower() if ch.isalnum() else "-" for ch in arch)[:32]
+    mode = "cp" if compressed_pointers else "ncp"
+    return f"dart-{safe_version}-{safe_arch}-{mode}-{snapshot_hash.lower()[:12]}"
+
+
 def _runtime_info(libdir: Path) -> dict[str, Any]:
     """Identify only locally observable runtime data.
 
@@ -77,15 +92,19 @@ def _runtime_info(libdir: Path) -> dict[str, Any]:
     except Exception as exc:
         raise AdapterError(f"Blutter runtime identification failed: {type(exc).__name__}: {exc}") from exc
 
+    compressed = "compressed-pointers" in flags
+    snapshot_hash = str(snapshot_hash)
     base = {
         "dart_version": dart_version,
         "os": str(os_name),
         "arch": str(arch),
-        "snapshot_hash": str(snapshot_hash),
+        "snapshot_hash": snapshot_hash,
         "engine_ids": [str(item) for item in engine_ids],
         "flags": [str(item) for item in flags[:200]],
-        "compressed_pointers": "compressed-pointers" in flags,
+        "compressed_pointers": compressed,
         "runtime_key": None,
+        "cache_tag": None,
+        "recommended_image": None,
         "expected_binary": None,
         "binary_cached": False,
         "identity_status": "identified" if dart_version else "runtime_identity_incomplete",
@@ -94,19 +113,18 @@ def _runtime_info(libdir: Path) -> dict[str, Any]:
         return base
 
     info = DartLibInfo(
-        str(dart_version),
-        str(os_name),
-        str(arch),
-        "compressed-pointers" in flags,
-        str(snapshot_hash),
+        str(dart_version), str(os_name), str(arch), compressed, snapshot_hash
     )
     probe = BlutterInput(str(libapp), info, "/output/probe", False, False, False)
     binary = Path(probe.blutter_file).resolve()
     if binary != BLUTTER_ROOT and BLUTTER_ROOT not in binary.parents:
         raise AdapterError("derived Blutter binary path escapes pinned analyzer root")
+    cache_tag = _runtime_cache_tag(str(dart_version), str(arch), snapshot_hash, compressed)
     base.update(
         {
             "runtime_key": str(info.lib_name),
+            "cache_tag": cache_tag,
+            "recommended_image": f"{IMAGE_REPOSITORY}:{cache_tag}",
             "expected_binary": str(binary.relative_to(BLUTTER_ROOT)),
             "binary_cached": binary.is_file(),
         }
@@ -129,6 +147,7 @@ def health() -> dict[str, Any]:
         "adapter": "safe-blutter-adapter",
         "blutter_commit": BLUTTER_COMMIT,
         "blutter_root": str(BLUTTER_ROOT),
+        "image_repository": IMAGE_REPOSITORY,
         "network_required_at_runtime": False,
         "network_capable_upstream_path_used": False,
         "build_on_demand_allowed": False,
@@ -144,13 +163,13 @@ def inspect(libdir_value: str) -> dict[str, Any]:
     runtime = _runtime_info(libdir)
     if runtime["identity_status"] != "identified":
         status = "runtime_identity_incomplete"
-        next_action = "publish a cache entry from a controlled builder after resolving the engine/Dart version outside the analysis runtime"
+        next_action = "resolve the engine/Dart version in a controlled builder; network lookup stays disabled during analysis"
     elif runtime["binary_cached"]:
         status = "ready"
         next_action = "run_analyze"
     else:
         status = "runtime_cache_miss"
-        next_action = "publish a framework-flutter image containing the exact prebuilt runtime analyzer"
+        next_action = f"publish or pull exact cache image {runtime['recommended_image']}"
     return {
         "status": status,
         "profile": "framework-flutter",
@@ -188,6 +207,7 @@ def analyze(libdir_value: str, output_value: str, timeout: int) -> dict[str, Any
             "runtime": runtime,
             "executed": False,
             "reason": "Blutter build-on-demand is disabled in the analysis runtime",
+            "recommended_image": runtime["recommended_image"],
         }
 
     timeout = max(1, min(int(timeout), 3600))
