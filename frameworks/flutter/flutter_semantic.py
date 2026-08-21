@@ -11,12 +11,14 @@ from typing import Any, Iterable
 
 INDEX_SCHEMA_VERSION = 1
 MAX_ASM_FILES = 10_000
+MAX_LIBRARIES = 10_000
+MAX_CLASSES = 250_000
+MAX_FUNCTIONS = 250_000
+MAX_XREFS = 1_000_000
+MAX_STRINGS = 300_000
 MAX_SCAN_BYTES = 512 * 1024 * 1024
 MAX_FILE_BYTES = 64 * 1024 * 1024
 MAX_LINE_BYTES = 32 * 1024
-MAX_FUNCTIONS = 250_000
-MAX_CALL_EDGES = 1_000_000
-MAX_STRINGS = 300_000
 MAX_STRING_LENGTH = 4096
 MAX_QUERY_LIMIT = 200
 MAX_QUERY_TEXT = 512
@@ -27,7 +29,7 @@ CLASS_RE = re.compile(r"^(?:(?:abstract\s+)?class|enum|maybe_class)\s+([^\s{;]+)
 FUNCTION_ADDR_RE = re.compile(
     r"^\s*// \*\* addr:\s*(0x[0-9a-fA-F]+),\s*size:\s*(0x[0-9a-fA-F]+)\s*$"
 )
-CALL_TARGET_RE = re.compile(
+XREF_TARGET_RE = re.compile(
     r"\[(?P<library>[^\]\r\n]{1,1024})\]\s+"
     r"(?P<class>[^:\r\n]{0,256})::"
     r"(?P<name>[^\r\n;]{1,512}?)(?=(?:\s+->|\s*$))"
@@ -39,7 +41,7 @@ class FlutterIndexError(Exception):
     pass
 
 
-def _safe_json(value: Any) -> str:
+def _json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
@@ -55,20 +57,15 @@ def _bounded_text(value: Any, limit: int, field: str) -> str:
     return text
 
 
+def _query_text(value: str, field: str = "query") -> str:
+    text = _bounded_text(value, MAX_QUERY_TEXT if field == "query" else 1024, field)
+    if not text:
+        raise FlutterIndexError(f"{field} must not be empty")
+    return text
+
+
 def _query_limit(value: int) -> int:
     return max(1, min(int(value), MAX_QUERY_LIMIT))
-
-
-def _query_text(value: str) -> str:
-    value = _bounded_text(value, MAX_QUERY_TEXT, "query")
-    if not value:
-        raise FlutterIndexError("query must not be empty")
-    return value
-
-
-def _like(value: str) -> str:
-    value = value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-    return f"%{value}%"
 
 
 def _relative(root: Path, path: Path) -> str:
@@ -79,7 +76,7 @@ def _relative(root: Path, path: Path) -> str:
     return path.relative_to(root).as_posix()
 
 
-def _iter_bounded_lines(path: Path) -> Iterable[tuple[int, str]]:
+def _iter_lines(path: Path) -> Iterable[tuple[int, str]]:
     with path.open("rb") as handle:
         line_no = 0
         while True:
@@ -94,16 +91,18 @@ def _iter_bounded_lines(path: Path) -> Iterable[tuple[int, str]]:
             yield line_no, raw.decode("utf-8", "replace").rstrip("\r\n")
 
 
-def _discover_source_files(source: Path) -> tuple[list[Path], list[Path], int]:
+def _discover_files(source: Path) -> tuple[list[Path], list[Path], int]:
     source = source.resolve()
-    asm = (source / "asm").resolve()
+    asm = source / "asm"
+    if asm.is_symlink():
+        raise FlutterIndexError("asm directory must not be a symlink")
+    asm = asm.resolve()
     if not asm.is_dir() or source not in asm.parents:
         raise FlutterIndexError("Blutter output is missing a valid asm/ directory")
 
     asm_files: list[Path] = []
-    scan_files: list[Path] = []
+    extra_files: list[Path] = []
     total_bytes = 0
-
     for dirpath, dirnames, filenames in os.walk(asm, followlinks=False):
         base = Path(dirpath)
         dirnames[:] = [name for name in dirnames if not (base / name).is_symlink()]
@@ -120,15 +119,12 @@ def _discover_source_files(source: Path) -> tuple[list[Path], list[Path], int]:
                 )
             total_bytes += size
             if total_bytes > MAX_SCAN_BYTES:
-                raise FlutterIndexError(
-                    f"semantic scan exceeds {MAX_SCAN_BYTES} bytes"
-                )
+                raise FlutterIndexError(f"semantic scan exceeds {MAX_SCAN_BYTES} bytes")
             asm_files.append(path)
-            scan_files.append(path)
 
     for name in ("pp.txt", "objs.txt"):
         path = source / name
-        if not path.is_file() or path.is_symlink():
+        if path.is_symlink() or not path.is_file():
             continue
         size = path.stat().st_size
         if size > MAX_FILE_BYTES:
@@ -136,11 +132,11 @@ def _discover_source_files(source: Path) -> tuple[list[Path], list[Path], int]:
         total_bytes += size
         if total_bytes > MAX_SCAN_BYTES:
             raise FlutterIndexError(f"semantic scan exceeds {MAX_SCAN_BYTES} bytes")
-        scan_files.append(path)
+        extra_files.append(path)
 
     if not asm_files:
         raise FlutterIndexError("Blutter output contains no asm/*.dart files")
-    return sorted(asm_files), scan_files, total_bytes
+    return sorted(asm_files), extra_files, total_bytes
 
 
 def _function_name(signature: str) -> str:
@@ -160,10 +156,18 @@ def _function_name(signature: str) -> str:
     return token[:512] or "<unknown>"
 
 
-def _open_db(index_path: Path) -> sqlite3.Connection:
-    conn = sqlite3.connect(index_path)
+def _open_db(index_path: Path, *, writable: bool = False) -> sqlite3.Connection:
+    index_path = index_path.resolve()
+    if writable:
+        conn = sqlite3.connect(str(index_path))
+    else:
+        if not index_path.is_file():
+            raise FlutterIndexError("Flutter semantic index does not exist")
+        conn = sqlite3.connect(index_path.as_uri() + "?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys=ON")
+    if not writable:
+        conn.execute("PRAGMA query_only=ON")
     return conn
 
 
@@ -206,7 +210,7 @@ def _init_db(conn: sqlite3.Connection) -> None:
             FOREIGN KEY(library_id) REFERENCES libraries(id),
             FOREIGN KEY(class_id_ref) REFERENCES classes(id)
         );
-        CREATE TABLE calls(
+        CREATE TABLE xrefs(
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             caller_id TEXT NOT NULL,
             target_library_url TEXT NOT NULL,
@@ -228,11 +232,42 @@ def _init_db(conn: sqlite3.Connection) -> None:
         CREATE INDEX idx_functions_name ON functions(name);
         CREATE INDEX idx_functions_library ON functions(library_url);
         CREATE INDEX idx_functions_offset ON functions(native_offset);
-        CREATE INDEX idx_calls_caller ON calls(caller_id);
-        CREATE INDEX idx_calls_target ON calls(target_id);
+        CREATE INDEX idx_functions_fullname
+            ON functions(library_url,class_name,name);
+        CREATE INDEX idx_xrefs_caller ON xrefs(caller_id);
+        CREATE INDEX idx_xrefs_target ON xrefs(target_id);
         CREATE INDEX idx_strings_value ON strings(value);
         """
     )
+
+
+def _insert_string(
+    conn: sqlite3.Connection,
+    *,
+    value: str,
+    source_kind: str,
+    source_file: str,
+    line: int,
+    function_id: str | None,
+    count: int,
+) -> int:
+    if count >= MAX_STRINGS or not value or len(value) > MAX_STRING_LENGTH:
+        return count
+    sid = _stable_id(
+        "str",
+        value,
+        source_kind,
+        source_file,
+        str(line),
+        function_id or "",
+    )
+    conn.execute(
+        """INSERT OR IGNORE INTO strings
+           (id,value,source_kind,source_file,line,function_id)
+           VALUES (?,?,?,?,?,?)""",
+        (sid, value, source_kind, source_file, line, function_id),
+    )
+    return count + int(conn.execute("SELECT changes()").fetchone()[0] > 0)
 
 
 def build_flutter_index(
@@ -252,7 +287,7 @@ def build_flutter_index(
         )
     if index_path.exists():
         raise FlutterIndexError(
-            "index already exists; use a new output or remove the stale index"
+            "index already exists; use a fresh analysis output or remove the stale index"
         )
     index_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -266,42 +301,42 @@ def build_flutter_index(
     if not re.fullmatch(r"[0-9a-f]{40}", blutter_commit):
         raise FlutterIndexError("blutter_commit must be a full 40-character Git SHA")
 
-    asm_files, scan_files, scan_bytes = _discover_source_files(source)
+    asm_files, extra_files, scan_bytes = _discover_files(source)
     counts = {
         "libraries": 0,
         "classes": 0,
         "functions": 0,
-        "calls": 0,
+        "xrefs": 0,
         "strings": 0,
     }
-    conn = _open_db(index_path)
+    conn = _open_db(index_path, writable=True)
     try:
         _init_db(conn)
         metadata = {
             "schema_version": INDEX_SCHEMA_VERSION,
             "analysis_id": analysis_id,
             "artifact_sha256": artifact_sha256,
+            "artifact_kind": "libapp.so",
             "analyzer": "blutter-semantic-index",
             "blutter_commit": blutter_commit,
             "runtime": runtime or {},
-            "source_dir": ".",
             "scan_bytes": scan_bytes,
             "limits": {
                 "max_asm_files": MAX_ASM_FILES,
+                "max_libraries": MAX_LIBRARIES,
+                "max_classes": MAX_CLASSES,
+                "max_functions": MAX_FUNCTIONS,
+                "max_xrefs": MAX_XREFS,
+                "max_strings": MAX_STRINGS,
                 "max_scan_bytes": MAX_SCAN_BYTES,
                 "max_line_bytes": MAX_LINE_BYTES,
-                "max_functions": MAX_FUNCTIONS,
-                "max_call_edges": MAX_CALL_EDGES,
-                "max_strings": MAX_STRINGS,
             },
         }
         for key, value in metadata.items():
             conn.execute(
                 "INSERT INTO metadata(key,value) VALUES (?,?)",
-                (key, _safe_json(value) if not isinstance(value, str) else value),
+                (key, _json(value) if not isinstance(value, str) else value),
             )
-
-        seen_strings: set[str] = set()
 
         for path in asm_files:
             rel = _relative(source, path)
@@ -313,16 +348,27 @@ def build_flutter_index(
             pending_signature: tuple[int, str] | None = None
             current_function_id: str | None = None
 
-            for line_no, line in _iter_bounded_lines(path):
+            for line_no, line in _iter_lines(path):
                 lib_match = LIB_RE.match(line)
                 if lib_match:
-                    lib_name = lib_match.group(1)[:1024]
                     library_url = lib_match.group(2)[:2048]
                     library_id = _stable_id("dartlib", library_url)
                     conn.execute(
                         "INSERT OR IGNORE INTO libraries(id,name,url,source_file,line) VALUES (?,?,?,?,?)",
-                        (library_id, lib_name, library_url, rel, line_no),
+                        (
+                            library_id,
+                            lib_match.group(1)[:1024],
+                            library_url,
+                            rel,
+                            line_no,
+                        ),
                     )
+                    if conn.execute("SELECT changes()").fetchone()[0]:
+                        counts["libraries"] += 1
+                        if counts["libraries"] > MAX_LIBRARIES:
+                            raise FlutterIndexError(
+                                f"library count exceeds {MAX_LIBRARIES}"
+                            )
                     continue
 
                 meta_match = CLASS_META_RE.match(line)
@@ -360,6 +406,12 @@ def build_flutter_index(
                             line_no,
                         ),
                     )
+                    if conn.execute("SELECT changes()").fetchone()[0]:
+                        counts["classes"] += 1
+                        if counts["classes"] > MAX_CLASSES:
+                            raise FlutterIndexError(
+                                f"class count exceeds {MAX_CLASSES}"
+                            )
                     pending_class_meta = None
                     pending_signature = None
                     current_function_id = None
@@ -388,7 +440,7 @@ def build_flutter_index(
                         "dartfn", library_url, class_name, name, f"{address:x}"
                     )
                     conn.execute(
-                        """INSERT OR REPLACE INTO functions
+                        """INSERT OR IGNORE INTO functions
                            (id,library_id,class_id_ref,library_url,class_name,name,
                             signature,native_offset,size,source_file,line)
                            VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
@@ -406,18 +458,19 @@ def build_flutter_index(
                             sig_line,
                         ),
                     )
-                    counts["functions"] += 1
+                    if conn.execute("SELECT changes()").fetchone()[0]:
+                        counts["functions"] += 1
                     pending_signature = None
                     continue
 
                 if current_function_id:
-                    for match in CALL_TARGET_RE.finditer(line):
-                        if counts["calls"] >= MAX_CALL_EDGES:
+                    for match in XREF_TARGET_RE.finditer(line):
+                        if counts["xrefs"] >= MAX_XREFS:
                             raise FlutterIndexError(
-                                f"call edge count exceeds {MAX_CALL_EDGES}"
+                                f"XREF count exceeds {MAX_XREFS}"
                             )
                         conn.execute(
-                            """INSERT INTO calls
+                            """INSERT INTO xrefs
                                (caller_id,target_library_url,target_class_name,target_name,
                                 target_id,source_file,line)
                                VALUES (?,?,?,?,NULL,?,?)""",
@@ -430,84 +483,57 @@ def build_flutter_index(
                                 line_no,
                             ),
                         )
-                        counts["calls"] += 1
+                        counts["xrefs"] += 1
+
+                for match in QUOTED_RE.finditer(line):
+                    counts["strings"] = _insert_string(
+                        conn,
+                        value=match.group("value"),
+                        source_kind="asm",
+                        source_file=rel,
+                        line=line_no,
+                        function_id=current_function_id,
+                        count=counts["strings"],
+                    )
+                    if counts["strings"] >= MAX_STRINGS:
+                        break
 
                 if stripped == "  }":
                     current_function_id = None
 
-                if counts["strings"] < MAX_STRINGS:
-                    for match in QUOTED_RE.finditer(line):
-                        value = match.group("value")
-                        if not value or len(value) > MAX_STRING_LENGTH:
-                            continue
-                        key = hashlib.sha256(
-                            value.encode("utf-8", "replace")
-                        ).hexdigest()
-                        if key in seen_strings:
-                            continue
-                        seen_strings.add(key)
-                        conn.execute(
-                            """INSERT OR IGNORE INTO strings
-                               (id,value,source_kind,source_file,line,function_id)
-                               VALUES (?,?,?,?,?,?)""",
-                            (
-                                f"str:{key}",
-                                value,
-                                "asm",
-                                rel,
-                                line_no,
-                                current_function_id,
-                            ),
-                        )
-                        counts["strings"] += 1
-
-        counts["libraries"] = conn.execute(
-            "SELECT COUNT(*) FROM libraries"
-        ).fetchone()[0]
-        counts["classes"] = conn.execute("SELECT COUNT(*) FROM classes").fetchone()[0]
-
-        for path in scan_files:
-            if path.suffix == ".dart":
-                continue
+        for path in extra_files:
             rel = _relative(source, path)
-            for line_no, line in _iter_bounded_lines(path):
+            source_kind = "object-pool" if path.name == "pp.txt" else "objects"
+            for line_no, line in _iter_lines(path):
                 for match in QUOTED_RE.finditer(line):
+                    counts["strings"] = _insert_string(
+                        conn,
+                        value=match.group("value"),
+                        source_kind=source_kind,
+                        source_file=rel,
+                        line=line_no,
+                        function_id=None,
+                        count=counts["strings"],
+                    )
                     if counts["strings"] >= MAX_STRINGS:
                         break
-                    value = match.group("value")
-                    if not value or len(value) > MAX_STRING_LENGTH:
-                        continue
-                    key = hashlib.sha256(value.encode("utf-8", "replace")).hexdigest()
-                    if key in seen_strings:
-                        continue
-                    seen_strings.add(key)
-                    conn.execute(
-                        """INSERT OR IGNORE INTO strings
-                           (id,value,source_kind,source_file,line,function_id)
-                           VALUES (?,?,?,?,?,NULL)""",
-                        (
-                            f"str:{key}",
-                            value,
-                            "object-pool" if path.name == "pp.txt" else "objects",
-                            rel,
-                            line_no,
-                        ),
-                    )
-                    counts["strings"] += 1
 
+        # Blutter's annotation contains library/class/function names but not a
+        # complete Dart signature. Resolve a target only when that identity is
+        # unique. Overloaded/ambiguous names intentionally remain unresolved.
         conn.execute(
-            """UPDATE calls
+            """UPDATE xrefs
                SET target_id = (
-                 SELECT f.id FROM functions f
-                 WHERE f.library_url=calls.target_library_url
-                   AND f.class_name=calls.target_class_name
-                   AND f.name=calls.target_name
-                 ORDER BY f.native_offset LIMIT 1
+                 SELECT CASE WHEN COUNT(*)=1 THEN MIN(f.id) ELSE NULL END
+                 FROM functions f
+                 WHERE f.library_url=xrefs.target_library_url
+                   AND f.class_name=xrefs.target_class_name
+                   AND f.name=xrefs.target_name
                )"""
         )
         conn.execute(
             "INSERT OR REPLACE INTO metadata(key,value) VALUES ('counts',?)",
-            (_safe_json(counts),),
+            (_json(counts),),
         )
         conn.commit()
     except Exception:
@@ -533,8 +559,12 @@ def build_flutter_index(
 
 
 def _metadata(conn: sqlite3.Connection) -> dict[str, Any]:
+    try:
+        rows = conn.execute("SELECT key,value FROM metadata").fetchall()
+    except sqlite3.DatabaseError as exc:
+        raise FlutterIndexError("invalid Flutter semantic index") from exc
     result: dict[str, Any] = {}
-    for row in conn.execute("SELECT key,value FROM metadata"):
+    for row in rows:
         value: Any = row["value"]
         if row["key"] in {
             "schema_version",
@@ -557,12 +587,18 @@ def _provenance(meta: dict[str, Any]) -> dict[str, Any]:
     return {
         "analysis_id": meta.get("analysis_id"),
         "artifact_sha256": meta.get("artifact_sha256"),
+        "artifact_kind": meta.get("artifact_kind"),
         "analyzer": meta.get("analyzer"),
         "blutter_commit": meta.get("blutter_commit"),
         "runtime": meta.get("runtime"),
         "index_schema_version": INDEX_SCHEMA_VERSION,
         "evidence_state": "derived",
     }
+
+
+def _rows_with_truncation(rows: list[sqlite3.Row], limit: int) -> tuple[list[dict], bool]:
+    truncated = len(rows) > limit
+    return [dict(row) for row in rows[:limit]], truncated
 
 
 def find_dart_symbols(
@@ -573,28 +609,28 @@ def find_dart_symbols(
     conn = _open_db(index_path)
     try:
         meta = _metadata(conn)
-        pattern = _like(query)
         rows = conn.execute(
             """SELECT id,library_url,class_name,name,signature,native_offset,size,
                       source_file,line
                FROM functions
-               WHERE name LIKE ? ESCAPE '\\'
-                  OR class_name LIKE ? ESCAPE '\\'
-                  OR library_url LIKE ? ESCAPE '\\'
-                  OR signature LIKE ? ESCAPE '\\'
+               WHERE instr(name,?)>0
+                  OR instr(class_name,?)>0
+                  OR instr(library_url,?)>0
+                  OR instr(signature,?)>0
                ORDER BY CASE
                  WHEN name=? THEN 0
-                 WHEN name LIKE ? ESCAPE '\\' THEN 1
+                 WHEN substr(name,1,length(?))=? THEN 1
                  ELSE 2 END,
                  native_offset
                LIMIT ?""",
-            (pattern, pattern, pattern, pattern, query, _like(query)[:-1], limit),
+            (query, query, query, query, query, query, query, limit + 1),
         ).fetchall()
+        results, truncated = _rows_with_truncation(rows, limit)
         return {
             "status": "ok",
             "provenance": _provenance(meta),
-            "results": [dict(row) for row in rows],
-            "truncated": len(rows) >= limit,
+            "results": results,
+            "truncated": truncated,
             "limit": limit,
         }
     finally:
@@ -612,15 +648,16 @@ def find_dart_strings(
         rows = conn.execute(
             """SELECT id,value,source_kind,source_file,line,function_id
                FROM strings
-               WHERE value LIKE ? ESCAPE '\\'
+               WHERE instr(value,?)>0
                ORDER BY length(value),source_file,line LIMIT ?""",
-            (_like(query), limit),
+            (query, limit + 1),
         ).fetchall()
+        results, truncated = _rows_with_truncation(rows, limit)
         return {
             "status": "ok",
             "provenance": _provenance(meta),
-            "results": [dict(row) for row in rows],
-            "truncated": len(rows) >= limit,
+            "results": results,
+            "truncated": truncated,
             "limit": limit,
         }
     finally:
@@ -628,9 +665,7 @@ def find_dart_strings(
 
 
 def _resolve_function(conn: sqlite3.Connection, symbol: str) -> sqlite3.Row:
-    symbol = _bounded_text(symbol, 1024, "symbol")
-    if not symbol:
-        raise FlutterIndexError("symbol must not be empty")
+    symbol = _query_text(symbol, "symbol")
     if symbol.startswith("dartfn:"):
         row = conn.execute("SELECT * FROM functions WHERE id=?", (symbol,)).fetchone()
         if not row:
@@ -638,10 +673,11 @@ def _resolve_function(conn: sqlite3.Connection, symbol: str) -> sqlite3.Row:
         return row
     rows = conn.execute(
         """SELECT * FROM functions
-           WHERE name=? OR signature LIKE ? ESCAPE '\\'
+           WHERE name=?
+              OR instr(signature,?)>0
               OR (library_url || ' ' || class_name || '::' || name)=?
            ORDER BY native_offset LIMIT 2""",
-        (symbol, _like(symbol), symbol),
+        (symbol, symbol, symbol),
     ).fetchall()
     if not rows:
         raise FlutterIndexError("Dart symbol not found")
@@ -669,33 +705,36 @@ def find_dart_xrefs(
             "symbol": dict(fn),
             "direction": direction,
             "limitations": [
-                "Blutter call annotations are call/XREF evidence, not proof of value flow"
+                "Blutter annotations are XREF/call-adjacency evidence, not proof of value flow",
+                "overloaded targets remain unresolved unless the annotation identifies a unique function",
             ],
         }
         if direction in {"outgoing", "both"}:
             rows = conn.execute(
-                """SELECT c.target_id,c.target_library_url,c.target_class_name,
-                          c.target_name,c.source_file,c.line,
+                """SELECT x.target_id,x.target_library_url,x.target_class_name,
+                          x.target_name,x.source_file,x.line,
                           f.native_offset AS target_native_offset
-                   FROM calls c LEFT JOIN functions f ON f.id=c.target_id
-                   WHERE c.caller_id=? ORDER BY c.line LIMIT ?""",
-                (fn["id"], limit),
+                   FROM xrefs x LEFT JOIN functions f ON f.id=x.target_id
+                   WHERE x.caller_id=? ORDER BY x.line LIMIT ?""",
+                (fn["id"], limit + 1),
             ).fetchall()
-            result["outgoing"] = [dict(row) for row in rows]
-            result["outgoing_truncated"] = len(rows) >= limit
+            result["outgoing"], result["outgoing_truncated"] = _rows_with_truncation(
+                rows, limit
+            )
         if direction in {"incoming", "both"}:
             rows = conn.execute(
-                """SELECT c.caller_id,c.source_file,c.line,
+                """SELECT x.caller_id,x.source_file,x.line,
                           f.library_url AS caller_library_url,
                           f.class_name AS caller_class_name,
                           f.name AS caller_name,
                           f.native_offset AS caller_native_offset
-                   FROM calls c JOIN functions f ON f.id=c.caller_id
-                   WHERE c.target_id=? ORDER BY c.line LIMIT ?""",
-                (fn["id"], limit),
+                   FROM xrefs x JOIN functions f ON f.id=x.caller_id
+                   WHERE x.target_id=? ORDER BY x.line LIMIT ?""",
+                (fn["id"], limit + 1),
             ).fetchall()
-            result["incoming"] = [dict(row) for row in rows]
-            result["incoming_truncated"] = len(rows) >= limit
+            result["incoming"], result["incoming_truncated"] = _rows_with_truncation(
+                rows, limit
+            )
         return result
     finally:
         conn.close()
