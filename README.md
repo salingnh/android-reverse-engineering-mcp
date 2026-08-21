@@ -8,12 +8,15 @@ Safe Android Reverser is evolving from a safe wrapper around decompilers into an
 
 ## Quick start
 
-Full installation guide: **[`docs/INSTALL_MCP.md`](docs/INSTALL_MCP.md)**  
-Implementation notes: **[`docs/PROGRAM_UNDERSTANDING_PHASE1.md`](docs/PROGRAM_UNDERSTANDING_PHASE1.md)**  
-Roadmap: **[`docs/ROADMAP.md`](docs/ROADMAP.md)**  
-Research: **[`docs/research/AI_AGENT_PROGRAM_UNDERSTANDING.md`](docs/research/AI_AGENT_PROGRAM_UNDERSTANDING.md)**
+Documentation:
 
-Normal installation remains deliberately simple:
+- **[Install / update / troubleshoot](docs/INSTALL_MCP.md)**
+- **[Release procedure](docs/RELEASING.md)**
+- **[Program-understanding implementation](docs/PROGRAM_UNDERSTANDING_PHASE1.md)**
+- **[Roadmap](docs/ROADMAP.md)**
+- **[Research: AI-agent program understanding](docs/research/AI_AGENT_PROGRAM_UNDERSTANDING.md)**
+
+Normal installation is deliberately short:
 
 ```text
 1. Install Podman or Docker
@@ -25,17 +28,29 @@ Normal installation remains deliberately simple:
 7. Analyze an APK/XAPK
 ```
 
-No manual `podman pull`, `podman run`, runtime exports, or separate `claude mcp add` command is required for the default path.
+No manual `podman pull`, `podman run`, runtime exports, repository clone, or separate `claude mcp add` command is required for the normal path.
 
-The wrapper automatically:
+For updates:
 
 ```text
-detects Podman/Docker
-→ creates isolated plugin data
-→ pulls ghcr.io/salingnh/safe-android-reverser:0.2.0 if missing
-→ starts a locked-down ephemeral container
-→ connects MCP over stdio
+/plugin marketplace update salingnh-reverse-tools
+/plugin update safe-android-reverser@salingnh-reverse-tools
+/reload-plugins
 ```
+
+The active plugin wrapper reads its bundled `VERSION`, starts the matching sandbox image, and rejects a default image whose OCI version metadata does not match the plugin release.
+
+```text
+plugin VERSION
+      =
+wrapper default image tag
+      =
+OCI image version
+      =
+MCP server version
+```
+
+Current release: **0.2.1**.
 
 ## Why semantic program understanding
 
@@ -47,7 +62,7 @@ Which HTTP stack is present?
 Which source file contains "Authorization"?
 ```
 
-The 0.2.0 direction adds the foundation for questions closer to how coding agents understand a source repository:
+The semantic layer adds primitives closer to how coding agents understand a source repository:
 
 ```text
 Which method declares this endpoint?
@@ -88,6 +103,24 @@ The design deliberately distinguishes **call/XREF evidence** from future true in
                                       targeted source reads
 ```
 
+Execution is separated from the agent:
+
+```text
+Claude Code
+    │
+    ▼
+plugin-bundled wrapper
+    │
+    ├─ reads VERSION
+    ├─ verifies writable data directory
+    ├─ selects Podman/Docker
+    ├─ validates image version metadata
+    └─ launches isolated stdio MCP container
+             │
+             ▼
+       allow-listed analyzers
+```
+
 The long-term architecture separates execution profiles:
 
 ```text
@@ -102,7 +135,7 @@ Dynamic analysis will not silently gain the privileges of the static profile.
 
 ## Current MCP API
 
-### Existing baseline
+Baseline operations:
 
 ```text
 health
@@ -115,7 +148,7 @@ recover_kotlin_names
 list_jobs
 ```
 
-### Semantic 0.2.0 layer
+Semantic operations:
 
 ```text
 build_program_index
@@ -165,18 +198,19 @@ Example prompt:
 ```text
 Analyze artifacts/app.xapk using only safe-android-reverser MCP.
 
-1. Call health and fingerprint first.
-2. Decompile when the detected framework makes Java/Kotlin analysis appropriate.
-3. Build the program index.
-4. Build the network model.
-5. For important first-party endpoints, trace their declaring methods and incoming/outgoing XREFs.
-6. Inspect CFG only where branch behavior is relevant.
-7. Read only high-signal source ranges needed to verify the graph evidence.
-8. Report call-flow evidence, request/response model hints, auth/signature signals, evidence locations and confidence.
-9. Do not describe XREF adjacency as proven data-flow.
+1. Call health and require release.version_consistent=true.
+2. Fingerprint the artifact.
+3. Decompile when the detected framework makes Java/Kotlin analysis appropriate.
+4. Build the program index.
+5. Build the network model.
+6. For important first-party endpoints, trace their declaring methods and incoming/outgoing XREFs.
+7. Inspect CFG only where branch behavior is relevant.
+8. Read only high-signal source ranges needed to verify graph evidence.
+9. Report call-flow evidence, model hints, auth/signature signals, evidence locations and confidence.
+10. Do not describe XREF adjacency as proven data-flow.
 ```
 
-## Static image 0.2.0
+## Static image 0.2.1
 
 Primary tooling:
 
@@ -190,9 +224,29 @@ binutils: strings / readelf / objdump / nm
 Python MCP implementation
 ```
 
-JADX and the top-level Androguard wheel are version-pinned and digest-verified. Fully locking the transitive Python dependency set is a documented supply-chain hardening item.
+The image embeds:
 
-Large/native/dynamic analyzers are intentionally not all placed in the default image.
+- `org.opencontainers.image.version`;
+- `org.opencontainers.image.revision`;
+- runtime build/version metadata returned by `health`.
+
+The wrapper passes the active plugin version and image identity into the MCP runtime. A normal `health` call reports:
+
+```json
+{
+  "release": {
+    "server_version": "0.2.1",
+    "plugin_version": "0.2.1",
+    "image_version": "0.2.1",
+    "image_ref": "ghcr.io/salingnh/safe-android-reverser:0.2.1",
+    "image_id": "...",
+    "build_commit": "...",
+    "version_consistent": true
+  }
+}
+```
+
+JADX and the top-level Androguard wheel are version-pinned and digest-verified. Fully locking the transitive Python dependency set remains a documented supply-chain hardening item.
 
 ## Security model
 
@@ -208,7 +262,7 @@ analysis output       isolated writable directory
 CPU                   limited
 memory                limited
 PID count             limited
-container user        non-root
+container user        host UID/GID mapped, non-root
 ```
 
 Runtime layout:
@@ -222,6 +276,33 @@ Runtime layout:
 
 The MCP deliberately does **not** expose generic `shell`, `exec`, `bash`, raw analyzer consoles, Docker, or Podman tools. Analyzer backends remain implementation details behind allow-listed semantic operations.
 
+## Release and update model
+
+`plugins/safe-android-reverser/VERSION` is the canonical semver source for the safe plugin release.
+
+CI verifies that the marketplace and plugin manifests match it. Docker builds receive the same version as a required build argument and verify it against the copied `VERSION` file.
+
+Publishing is intentionally split:
+
+```text
+pull request
+  -> test/build only
+
+master
+  -> :master
+  -> :sha-<commit>
+
+safe-vX.Y.Z tag
+  -> verify tag == VERSION
+  -> refuse existing :X.Y.Z
+  -> publish immutable :X.Y.Z
+  -> publish :sha-<commit>
+```
+
+A `master` push no longer overwrites a semver image tag. Broken releases are fixed by issuing a new patch version rather than mutating an existing image.
+
+See [docs/RELEASING.md](docs/RELEASING.md) for the exact maintainer workflow.
+
 ## Repository layout
 
 ```text
@@ -230,11 +311,13 @@ android-reverse-engineering-mcp/
 ├── .github/workflows/build-safe-sandbox.yml
 ├── docs/
 │   ├── INSTALL_MCP.md
+│   ├── RELEASING.md
 │   ├── PROGRAM_UNDERSTANDING_PHASE1.md
 │   ├── ROADMAP.md
 │   └── research/AI_AGENT_PROGRAM_UNDERSTANDING.md
 ├── plugins/
 │   ├── safe-android-reverser/
+│   │   ├── VERSION
 │   │   ├── .claude-plugin/plugin.json
 │   │   ├── .mcp.json
 │   │   ├── bin/safe-reverser-mcp
@@ -242,20 +325,23 @@ android-reverse-engineering-mcp/
 │   └── android-reverse-engineering/    # legacy/upstream-compatible
 ├── sandbox/
 │   ├── Dockerfile
-│   ├── mcp_server.py                   # 0.1.x core
-│   ├── mcp_server_v2.py                # semantic MCP extension
+│   ├── mcp_server.py                   # baseline core
+│   ├── mcp_server_v2.py                # semantic extension
+│   ├── mcp_entrypoint.py               # release metadata/version binding
 │   ├── program_understanding.py
 │   ├── tests.py
 │   ├── tests_program_understanding.py
 │   ├── test_wrapper.sh
 │   └── tools.lock.env
+├── scripts/
+│   └── check_release_consistency.py
 ├── LICENSE
 └── README.md
 ```
 
 ## Roadmap
 
-The next high-value capabilities are not simply more reverse-engineering CLIs. They are semantic code-intelligence primitives:
+The next high-value capabilities are semantic code-intelligence primitives rather than simply more reverse-engineering CLIs:
 
 ```text
 trace_value
@@ -269,19 +355,22 @@ framework-specific analyzers
 static ↔ dynamic evidence correlation
 ```
 
-See [`docs/ROADMAP.md`](docs/ROADMAP.md) for the tool/profile roadmap and [`docs/research/AI_AGENT_PROGRAM_UNDERSTANDING.md`](docs/research/AI_AGENT_PROGRAM_UNDERSTANDING.md) for the broader codebase-understanding architecture.
+See [`docs/ROADMAP.md`](docs/ROADMAP.md) and [`docs/research/AI_AGENT_PROGRAM_UNDERSTANDING.md`](docs/research/AI_AGENT_PROGRAM_UNDERSTANDING.md).
 
 ## CI and image publishing
 
-CI validates the legacy MCP core, semantic program-understanding tests, MCP v2 tool registration, wrapper behavior, Python/shell syntax, JSON manifests and the complete sandbox image build.
+CI validates:
 
-Controlled `master`/release-tag workflows publish:
+- release consistency across manifests/wrapper/image/tag;
+- baseline and semantic MCP behavior;
+- source-scope/cache regressions;
+- wrapper auto-start and UID/GID mapping;
+- Python/shell/JSON syntax;
+- complete sandbox image build;
+- real DEX semantic analysis inside the image;
+- MCP `health` and release metadata inside the final image.
 
-```text
-ghcr.io/salingnh/safe-android-reverser:<version>
-```
-
-with BuildKit SBOM/provenance metadata.
+BuildKit SBOM/provenance metadata is published with released images.
 
 ## Legal use
 
