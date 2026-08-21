@@ -30,7 +30,8 @@ LABEL org.opencontainers.image.title="safe-android-reverser-flutter" \
       org.opencontainers.image.version="${SAFE_REVERSER_VERSION}" \
       org.opencontainers.image.revision="${SAFE_REVERSER_BUILD_COMMIT}" \
       org.opencontainers.image.description="Offline-safe Flutter/Dart AOT analysis capability profile" \
-      org.opencontainers.image.licenses="Apache-2.0 AND MIT"
+      org.opencontainers.image.licenses="Apache-2.0 AND MIT" \
+      io.safe-reverser.blutter.commit="${BLUTTER_COMMIT}"
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
@@ -46,6 +47,7 @@ RUN apt-get update \
  && chown -R 10001:10001 /output /work
 
 COPY --from=blutter-source /opt/blutter /opt/blutter
+COPY frameworks/flutter/cache_identity.py /opt/safe-flutter/cache_identity.py
 COPY frameworks/flutter/safe_blutter_adapter.py /opt/safe-flutter/safe_blutter_adapter.py
 COPY frameworks/flutter/tools.lock.env /opt/safe-flutter/tools.lock.env
 
@@ -54,9 +56,10 @@ RUN set -eux; \
     test -f /opt/blutter/LICENSE; \
     test -f /opt/blutter/blutter.py; \
     test -f /opt/blutter/extract_dart_info.py; \
+    test -f /opt/safe-flutter/cache_identity.py; \
     test -f /opt/safe-flutter/safe_blutter_adapter.py; \
-    python3 -m py_compile /opt/safe-flutter/safe_blutter_adapter.py; \
-    chmod 0555 /opt/safe-flutter/safe_blutter_adapter.py; \
+    python3 -m py_compile /opt/safe-flutter/cache_identity.py /opt/safe-flutter/safe_blutter_adapter.py; \
+    chmod 0555 /opt/safe-flutter/cache_identity.py /opt/safe-flutter/safe_blutter_adapter.py; \
     chmod -R a-w /opt/blutter /opt/safe-flutter
 
 ENV SAFE_FLUTTER_INPUT=/input \
