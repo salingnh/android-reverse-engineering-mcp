@@ -1,0 +1,136 @@
+name: Build Flutter runtime cache
+
+on:
+  workflow_dispatch:
+    inputs:
+      dart_version:
+        description: Exact Dart semantic version embedded by Flutter, for example 3.5.4
+        required: true
+        type: string
+      snapshot_hash:
+        description: Exact Dart snapshot hash from libapp.so
+        required: true
+        type: string
+      compressed_pointers:
+        description: Flutter AOT compressed-pointers mode
+        required: true
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write
+  attestations: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Validate build identity
+        id: identity
+        shell: bash
+        env:
+          DART_VERSION: ${{ inputs.dart_version }}
+          SNAPSHOT_HASH: ${{ inputs.snapshot_hash }}
+          COMPRESSED_POINTERS: ${{ inputs.compressed_pointers }}
+        run: |
+          set -euo pipefail
+          source frameworks/flutter/tools.lock.env
+          version="$(tr -d '[:space:]' < plugins/safe-android-reverser/VERSION)"
+          [[ "$DART_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-+][A-Za-z0-9._-]+)?$ ]]
+          [[ "$SNAPSHOT_HASH" =~ ^[0-9a-fA-F]{32,64}$ ]]
+          snapshot="$(printf '%s' "$SNAPSHOT_HASH" | tr '[:upper:]' '[:lower:]')"
+          if [[ "$COMPRESSED_POINTERS" == "true" ]]; then mode=cp; else mode=ncp; fi
+          tag="dart-${DART_VERSION}-arm64-${mode}-${snapshot:0:12}"
+          [[ "$tag" =~ ^[A-Za-z0-9_.-]+$ ]]
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "blutter_repository=$BLUTTER_REPOSITORY" >> "$GITHUB_OUTPUT"
+          echo "blutter_commit=$BLUTTER_COMMIT" >> "$GITHUB_OUTPUT"
+          echo "snapshot_hash=$snapshot" >> "$GITHUB_OUTPUT"
+          echo "cache_tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build exact runtime image for verification
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: frameworks/flutter/Dockerfile.runtime
+          load: true
+          push: false
+          tags: safe-android-reverser-flutter-runtime:ci
+          build-args: |
+            SAFE_REVERSER_VERSION=${{ steps.identity.outputs.version }}
+            SAFE_REVERSER_BUILD_COMMIT=${{ github.sha }}
+            BLUTTER_REPOSITORY=${{ steps.identity.outputs.blutter_repository }}
+            BLUTTER_COMMIT=${{ steps.identity.outputs.blutter_commit }}
+            DART_VERSION=${{ inputs.dart_version }}
+            SNAPSHOT_HASH=${{ steps.identity.outputs.snapshot_hash }}
+            TARGET_ARCH=arm64
+            COMPRESSED_POINTERS=${{ inputs.compressed_pointers }}
+          cache-from: type=gha,scope=flutter-runtime-${{ steps.identity.outputs.cache_tag }}
+          cache-to: type=gha,mode=max,scope=flutter-runtime-${{ steps.identity.outputs.cache_tag }}
+
+      - name: Verify cached analyzer without network
+        env:
+          EXPECTED_COMMIT: ${{ steps.identity.outputs.blutter_commit }}
+        run: |
+          output="$(docker run --rm \
+            --network=none \
+            --read-only \
+            --cap-drop=ALL \
+            --security-opt=no-new-privileges \
+            --tmpfs=/tmp:rw,nosuid,nodev,size=256m \
+            --tmpfs=/work:rw,nosuid,nodev,size=256m \
+            safe-android-reverser-flutter-runtime:ci health)"
+          python3 - "$output" "$EXPECTED_COMMIT" <<'PY'
+          import json
+          import sys
+          payload = json.loads(sys.argv[1])
+          assert payload["status"] == "ok", payload
+          assert payload["blutter_commit"] == sys.argv[2], payload
+          assert payload["cached_binary_count"] >= 1, payload
+          assert payload["network_required_at_runtime"] is False, payload
+          assert payload["build_on_demand_allowed"] is False, payload
+          PY
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Refuse to overwrite runtime cache tag
+        env:
+          TAG: ${{ steps.identity.outputs.cache_tag }}
+        run: |
+          image="ghcr.io/${{ github.repository_owner }}/safe-android-reverser-flutter:$TAG"
+          if docker buildx imagetools inspect "$image" >/dev/null 2>&1; then
+            echo "::error::runtime cache image already exists and is immutable: $image"
+            exit 1
+          fi
+
+      - name: Publish verified runtime cache image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: frameworks/flutter/Dockerfile.runtime
+          push: true
+          tags: ghcr.io/${{ github.repository_owner }}/safe-android-reverser-flutter:${{ steps.identity.outputs.cache_tag }}
+          build-args: |
+            SAFE_REVERSER_VERSION=${{ steps.identity.outputs.version }}
+            SAFE_REVERSER_BUILD_COMMIT=${{ github.sha }}
+            BLUTTER_REPOSITORY=${{ steps.identity.outputs.blutter_repository }}
+            BLUTTER_COMMIT=${{ steps.identity.outputs.blutter_commit }}
+            DART_VERSION=${{ inputs.dart_version }}
+            SNAPSHOT_HASH=${{ steps.identity.outputs.snapshot_hash }}
+            TARGET_ARCH=arm64
+            COMPRESSED_POINTERS=${{ inputs.compressed_pointers }}
+          provenance: mode=max
+          sbom: true
+          cache-from: type=gha,scope=flutter-runtime-${{ steps.identity.outputs.cache_tag }}
