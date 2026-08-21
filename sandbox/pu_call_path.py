@@ -39,11 +39,24 @@ def _query(value: Any, label: str) -> str:
 
 
 def _candidate_rows(conn, query: str) -> tuple[list[Any], bool]:
-    exact = conn.execute("SELECT * FROM methods WHERE id=? LIMIT 1", (query,)).fetchall()
+    exact = conn.execute("SELECT id FROM methods WHERE id=? LIMIT 1", (query,)).fetchall()
     if exact:
         return exact, False
+
+    # A truncated method table may omit an external method while call_edges still
+    # preserve its exact symbol ID. Exact IDs obtained from XREF evidence remain
+    # valid traversal anchors even when descriptive method metadata is absent.
+    edge_exact = conn.execute(
+        "SELECT ? AS id WHERE EXISTS ("
+        "SELECT 1 FROM call_edges WHERE caller=? OR callee=? LIMIT 1"
+        ")",
+        (query, query, query),
+    ).fetchall()
+    if edge_exact:
+        return edge_exact, False
+
     rows = conn.execute(
-        "SELECT * FROM methods "
+        "SELECT id FROM methods "
         "WHERE instr(lower(class||' '||name||' '||descriptor||' '||id), ?) > 0 "
         "ORDER BY external,class,name,descriptor,id LIMIT ?",
         (query.lower(), MAX_CANDIDATES + 1),
@@ -62,6 +75,8 @@ def _resolution(rows: list[Any], truncated: bool) -> dict[str, Any]:
     return {
         "status": status,
         "candidate_count": len(rows),
+        "candidate_count_is_lower_bound": bool(truncated),
+        "candidate_count_lower_bound": len(rows) + (1 if truncated else 0),
         "truncated": truncated,
         "candidates": candidates,
         "candidates_returned": len(candidates),
@@ -388,6 +403,7 @@ def trace_call_path(
             "notes": [
                 "Paths contain exact symbol IDs; broad endpoint queries remain explicit candidate sets and are never merged into synthetic methods.",
                 "Only logical shortest node paths within the current XREF index are returned; duplicate callsite offsets between the same method pair are collapsed to deterministic edge evidence.",
+                "Exact XREF endpoint IDs remain valid anchors even when truncated method metadata omits their methods table row.",
                 "A missing path is conclusive only when candidate/index/search/response truncation is false.",
                 "CALL/XREF adjacency is not data-flow evidence.",
             ],
