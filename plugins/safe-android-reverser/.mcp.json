@@ -9,8 +9,8 @@
       }
     },
     "safe-android-reverser-flutter": {
-      "command": "${CLAUDE_PLUGIN_ROOT}/bin/safe-flutter-mcp",
-      "args": [],
+      "command": "bash",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/bin/safe-flutter-mcp"],
       "env": {
         "SAFE_REVERSER_PROJECT_DIR": "${CLAUDE_PROJECT_DIR}",
         "SAFE_REVERSER_DATA_DIR": "${CLAUDE_PLUGIN_DATA}"
