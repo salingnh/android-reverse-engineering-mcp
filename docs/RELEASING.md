@@ -62,13 +62,15 @@ Explicit custom images are treated as development overrides; default release-ima
 
 ## Release procedure
 
-1. Choose the next semver. Never reuse a version that has already been released.
+The release image should exist **before** the new marketplace/plugin version becomes visible on `master`. This avoids a window where users can update the plugin but the matching semver image has not been published yet.
+
+1. Create a release branch/PR and choose the next semver. Never reuse a version that has already been released.
 2. Update `plugins/safe-android-reverser/VERSION`.
 3. Update the safe plugin version in:
    - `plugins/safe-android-reverser/.claude-plugin/plugin.json`
    - `.claude-plugin/marketplace.json`
 4. Update user-facing release references if required.
-5. Run:
+5. Run locally if available:
 
 ```bash
 python3 scripts/check_release_consistency.py
@@ -78,8 +80,8 @@ python3 sandbox/tests_program_understanding.py
 PYTHONPATH=sandbox python3 sandbox/tests_program_understanding_scopes.py
 ```
 
-6. Merge the release changes to `master` and wait for CI to pass.
-7. Create an annotated release tag matching `VERSION` exactly:
+6. Push the release branch and wait for the pull-request CI to pass.
+7. Tag the exact tested release commit **before merging the marketplace change to `master`**:
 
 ```bash
 VERSION="$(tr -d '[:space:]' < plugins/safe-android-reverser/VERSION)"
@@ -87,14 +89,25 @@ git tag -a "safe-v$VERSION" -m "Safe Android Reverser $VERSION"
 git push origin "safe-v$VERSION"
 ```
 
-8. The tag workflow reruns the full test/image integration gate, verifies `safe-vX.Y.Z == VERSION`, refuses to overwrite an existing semver image, then publishes:
+8. Wait for the tag workflow to pass. It reruns the complete test/image integration gate, verifies `safe-vX.Y.Z == VERSION`, refuses to overwrite an existing semver image, and publishes:
 
 ```text
 ghcr.io/salingnh/safe-android-reverser:X.Y.Z
-ghcr.io/salingnh/safe-android-reverser:sha-<commit>
+ghcr.io/salingnh/safe-android-reverser:sha-<release-commit>
+```
+
+9. Verify the semver image exists and exposes the expected OCI version label.
+10. Merge the already-tested release PR to `master`. At that point marketplace clients can discover the new plugin version and the matching image already exists.
+11. The subsequent `master` workflow may publish only:
+
+```text
+ghcr.io/salingnh/safe-android-reverser:master
+ghcr.io/salingnh/safe-android-reverser:sha-<master-commit>
 ```
 
 The semver image is immutable after publication.
+
+If project policy requires tagging only commits reachable from `master`, use a non-squash merge that preserves the tagged release commit, or fast-forward `master` to the tested release commit. Do not create a different source tree under the same semver.
 
 ## CI release consistency gate
 
