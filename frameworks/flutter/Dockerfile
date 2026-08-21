@@ -43,14 +43,16 @@ RUN apt-get update \
       libicu74 \
  && rm -rf /var/lib/apt/lists/* \
  && useradd --uid 10001 --create-home --home-dir /nonexistent --shell /usr/sbin/nologin reverser \
- && mkdir -p /opt/safe-flutter /input /output /work \
- && chown -R 10001:10001 /output /work
+ && mkdir -p /opt/safe-flutter /input /output /export /workspace /work \
+ && chown -R 10001:10001 /output /export /work
 
 COPY --from=blutter-source /opt/blutter /opt/blutter
 COPY frameworks/flutter/cache_identity.py /opt/safe-flutter/cache_identity.py
 COPY frameworks/flutter/safe_blutter_adapter.py /opt/safe-flutter/safe_blutter_adapter.py
 COPY frameworks/flutter/flutter_semantic.py /opt/safe-flutter/flutter_semantic.py
 COPY frameworks/flutter/flutter_network.py /opt/safe-flutter/flutter_network.py
+COPY frameworks/flutter/flutter_artifact.py /opt/safe-flutter/flutter_artifact.py
+COPY frameworks/flutter/flutter_export.py /opt/safe-flutter/flutter_export.py
 COPY frameworks/flutter/flutter_entrypoint.py /opt/safe-flutter/flutter_entrypoint.py
 COPY frameworks/flutter/tools.lock.env /opt/safe-flutter/tools.lock.env
 
@@ -63,18 +65,24 @@ RUN set -eux; \
     test -f /opt/safe-flutter/safe_blutter_adapter.py; \
     test -f /opt/safe-flutter/flutter_semantic.py; \
     test -f /opt/safe-flutter/flutter_network.py; \
+    test -f /opt/safe-flutter/flutter_artifact.py; \
+    test -f /opt/safe-flutter/flutter_export.py; \
     test -f /opt/safe-flutter/flutter_entrypoint.py; \
     python3 -m py_compile \
       /opt/safe-flutter/cache_identity.py \
       /opt/safe-flutter/safe_blutter_adapter.py \
       /opt/safe-flutter/flutter_semantic.py \
       /opt/safe-flutter/flutter_network.py \
+      /opt/safe-flutter/flutter_artifact.py \
+      /opt/safe-flutter/flutter_export.py \
       /opt/safe-flutter/flutter_entrypoint.py; \
     chmod 0555 /opt/safe-flutter/*.py; \
     chmod -R a-w /opt/blutter /opt/safe-flutter
 
 ENV SAFE_FLUTTER_INPUT=/input \
     SAFE_FLUTTER_OUTPUT=/output \
+    SAFE_FLUTTER_EXPORT_ROOT=/export \
+    SAFE_FLUTTER_WORKSPACE=/workspace \
     SAFE_BLUTTER_ROOT=/opt/blutter \
     SAFE_BLUTTER_COMMIT=${BLUTTER_COMMIT} \
     SAFE_REVERSER_IMAGE_VERSION=${SAFE_REVERSER_VERSION} \
