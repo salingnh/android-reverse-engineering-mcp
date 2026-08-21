@@ -34,10 +34,7 @@ class FlutterArtifactError(adapter.AdapterError):
 def _lexical_under_without_symlinks(root: Path, value: str) -> Path:
     root = Path(os.path.abspath(root))
     raw = Path(value)
-    if raw.is_absolute():
-        candidate = Path(os.path.abspath(raw))
-    else:
-        candidate = Path(os.path.abspath(root / raw))
+    candidate = Path(os.path.abspath(raw if raw.is_absolute() else root / raw))
     if candidate != root and root not in candidate.parents:
         raise FlutterArtifactError(f"path escapes allowed root: {value}")
     current = root
@@ -134,8 +131,10 @@ def _iter_apks(artifact: Path) -> Iterator[tuple[str, zipfile.ZipFile]]:
                     raise FlutterArtifactError("nested APK aggregate exceeds extraction budget")
                 temp_path: Path | None = None
                 try:
-                    with tempfile.NamedTemporaryFile(prefix="safe-flutter-apk-", suffix=".apk", delete=False) as temp:
-                        temp_path = Path(temp.name)
+                    fd, name = tempfile.mkstemp(prefix="safe-flutter-apk-", suffix=".apk")
+                    os.close(fd)
+                    temp_path = Path(name)
+                    temp_path.unlink()
                     with outer.open(info) as src:
                         copied, _ = _copy_bounded(src, temp_path, max_bytes=MAX_NESTED_APK_BYTES)
                     if copied != info.file_size:
@@ -189,7 +188,9 @@ def prepare_artifact(artifact_value: str, output_value: str) -> dict[str, Any]:
     artifact = _artifact(artifact_value)
     target = _fresh_output(output_value)
     target.parent.mkdir(parents=True, exist_ok=True)
-    stage = Path(tempfile.mkdtemp(prefix=".safe-flutter-input-", dir=target.parent))
+    stage: Path | None = Path(
+        tempfile.mkdtemp(prefix=".safe-flutter-input-", dir=target.parent)
+    )
     available_abis: set[str] = set()
     sources: set[str] = set()
     state: dict[str, Any] = {
@@ -226,13 +227,12 @@ def prepare_artifact(artifact_value: str, output_value: str) -> dict[str, Any]:
                 "supported_abi": SUPPORTED_ABI,
             }
 
+        runtime = adapter._runtime_info(stage)
         for path in (libapp, libflutter):
             os.chmod(path, 0o444)
         os.replace(stage, target)
-        stage = Path()
-        os.chmod(target, 0o555)
+        stage = None
 
-        runtime = adapter._runtime_info(target)
         if runtime.get("identity_status") != "identified":
             status = "runtime_identity_incomplete"
         elif runtime.get("binary_cached"):
@@ -248,8 +248,14 @@ def prepare_artifact(artifact_value: str, output_value: str) -> dict[str, Any]:
             "source_apks": sorted(sources)[:MAX_NESTED_APKS],
             "available_abis": sorted(available_abis),
             "libraries": {
-                "libapp.so": {"sha256": state["digests"]["libapp"], "size": state["sizes"]["libapp"]},
-                "libflutter.so": {"sha256": state["digests"]["libflutter"], "size": state["sizes"]["libflutter"]},
+                "libapp.so": {
+                    "sha256": state["digests"]["libapp"],
+                    "size": state["sizes"]["libapp"],
+                },
+                "libflutter.so": {
+                    "sha256": state["digests"]["libflutter"],
+                    "size": state["sizes"]["libflutter"],
+                },
             },
             "runtime": runtime,
             "blutter_commit": adapter.BLUTTER_COMMIT,
@@ -265,5 +271,5 @@ def prepare_artifact(artifact_value: str, output_value: str) -> dict[str, Any]:
             },
         }
     finally:
-        if stage and stage.exists() and stage.is_dir():
+        if stage is not None and stage.exists():
             shutil.rmtree(stage, ignore_errors=True)
