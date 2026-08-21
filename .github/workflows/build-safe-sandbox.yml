@@ -166,6 +166,100 @@ jobs:
             safe-android-reverser:ci \
             /workspace/sandbox/tests_trace_call_path_mcp.py
 
+      - name: Run installed trace_call_path JSON-RPC smoke test
+        run: |
+          project="$RUNNER_TEMP/safe-reverser-installed-project"
+          data="$RUNNER_TEMP/safe-reverser-installed-data"
+          output="$RUNNER_TEMP/safe-reverser-installed-call-path.jsonl"
+          mkdir -p "$project" "$data/jobs"
+          printf 'fixture' > "$project/app.apk"
+
+          docker run --rm -i \
+            --network=none \
+            --read-only \
+            --cap-drop=ALL \
+            --security-opt=no-new-privileges \
+            --tmpfs=/tmp:rw,nosuid,nodev,size=1g \
+            --tmpfs=/work:rw,nosuid,nodev,size=1g \
+            --user="$(id -u):$(id -g)" \
+            --volume="$project:/workspace:ro" \
+            --volume="$data:/data:rw" \
+            --entrypoint=python3 \
+            safe-android-reverser:ci - <<'PY'
+          import json
+          from pathlib import Path
+          import pu_index
+
+          assert str(Path(pu_index.__file__).resolve()).startswith('/opt/safe-reverser/'), pu_index.__file__
+          workspace = Path('/workspace')
+          job = Path('/data/jobs/aaaaaaaaaaaa')
+          job.mkdir(parents=True, exist_ok=True)
+          (job / 'job.json').write_text(json.dumps({'artifact': 'app.apk'}), encoding='utf-8')
+          artifact = workspace / 'app.apk'
+          with pu_index.connect(job) as conn:
+              pu_index.init_db(conn)
+              conn.executemany(
+                  'INSERT INTO methods VALUES (?,?,?,?,?,?,?)',
+                  [
+                      ('A', 'p.A', 'start', '()V', 0, 0, '{}'),
+                      ('B', 'p.B', 'middle', '()V', 0, 0, '{}'),
+                      ('C', 'p.C', 'target', '()V', 0, 0, '{}'),
+                  ],
+              )
+              conn.executemany(
+                  'INSERT INTO call_edges VALUES (?,?,?,?,?)',
+                  [
+                      ('A', 'B', 1, 0.98, 'dex-xref'),
+                      ('B', 'C', 2, 0.98, 'dex-xref'),
+                  ],
+              )
+              metadata = {
+                  'schema_version': pu_index.SCHEMA_VERSION,
+                  'builder_version': pu_index.BUILDER_VERSION,
+                  'analysis_kind': 'dex-xref',
+                  'analyzer': {'name': 'installed-image-smoke'},
+                  'truncated': {'methods': False, 'edges': False},
+                  'limits': {'max_methods': 100000, 'max_edges': 250000},
+                  'artifact_stat': pu_index.artifact_stat(artifact),
+                  'artifact_sha256': pu_index.sha256(artifact),
+                  'androguard_available_at_build': True,
+                  'androguard_version_at_build': '4.1.4',
+              }
+              for key, value in metadata.items():
+                  pu_index.meta_set(conn, key, value)
+              conn.commit()
+          PY
+
+          printf '%s\n' \
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"ci","version":"1"}}}' \
+            '{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}' \
+            '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"trace_call_path","arguments":{"job_id":"aaaaaaaaaaaa","source":"A","target":"C","max_depth":4}}}' \
+          | docker run --rm -i \
+              --network=none \
+              --read-only \
+              --cap-drop=ALL \
+              --security-opt=no-new-privileges \
+              --tmpfs=/tmp:rw,nosuid,nodev,size=1g \
+              --tmpfs=/work:rw,nosuid,nodev,size=1g \
+              --user="$(id -u):$(id -g)" \
+              --volume="$project:/workspace:ro" \
+              --volume="$data:/data:rw" \
+              safe-android-reverser:ci > "$output"
+
+          python3 - "$output" <<'PY'
+          import json
+          import sys
+          responses = [json.loads(line) for line in open(sys.argv[1], encoding='utf-8') if line.strip()]
+          response = next(item for item in responses if item.get('id') == 2)
+          assert response['result']['isError'] is False, response
+          payload = json.loads(response['result']['content'][0]['text'])
+          assert payload['available'] is True, payload
+          assert payload['found'] is True, payload
+          assert payload['shortest_depth'] == 2, payload
+          assert payload['paths'][0]['node_ids'] == ['A', 'B', 'C'], payload
+          assert payload['search_complete'] is True, payload
+          PY
+
       - name: Run MCP health smoke test inside image
         run: |
           mkdir -p "$RUNNER_TEMP/safe-reverser-mcp-data"
