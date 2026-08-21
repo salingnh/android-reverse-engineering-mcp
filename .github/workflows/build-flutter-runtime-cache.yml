@@ -83,6 +83,8 @@ jobs:
         env:
           EXPECTED_COMMIT: ${{ steps.identity.outputs.blutter_commit }}
         run: |
+          test "$(docker image inspect safe-android-reverser-flutter-runtime:ci \
+            --format '{{ index .Config.Labels "io.safe-reverser.runtime-cache.schema" }}')" = "2"
           output="$(docker run --rm \
             --network=none \
             --read-only \
@@ -102,6 +104,7 @@ jobs:
           assert payload["network_capable_upstream_path_used"] is False, payload
           assert payload["build_on_demand_allowed"] is False, payload
           assert payload["required_runtime_constraints"]["output_mount"] == "writable-bounded", payload
+          assert payload["orchestration"]["analyze_export"] is True, payload
           PY
 
       - name: Verify runtime binary and redistribution licenses
