@@ -6,10 +6,12 @@ import signal
 import sqlite3
 from contextlib import contextmanager
 
+import analysis_routing
 import mcp_server as core
 import program_understanding_v2 as pu
 
 core.SERVER_VERSION = "0.2.0"
+_baseline_fingerprint = core.fingerprint
 
 
 @contextmanager
@@ -52,6 +54,28 @@ def _pu_call(fn, *args, timeout_seconds: int | None = None, **kwargs):
         raise core.ToolError(str(exc)) from exc
 
 
+def fingerprint(args):
+    """Fingerprint an artifact and attach an explicit analyzer route.
+
+    Framework detection and analyzer availability are intentionally separate.
+    For example, a Flutter route remains framework-flutter even while that
+    profile is still planned; it must not silently fall back to JADX as the
+    primary business-logic analyzer.
+    """
+    result = _baseline_fingerprint(args)
+    result["analysis_route"] = analysis_routing.route_fingerprint(result)
+    return result
+
+
+def route_analysis(args):
+    result = fingerprint(args)
+    return {
+        "artifact": result["artifact"],
+        "framework": result["framework"],
+        "analysis_route": result["analysis_route"],
+    }
+
+
 def health(args):
     result = core.health(args)
     caps = pu.capabilities()
@@ -76,6 +100,12 @@ def health(args):
         "wall_clock_deadlines": True,
         "analyzer_versions": caps["versions"],
         "analyzer_errors": caps.get("errors", {}),
+    }
+    result["analysis_routing"] = {
+        "enabled": True,
+        "schema_version": analysis_routing.ROUTER_SCHEMA_VERSION,
+        "profiles": analysis_routing.profile_registry(),
+        "principle": "detect-framework-then-analyze-business-logic-representation",
     }
     return result
 
@@ -154,8 +184,13 @@ def extract_network_model(args):
     )
 
 
+# Make the routed fingerprint the canonical function for callers importing the
+# extended server, while keeping the baseline function private above.
+core.fingerprint = fingerprint
 core.TOOL_HANDLERS.update({
     "health": health,
+    "fingerprint": fingerprint,
+    "route_analysis": route_analysis,
     "build_program_index": build_program_index,
     "find_symbols": find_symbols,
     "find_xrefs": find_xrefs,
@@ -164,7 +199,27 @@ core.TOOL_HANDLERS.update({
     "extract_network_model": extract_network_model,
 })
 
+for tool in core.TOOLS:
+    if tool.get("name") == "fingerprint":
+        tool["description"] = (
+            "Fingerprint an APK/bundle, detect framework/tooling signals, and return an explicit "
+            "framework-aware analysis route so non-Java business logic is not silently treated as JADX input."
+        )
+        break
+
 core.TOOLS.extend([
+    {
+        "name": "route_analysis",
+        "description": "Select the primary and secondary analyzer profiles for an APK/bundle from framework fingerprint evidence without executing the analyzers.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "artifact": {"type": "string"}
+            },
+            "required": ["artifact"],
+            "additionalProperties": False
+        }
+    },
     {
         "name": "build_program_index",
         "description": "Build or reuse a bounded semantic program index from DEX XREFs when Androguard is available, with a lower-confidence decompiled-source fallback.",
