@@ -60,6 +60,7 @@ COPY plugins/safe-android-reverser/VERSION /opt/safe-reverser/VERSION
 COPY sandbox/mcp_server.py /opt/safe-reverser/mcp_server.py
 COPY sandbox/mcp_server_v2.py /opt/safe-reverser/mcp_server_v2.py
 COPY sandbox/mcp_entrypoint.py /opt/safe-reverser/mcp_entrypoint.py
+COPY sandbox/analysis_routing.py /opt/safe-reverser/analysis_routing.py
 COPY sandbox/program_understanding.py /opt/safe-reverser/program_understanding.py
 COPY sandbox/program_understanding_v2.py /opt/safe-reverser/program_understanding_v2.py
 COPY sandbox/pu_source.py /opt/safe-reverser/pu_source.py
@@ -70,9 +71,9 @@ RUN set -eux; \
     test -n "$SAFE_REVERSER_VERSION"; \
     test "$(tr -d '[:space:]' < /opt/safe-reverser/VERSION)" = "$SAFE_REVERSER_VERSION"; \
     ln -s /opt/jadx/bin/jadx /usr/local/bin/jadx; \
-    PYTHONPATH=/opt/python-site:/opt/safe-reverser python3 -c 'import program_understanding_v2 as pu; caps=pu.capabilities(); assert caps["androguard"], caps'; \
+    PYTHONPATH=/opt/python-site:/opt/safe-reverser python3 -c 'import program_understanding_v2 as pu; import analysis_routing as routing; caps=pu.capabilities(); assert caps["androguard"], caps; assert routing.PROFILE_REGISTRY["static-core"]["status"] == "available"'; \
     chmod 0444 /opt/safe-reverser/VERSION; \
-    chmod 0555 /opt/safe-reverser/mcp_server.py /opt/safe-reverser/mcp_server_v2.py /opt/safe-reverser/mcp_entrypoint.py /opt/safe-reverser/program_understanding.py /opt/safe-reverser/program_understanding_v2.py /opt/safe-reverser/pu_source.py /opt/safe-reverser/pu_index.py /opt/safe-reverser/pu_network.py; \
+    chmod 0555 /opt/safe-reverser/mcp_server.py /opt/safe-reverser/mcp_server_v2.py /opt/safe-reverser/mcp_entrypoint.py /opt/safe-reverser/analysis_routing.py /opt/safe-reverser/program_understanding.py /opt/safe-reverser/program_understanding_v2.py /opt/safe-reverser/pu_source.py /opt/safe-reverser/pu_index.py /opt/safe-reverser/pu_network.py; \
     chmod -R a-w /opt/jadx /opt/vineflower /opt/python-site /opt/safe-reverser
 
 ENV SAFE_REVERSER_WORKSPACE=/workspace \
