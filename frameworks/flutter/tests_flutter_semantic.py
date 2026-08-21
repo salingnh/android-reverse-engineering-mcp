@@ -22,7 +22,8 @@ class FlutterSemanticIndexTests(unittest.TestCase):
 class ApiClient extends Object {
   Future login(String user) {
     // ** addr: 0x1234, size: 0x50
-    0x1234: bl 0x2000 ; [package:app/auth.dart] Auth::sign -> String
+    0x1234: bl 0x2000 ; [package:app/auth.dart] Auth::verify -> bool
+    0x1238: bl 0x2100 ; [package:app/auth.dart] Auth::sign -> String
     // \"https://api.example.com/login\"
   }
 }
@@ -34,11 +35,14 @@ class ApiClient extends Object {
 
 // class id: 102, size: 0x20
 class Auth extends Object {
-  String sign(String body) {
+  bool verify(String body) {
     // ** addr: 0x2000, size: 0x30
   }
+  String sign(String body) {
+    // ** addr: 0x2100, size: 0x30
+  }
   String sign(String body, String key) {
-    // ** addr: 0x2100, size: 0x20
+    // ** addr: 0x2200, size: 0x20
   }
 }
 """,
@@ -71,13 +75,14 @@ class Auth extends Object {
         self.assertEqual(result["status"], "ok")
         self.assertEqual(result["counts"]["libraries"], 2)
         self.assertEqual(result["counts"]["classes"], 2)
-        self.assertEqual(result["counts"]["functions"], 3)
-        self.assertEqual(result["counts"]["calls"], 1)
+        self.assertEqual(result["counts"]["functions"], 4)
+        self.assertEqual(result["counts"]["xrefs"], 2)
         self.assertGreaterEqual(result["counts"]["strings"], 4)
         self.assertTrue(self.index.is_file())
         with sqlite3.connect(self.index) as conn:
             meta = dict(conn.execute("SELECT key,value FROM metadata"))
         self.assertEqual(meta["artifact_sha256"], "a" * 64)
+        self.assertEqual(meta["artifact_kind"], "libapp.so")
         self.assertEqual(meta["blutter_commit"], "c" * 40)
 
     def test_symbol_search_returns_native_offset_without_raw_body(self):
@@ -96,21 +101,36 @@ class Auth extends Object {
         self.assertEqual(len(result["results"]), 1)
         self.assertEqual(result["results"][0]["source_kind"], "object-pool")
 
-    def test_like_wildcards_are_treated_as_literal_query_text(self):
+    def test_string_occurrences_preserve_multiple_locations(self):
+        path = self.root / "asm" / "app" / "api.dart"
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write('// duplicate evidence: "Authorization"\n')
         self.build()
-        result = semantic.find_dart_strings(self.index, "%")
-        self.assertEqual([x["value"] for x in result["results"]], ["literal%marker"])
+        result = semantic.find_dart_strings(self.index, "Authorization")
+        self.assertEqual(len(result["results"]), 2)
+        self.assertEqual(
+            {row["source_kind"] for row in result["results"]}, {"asm", "object-pool"}
+        )
 
-    def test_xrefs_resolve_exact_dart_target(self):
+    def test_query_text_is_literal_and_case_sensitive(self):
+        self.build()
+        literal = semantic.find_dart_strings(self.index, "%")
+        self.assertEqual([x["value"] for x in literal["results"]], ["literal%marker"])
+        case_miss = semantic.find_dart_strings(self.index, "authorization")
+        self.assertEqual(case_miss["results"], [])
+
+    def test_xrefs_resolve_only_unique_targets(self):
         self.build()
         login = semantic.find_dart_symbols(self.index, "login")["results"][0]
         result = semantic.find_dart_xrefs(
             self.index, login["id"], direction="outgoing"
         )
-        self.assertEqual(len(result["outgoing"]), 1)
-        edge = result["outgoing"][0]
-        self.assertEqual(edge["target_name"], "sign")
-        self.assertEqual(edge["target_native_offset"], 0x2000)
+        self.assertEqual(len(result["outgoing"]), 2)
+        by_name = {edge["target_name"]: edge for edge in result["outgoing"]}
+        self.assertEqual(by_name["verify"]["target_native_offset"], 0x2000)
+        self.assertIsNotNone(by_name["verify"]["target_id"])
+        self.assertIsNone(by_name["sign"]["target_id"])
+        self.assertIsNone(by_name["sign"]["target_native_offset"])
         self.assertIn("not proof of value flow", result["limitations"][0])
 
     def test_ambiguous_symbol_requires_function_id(self):
@@ -125,6 +145,7 @@ class Auth extends Object {
         self.assertEqual(result["function"]["native_offset_hex"], "0x1234")
         self.assertEqual(result["function"]["size_hex"], "0x50")
         self.assertEqual(result["provenance"]["artifact_sha256"], "a" * 64)
+        self.assertEqual(result["provenance"]["artifact_kind"], "libapp.so")
 
     def test_rejects_oversized_untrusted_line_and_removes_partial_index(self):
         bad = self.root / "asm" / "app" / "bad.dart"
