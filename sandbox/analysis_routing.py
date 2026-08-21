@@ -12,9 +12,20 @@ PROFILE_REGISTRY: dict[str, dict[str, Any]] = {
         "representation": "APK/DEX/Java/Kotlin/resources",
     },
     "framework-flutter": {
-        "status": "planned",
+        "status": "partial",
         "trust_boundary": "framework-static",
         "representation": "Dart AOT/libapp.so/flutter_assets",
+        "available_capabilities": [
+            "artifact-inventory",
+            "asset-inventory",
+            "bounded-runtime-marker-scan",
+        ],
+        "planned_capabilities": [
+            "dart-aot-index",
+            "dart-xrefs",
+            "dart-to-native-map",
+            "flutter-network-model",
+        ],
     },
     "framework-hermes": {
         "status": "planned",
@@ -96,9 +107,9 @@ def route_fingerprint(fingerprint: dict[str, Any]) -> dict[str, Any]:
     """Choose an analysis profile from bounded fingerprint evidence.
 
     The router deliberately distinguishes framework identification from analyzer
-    availability. A planned framework profile is returned as planned instead of
-    silently falling back to JADX and pretending that host-shell code is the
-    application's primary business logic.
+    availability. A partial/planned framework profile remains the primary route
+    instead of silently falling back to JADX and pretending that host-shell code
+    is the application's primary business logic.
     """
 
     framework = fingerprint.get("framework") or {}
@@ -129,14 +140,14 @@ def route_fingerprint(fingerprint: dict[str, Any]) -> dict[str, Any]:
             framework_type=framework_type,
             primary_profile="framework-flutter",
             primary_representation=["libapp.so", "libflutter.so", "assets/flutter_assets"],
-            strategy="Use Dart AOT-aware analysis of libapp.so and Flutter assets; inspect Java/Kotlin only as host-shell evidence.",
+            strategy="Inspect Flutter artifacts/runtime first, then use Dart AOT-aware analysis of libapp.so; Java/Kotlin remains host-shell evidence only.",
             secondary_profiles=[
                 _secondary("static-core", "Android host shell, manifest, resources and plugin bridges"),
                 _secondary("native", "localized native analysis after Dart-level recovery"),
                 _secondary("dynamic", "targeted runtime verification when explicitly enabled"),
             ],
             allow_java_decompile_as_primary=False,
-            limitations=["The framework-flutter analyzer profile is the next P0 capability and may not yet be available in this release."],
+            limitations=["Flutter artifact/runtime inspection is available, but Dart AOT semantic indexing is not yet available in this profile."],
         )
 
     if normalized.startswith("react native") or "hermes" in normalized:
