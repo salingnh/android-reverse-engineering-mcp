@@ -46,6 +46,9 @@ jobs:
       - name: Test Flutter semantic index
         run: PYTHONPATH=frameworks/flutter python3 frameworks/flutter/tests_flutter_semantic.py
 
+      - name: Test Flutter network model
+        run: PYTHONPATH=frameworks/flutter python3 frameworks/flutter/tests_flutter_network.py
+
       - name: Validate Python syntax
         run: |
           python3 -m py_compile \
@@ -53,9 +56,11 @@ jobs:
             frameworks/flutter/build_runtime.py \
             frameworks/flutter/safe_blutter_adapter.py \
             frameworks/flutter/flutter_semantic.py \
+            frameworks/flutter/flutter_network.py \
             frameworks/flutter/flutter_entrypoint.py \
             frameworks/flutter/tests_safe_blutter_adapter.py \
-            frameworks/flutter/tests_flutter_semantic.py
+            frameworks/flutter/tests_flutter_semantic.py \
+            frameworks/flutter/tests_flutter_network.py
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -105,12 +110,14 @@ jobs:
           assert semantic["available"] is True, payload
           assert semantic["storage"] == "sqlite", payload
           assert semantic["schema_version"] == 1, payload
+          assert semantic["network_model_max_items"] == 200, payload
           expected = {
               "build_flutter_index",
               "find_dart_symbols",
               "find_dart_strings",
               "find_dart_xrefs",
               "map_dart_to_native",
+              "extract_flutter_network_model",
           }
           assert expected == set(semantic["operations"]), payload
           PY
