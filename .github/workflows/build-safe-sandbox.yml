@@ -38,6 +38,8 @@ jobs:
         run: PYTHONPATH=sandbox python3 sandbox/tests_program_understanding_scopes.py
       - name: Test trace_call_path
         run: PYTHONPATH=sandbox python3 sandbox/tests_trace_call_path.py
+      - name: Test trace_call_path MCP contract
+        run: PYTHONPATH=sandbox python3 sandbox/tests_trace_call_path_mcp.py
       - name: Test extended MCP registration
         run: |
           export SAFE_REVERSER_WORKSPACE="$RUNNER_TEMP/safe-reverser-workspace"
@@ -67,7 +69,7 @@ jobs:
         run: bash sandbox/test_wrapper.sh
       - name: Validate Python syntax
         run: |
-          python3 -m py_compile sandbox/mcp_server.py sandbox/mcp_server_v2.py sandbox/program_understanding.py sandbox/program_understanding_v2.py sandbox/pu_source.py sandbox/pu_index.py sandbox/pu_call_path.py sandbox/pu_network.py sandbox/tests_program_understanding.py sandbox/tests_program_understanding_scopes.py sandbox/tests_trace_call_path.py
+          python3 -m py_compile sandbox/mcp_server.py sandbox/mcp_server_v2.py sandbox/program_understanding.py sandbox/program_understanding_v2.py sandbox/pu_source.py sandbox/pu_index.py sandbox/pu_call_path.py sandbox/pu_network.py sandbox/tests_program_understanding.py sandbox/tests_program_understanding_scopes.py sandbox/tests_trace_call_path.py sandbox/tests_trace_call_path_mcp.py
       - name: Validate shell wrapper syntax
         run: bash -n plugins/safe-android-reverser/bin/safe-reverser-mcp
       - name: Validate JSON manifests
@@ -146,6 +148,23 @@ jobs:
             --entrypoint=python3 \
             safe-android-reverser:ci \
             /workspace/sandbox/tests_trace_call_path.py
+
+      - name: Run call-path MCP contract test inside image
+        run: |
+          mkdir -p "$RUNNER_TEMP/safe-reverser-call-path-mcp-data"
+          docker run --rm \
+            --network=none \
+            --read-only \
+            --cap-drop=ALL \
+            --security-opt=no-new-privileges \
+            --tmpfs=/tmp:rw,nosuid,nodev,size=1g \
+            --tmpfs=/work:rw,nosuid,nodev,size=1g \
+            --user="$(id -u):$(id -g)" \
+            --volume="$PWD:/workspace:ro" \
+            --volume="$RUNNER_TEMP/safe-reverser-call-path-mcp-data:/data:rw" \
+            --entrypoint=python3 \
+            safe-android-reverser:ci \
+            /workspace/sandbox/tests_trace_call_path_mcp.py
 
       - name: Run MCP health smoke test inside image
         run: |
