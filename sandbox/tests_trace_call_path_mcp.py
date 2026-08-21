@@ -43,6 +43,49 @@ class TraceCallPathMcpTests(unittest.TestCase):
             len(json.dumps(sample, ensure_ascii=False, indent=2, sort_keys=True)),
         )
 
+    def test_edge_only_exact_symbol_is_valid_candidate(self):
+        tmp = tempfile.TemporaryDirectory()
+        try:
+            job = Path(tmp.name)
+            with pu_index.connect(job) as conn:
+                pu_index.init_db(conn)
+                conn.execute(
+                    "INSERT INTO call_edges VALUES (?,?,?,?,?)",
+                    ("known", "external-only", 7, 0.98, "dex-xref"),
+                )
+                rows, truncated = pu_call_path._candidate_rows(conn, "external-only")
+                self.assertFalse(truncated)
+                resolution = pu_call_path._resolution(rows, truncated)
+                self.assertEqual(resolution["status"], "resolved")
+                self.assertEqual(resolution["candidates"], ["external-only"])
+        finally:
+            tmp.cleanup()
+
+    def test_candidate_truncation_reports_lower_bound(self):
+        tmp = tempfile.TemporaryDirectory()
+        try:
+            job = Path(tmp.name)
+            with pu_index.connect(job) as conn:
+                pu_index.init_db(conn)
+                conn.executemany(
+                    "INSERT INTO methods VALUES (?,?,?,?,?,?,?)",
+                    (
+                        (f"L{i}", f"p.Api{i}", "login", "()V", 0, 0, "{}")
+                        for i in range(pu_call_path.MAX_CANDIDATES + 5)
+                    ),
+                )
+                rows, truncated = pu_call_path._candidate_rows(conn, "login")
+                resolution = pu_call_path._resolution(rows, truncated)
+                self.assertTrue(truncated)
+                self.assertEqual(resolution["candidate_count"], pu_call_path.MAX_CANDIDATES)
+                self.assertTrue(resolution["candidate_count_is_lower_bound"])
+                self.assertEqual(
+                    resolution["candidate_count_lower_bound"],
+                    pu_call_path.MAX_CANDIDATES + 1,
+                )
+        finally:
+            tmp.cleanup()
+
     def test_deadline_interrupts_bounded_work(self):
         self.assertFalse(issubclass(server.SemanticDeadlineExceeded, Exception))
         started = time.monotonic()
