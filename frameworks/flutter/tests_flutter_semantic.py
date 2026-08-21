@@ -190,7 +190,19 @@ class FlutterSemanticEntrypointTests(unittest.TestCase):
     def setUp(self):
         self.job_name = self._testMethodName
         self.job = self.output_root / self.job_name
-        (self.job / "asm" / "app").mkdir(parents=True)
+        self.job.mkdir()
+
+    def runtime(self):
+        return {
+            "identity_status": "identified",
+            "dart_version": "3.5.4",
+            "arch": "arm64",
+            "os": "android",
+            "snapshot_hash": "a" * 32,
+        }
+
+    def write_fixture(self):
+        (self.job / "asm" / "app").mkdir(parents=True, exist_ok=True)
         (self.job / "asm" / "app" / "api.dart").write_text(
             """// lib: , url: package:app/api.dart
 // class id: 1, size: 0x20
@@ -203,20 +215,13 @@ class Api extends Object {
             encoding="utf-8",
         )
 
-    def runtime(self):
-        return {
-            "identity_status": "identified",
-            "dart_version": "3.5.4",
-            "arch": "arm64",
-            "os": "android",
-            "snapshot_hash": "a" * 32,
-        }
-
     def test_build_index_requires_profile_generated_manifest(self):
+        self.write_fixture()
         with self.assertRaises(self.adapter.AdapterError):
             self.entry._build_index_from_manifest(self.job)
 
     def test_manifest_binds_index_to_local_libapp_hash(self):
+        self.write_fixture()
         manifest = self.entry._write_manifest(
             self.job, self.input_root / "libs", self.runtime()
         )
@@ -228,21 +233,33 @@ class Api extends Object {
 
     def test_successful_analyze_automatically_builds_semantic_index(self):
         args = mock.Mock(libdir="libs", output=self.job_name, timeout=10)
-        with mock.patch.object(
-            self.adapter,
-            "analyze",
-            return_value={
+
+        def fake_analyze(_libdir, _output, _timeout):
+            self.write_fixture()
+            return {
                 "status": "ok",
                 "profile": "framework-flutter",
                 "runtime": self.runtime(),
                 "executed": True,
-            },
-        ):
+            }
+
+        with mock.patch.object(self.adapter, "analyze", side_effect=fake_analyze):
             result = self.entry._analyze_command(args)
         self.assertEqual(result["status"], "ok")
         self.assertEqual(result["semantic_index"]["status"], "ok")
         self.assertTrue((self.job / self.entry.MANIFEST_NAME).is_file())
         self.assertTrue((self.job / self.entry.INDEX_NAME).is_file())
+
+    def test_analyze_rejects_nonempty_output_before_adapter_execution(self):
+        (self.job / "stale.txt").write_text("old evidence", encoding="utf-8")
+        args = mock.Mock(libdir="libs", output=self.job_name, timeout=10)
+        with mock.patch.object(
+            self.adapter,
+            "analyze",
+            side_effect=AssertionError("analyzer must not run on stale output"),
+        ):
+            with self.assertRaises(self.adapter.AdapterError):
+                self.entry._analyze_command(args)
 
     def test_manifest_rejects_different_blutter_revision(self):
         manifest = self.entry._write_manifest(
@@ -254,6 +271,39 @@ class Api extends Object {
         path.write_text(__import__("json").dumps(manifest), encoding="utf-8")
         with self.assertRaises(self.adapter.AdapterError):
             self.entry._read_manifest(self.job)
+
+    def test_manifest_symlink_is_rejected(self):
+        real = self.job / "other.json"
+        real.write_text("{}", encoding="utf-8")
+        link = self.job / self.entry.MANIFEST_NAME
+        try:
+            link.symlink_to(real.name)
+        except (OSError, NotImplementedError):
+            self.skipTest("symlinks are unavailable")
+        with self.assertRaises(self.adapter.AdapterError):
+            self.entry._read_manifest(self.job)
+
+    def test_index_symlink_inside_output_is_rejected(self):
+        real = self.job / "other.sqlite"
+        real.write_bytes(b"not-an-index")
+        link = self.job / self.entry.INDEX_NAME
+        try:
+            link.symlink_to(real.name)
+        except (OSError, NotImplementedError):
+            self.skipTest("symlinks are unavailable")
+        with self.assertRaises(self.adapter.AdapterError):
+            self.entry._index_path(self.job_name)
+
+    def test_output_symlink_component_is_rejected(self):
+        real = self.output_root / f"{self.job_name}-real"
+        real.mkdir()
+        link = self.output_root / f"{self.job_name}-link"
+        try:
+            link.symlink_to(real.name, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            self.skipTest("symlinks are unavailable")
+        with self.assertRaises(self.adapter.AdapterError):
+            self.entry._output_dir(link.name)
 
     def test_index_path_cannot_escape_output_root(self):
         with self.assertRaises(self.adapter.AdapterError):
