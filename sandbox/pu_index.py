@@ -369,6 +369,8 @@ def build_program_index(
                 conn, input_artifact, max_methods, max_edges
             )
             kind = "dex-xref"
+        except TimeoutError:
+            raise
         except Exception as exc:
             conn.execute("DELETE FROM methods")
             conn.execute("DELETE FROM call_edges")
