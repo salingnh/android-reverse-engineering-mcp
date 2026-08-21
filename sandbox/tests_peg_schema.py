@@ -15,7 +15,13 @@ class ProgramEvidenceGraphSchemaTests(unittest.TestCase):
         self.assertIn("FLOWS_TO", descriptor["edge_types"])
         self.assertIn("JNI_BINDS", descriptor["edge_types"])
         self.assertIn("CONFIRMS", descriptor["edge_types"])
-        self.assertEqual(descriptor["evidence_states"], ["observed", "derived", "hypothesized"])
+        self.assertEqual(
+            descriptor["evidence_states"], ["observed", "derived", "hypothesized"]
+        )
+        self.assertEqual(
+            descriptor["limits"]["properties_json_bytes"],
+            peg_schema.MAX_PROPERTIES_JSON_BYTES,
+        )
 
     def test_evidence_requires_explicit_provenance_and_state(self):
         record = peg_schema.evidence(
@@ -26,14 +32,16 @@ class ProgramEvidenceGraphSchemaTests(unittest.TestCase):
             state="observed",
             location={"dex": "classes.dex", "offset": 42},
             image_version="0.2.1",
+            build_commit="abc123",
             limitations=["reflection not resolved"],
         )
         self.assertEqual(record["analysis_id"], "job-123")
         self.assertEqual(record["state"], "observed")
         self.assertEqual(record["location"]["offset"], 42)
+        self.assertEqual(record["build_commit"], "abc123")
         self.assertNotIn("confidence", record)
 
-    def test_evidence_rejects_invalid_state_and_sha(self):
+    def test_evidence_rejects_invalid_state_sha_location_and_non_json(self):
         kwargs = dict(
             analysis_id="job-123",
             artifact_sha256="a" * 64,
@@ -46,6 +54,10 @@ class ProgramEvidenceGraphSchemaTests(unittest.TestCase):
             peg_schema.evidence(**{**kwargs, "state": "verified"})
         with self.assertRaises(ValueError):
             peg_schema.evidence(**{**kwargs, "artifact_sha256": "not-a-sha"})
+        with self.assertRaises(ValueError):
+            peg_schema.evidence(**{**kwargs, "location": {}})
+        with self.assertRaises(ValueError):
+            peg_schema.evidence(**{**kwargs, "location": {"value": object()}})
 
     def test_node_and_edge_types_are_allow_listed(self):
         evidence = peg_schema.evidence(
@@ -74,6 +86,30 @@ class ProgramEvidenceGraphSchemaTests(unittest.TestCase):
             peg_schema.node("ArbitraryNode", "x")
         with self.assertRaises(ValueError):
             peg_schema.edge("MAYBE_FLOWS", "x", "y")
+
+    def test_builders_reject_unbounded_or_malformed_payloads(self):
+        with self.assertRaises(ValueError):
+            peg_schema.node("String", "str:1", properties="not-an-object")
+        with self.assertRaises(ValueError):
+            peg_schema.node(
+                "String",
+                "str:1",
+                properties={"payload": "x" * peg_schema.MAX_PROPERTIES_JSON_BYTES},
+            )
+        with self.assertRaises(ValueError):
+            peg_schema.edge(
+                "CALLS",
+                "a",
+                "b",
+                evidence_record={
+                    "schema_version": 1,
+                    "state": "observed",
+                    "analysis_id": "x",
+                    "artifact_sha256": "a" * 64,
+                    "analyzer": {"name": "x", "version": "1"},
+                    "location": {"file": "x"},
+                },
+            )
 
     def test_builders_copy_mutable_input(self):
         properties = {"nested": {"value": 1}}
