@@ -50,6 +50,9 @@ jobs:
       - name: Test framework-aware analyzer routing
         run: PYTHONPATH=sandbox python3 sandbox/tests_analysis_routing.py
 
+      - name: Test Program Evidence Graph schema
+        run: PYTHONPATH=sandbox python3 sandbox/tests_peg_schema.py
+
       - name: Test program understanding
         run: python3 sandbox/tests_program_understanding.py
 
@@ -91,6 +94,8 @@ jobs:
           assert health["analysis_routing"]["enabled"] is True
           assert health["analysis_routing"]["profiles"]["static-core"]["status"] == "available"
           assert health["analysis_routing"]["profiles"]["framework-flutter"]["status"] == "planned"
+          assert health["program_evidence_graph"]["schema_version"] == 2
+          assert health["program_evidence_graph"]["status"] == "foundation"
           PY
 
       - name: Test automatic runtime wrapper
@@ -103,12 +108,14 @@ jobs:
             sandbox/mcp_server_v2.py \
             sandbox/mcp_entrypoint.py \
             sandbox/analysis_routing.py \
+            sandbox/peg_schema.py \
             sandbox/program_understanding.py \
             sandbox/program_understanding_v2.py \
             sandbox/pu_source.py \
             sandbox/pu_index.py \
             sandbox/pu_network.py \
             sandbox/tests_analysis_routing.py \
+            sandbox/tests_peg_schema.py \
             sandbox/tests_program_understanding.py \
             sandbox/tests_program_understanding_scopes.py \
             scripts/check_release_consistency.py
@@ -244,6 +251,7 @@ jobs:
           assert payload["program_understanding"]["cfg"] is True, payload
           assert payload["program_understanding"]["index_storage"] == "sqlite", payload
           assert payload["analysis_routing"]["enabled"] is True, payload
+          assert payload["program_evidence_graph"]["schema_version"] == 2, payload
           PY
 
       - name: Log in to GHCR
