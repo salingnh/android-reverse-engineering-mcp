@@ -7,6 +7,7 @@ import sqlite3
 from contextlib import contextmanager
 
 import analysis_routing
+import flutter_analysis
 import mcp_server as core
 import peg_schema
 import program_understanding_v2 as pu
@@ -59,9 +60,8 @@ def fingerprint(args):
     """Fingerprint an artifact and attach an explicit analyzer route.
 
     Framework detection and analyzer availability are intentionally separate.
-    For example, a Flutter route remains framework-flutter even while that
-    profile is still planned; it must not silently fall back to JADX as the
-    primary business-logic analyzer.
+    A partial/planned framework profile remains primary instead of silently
+    falling back to JADX as the application's business-logic analyzer.
     """
     result = _baseline_fingerprint(args)
     result["analysis_route"] = analysis_routing.route_fingerprint(result)
@@ -75,6 +75,51 @@ def route_analysis(args):
         "framework": result["framework"],
         "analysis_route": result["analysis_route"],
     }
+
+
+def _flutter_artifact(args):
+    artifact = core._workspace_artifact(str(args.get("artifact", "")))
+    route = fingerprint({"artifact": str(artifact.relative_to(core.WORKSPACE))})[
+        "analysis_route"
+    ]
+    if route["framework_id"] != "flutter":
+        raise core.ToolError(
+            f"Flutter analyzer requires a Flutter route; detected {route['framework_id']}"
+        )
+    return artifact
+
+
+def inspect_flutter(args):
+    artifact = _flutter_artifact(args)
+    return _pu_call(
+        flutter_analysis.inspect_flutter,
+        artifact,
+        core._nested_apks,
+        max_assets=int(args.get("max_assets", 5000)),
+        timeout_seconds=_timeout(args, 300),
+    )
+
+
+def identify_dart_runtime(args):
+    artifact = _flutter_artifact(args)
+    return _pu_call(
+        flutter_analysis.identify_dart_runtime,
+        artifact,
+        core._nested_apks,
+        timeout_seconds=_timeout(args, 300),
+    )
+
+
+def extract_flutter_assets(args):
+    artifact = _flutter_artifact(args)
+    return _pu_call(
+        flutter_analysis.extract_flutter_assets,
+        artifact,
+        core._nested_apks,
+        max_items=int(args.get("max_items", 1000)),
+        max_previews=int(args.get("max_previews", 20)),
+        timeout_seconds=_timeout(args, 300),
+    )
 
 
 def health(args):
@@ -109,6 +154,15 @@ def health(args):
         "principle": "detect-framework-then-analyze-business-logic-representation",
     }
     result["program_evidence_graph"] = peg_schema.schema_descriptor()
+    result["framework_analysis"] = {
+        "flutter": {
+            "status": analysis_routing.PROFILE_REGISTRY["framework-flutter"]["status"],
+            "artifact_inspection": True,
+            "runtime_marker_scan": True,
+            "asset_inventory": True,
+            "dart_aot_index": False,
+        }
+    }
     return result
 
 
@@ -193,6 +247,9 @@ core.TOOL_HANDLERS.update({
     "health": health,
     "fingerprint": fingerprint,
     "route_analysis": route_analysis,
+    "inspect_flutter": inspect_flutter,
+    "identify_dart_runtime": identify_dart_runtime,
+    "extract_flutter_assets": extract_flutter_assets,
     "build_program_index": build_program_index,
     "find_symbols": find_symbols,
     "find_xrefs": find_xrefs,
@@ -212,11 +269,51 @@ for tool in core.TOOLS:
 core.TOOLS.extend([
     {
         "name": "route_analysis",
-        "description": "Select the primary and secondary analyzer profiles for an APK/bundle from framework fingerprint evidence without executing the analyzers.",
+        "description": "Select primary and secondary analyzer profiles for an APK/bundle without executing the analyzers.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"artifact": {"type": "string"}},
+            "required": ["artifact"],
+            "additionalProperties": False
+        }
+    },
+    {
+        "name": "inspect_flutter",
+        "description": "Inspect Flutter APK/XAPK structure, ABIs, libapp/libflutter, Flutter assets and bounded Dart runtime markers without generic native decompilation.",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "artifact": {"type": "string"}
+                "artifact": {"type": "string"},
+                "max_assets": {"type": "integer", "minimum": 1, "maximum": 20000, "default": 5000},
+                "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 3600, "default": 300}
+            },
+            "required": ["artifact"],
+            "additionalProperties": False
+        }
+    },
+    {
+        "name": "identify_dart_runtime",
+        "description": "Recover directly observable Dart VM version/snapshot markers from Flutter engine libraries with bounded streaming scans; returns unknown rather than guessing.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "artifact": {"type": "string"},
+                "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 3600, "default": 300}
+            },
+            "required": ["artifact"],
+            "additionalProperties": False
+        }
+    },
+    {
+        "name": "extract_flutter_assets",
+        "description": "Inventory Flutter packaged assets and return bounded previews of text-like manifests/configuration files with PEG provenance.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "artifact": {"type": "string"},
+                "max_items": {"type": "integer", "minimum": 1, "maximum": 20000, "default": 1000},
+                "max_previews": {"type": "integer", "minimum": 0, "maximum": 50, "default": 20},
+                "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 3600, "default": 300}
             },
             "required": ["artifact"],
             "additionalProperties": False
