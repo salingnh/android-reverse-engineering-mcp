@@ -11,6 +11,7 @@ from typing import Any, Iterable
 
 INDEX_SCHEMA_VERSION = 1
 MAX_ASM_FILES = 10_000
+MAX_ASM_ENTRIES = 50_000
 MAX_LIBRARIES = 10_000
 MAX_CLASSES = 250_000
 MAX_FUNCTIONS = 250_000
@@ -19,6 +20,7 @@ MAX_STRINGS = 300_000
 MAX_SCAN_BYTES = 512 * 1024 * 1024
 MAX_FILE_BYTES = 64 * 1024 * 1024
 MAX_LINE_BYTES = 32 * 1024
+MAX_PATH_LENGTH = 4096
 MAX_STRING_LENGTH = 4096
 MAX_QUERY_LIMIT = 200
 MAX_QUERY_TEXT = 512
@@ -73,7 +75,10 @@ def _relative(root: Path, path: Path) -> str:
     path = path.resolve()
     if path != root and root not in path.parents:
         raise FlutterIndexError("path escapes Flutter analysis output")
-    return path.relative_to(root).as_posix()
+    relative = path.relative_to(root).as_posix()
+    if len(relative) > MAX_PATH_LENGTH:
+        raise FlutterIndexError(f"source path exceeds {MAX_PATH_LENGTH} characters")
+    return relative
 
 
 def _iter_lines(path: Path) -> Iterable[tuple[int, str]]:
@@ -93,22 +98,39 @@ def _iter_lines(path: Path) -> Iterable[tuple[int, str]]:
 
 def _discover_files(source: Path) -> tuple[list[Path], list[Path], int]:
     source = source.resolve()
-    asm = source / "asm"
-    if asm.is_symlink():
+    asm_lexical = source / "asm"
+    if asm_lexical.is_symlink():
         raise FlutterIndexError("asm directory must not be a symlink")
-    asm = asm.resolve()
+    asm = asm_lexical.resolve()
     if not asm.is_dir() or source not in asm.parents:
         raise FlutterIndexError("Blutter output is missing a valid asm/ directory")
 
     asm_files: list[Path] = []
     extra_files: list[Path] = []
     total_bytes = 0
+    entry_count = 0
+
     for dirpath, dirnames, filenames in os.walk(asm, followlinks=False):
         base = Path(dirpath)
-        dirnames[:] = [name for name in dirnames if not (base / name).is_symlink()]
+        for name in list(dirnames):
+            entry_count += 1
+            if entry_count > MAX_ASM_ENTRIES:
+                raise FlutterIndexError(
+                    f"asm directory entries exceed {MAX_ASM_ENTRIES}"
+                )
+            child = base / name
+            if child.is_symlink():
+                raise FlutterIndexError("symlinks are not allowed inside asm output")
         for name in filenames:
+            entry_count += 1
+            if entry_count > MAX_ASM_ENTRIES:
+                raise FlutterIndexError(
+                    f"asm directory entries exceed {MAX_ASM_ENTRIES}"
+                )
             path = base / name
-            if path.is_symlink() or path.suffix != ".dart":
+            if path.is_symlink():
+                raise FlutterIndexError("symlinks are not allowed inside asm output")
+            if path.suffix != ".dart":
                 continue
             if len(asm_files) >= MAX_ASM_FILES:
                 raise FlutterIndexError(f"asm file count exceeds {MAX_ASM_FILES}")
@@ -124,7 +146,9 @@ def _discover_files(source: Path) -> tuple[list[Path], list[Path], int]:
 
     for name in ("pp.txt", "objs.txt"):
         path = source / name
-        if path.is_symlink() or not path.is_file():
+        if path.is_symlink():
+            raise FlutterIndexError(f"{name} must not be a symlink")
+        if not path.is_file():
             continue
         size = path.stat().st_size
         if size > MAX_FILE_BYTES:
@@ -148,6 +172,8 @@ def _function_name(signature: str) -> str:
             text = text[len(prefix) :]
     paren = text.find("(")
     left = text[:paren].rstrip() if paren >= 0 else text
+    if "<anonymous closure>" in left:
+        return "<anonymous closure>"
     if not left:
         return "<unknown>"
     token = left.split()[-1]
@@ -278,6 +304,8 @@ def build_flutter_index(
     artifact_sha256: str,
     blutter_commit: str,
     runtime: dict[str, Any] | None = None,
+    image_version: str | None = None,
+    build_commit: str | None = None,
 ) -> dict[str, Any]:
     source = source_dir.resolve()
     index_path = index_path.resolve()
@@ -294,6 +322,8 @@ def build_flutter_index(
     analysis_id = _bounded_text(analysis_id, 256, "analysis_id")
     artifact_sha256 = _bounded_text(artifact_sha256, 64, "artifact_sha256").lower()
     blutter_commit = _bounded_text(blutter_commit, 40, "blutter_commit").lower()
+    image_version = _bounded_text(image_version, 128, "image_version") if image_version else None
+    build_commit = _bounded_text(build_commit, 128, "build_commit") if build_commit else None
     if not re.fullmatch(r"[0-9a-f]{64}", artifact_sha256):
         raise FlutterIndexError(
             "artifact_sha256 must be 64 lowercase hexadecimal characters"
@@ -320,9 +350,12 @@ def build_flutter_index(
             "analyzer": "blutter-semantic-index",
             "blutter_commit": blutter_commit,
             "runtime": runtime or {},
+            "image_version": image_version,
+            "build_commit": build_commit,
             "scan_bytes": scan_bytes,
             "limits": {
                 "max_asm_files": MAX_ASM_FILES,
+                "max_asm_entries": MAX_ASM_ENTRIES,
                 "max_libraries": MAX_LIBRARIES,
                 "max_classes": MAX_CLASSES,
                 "max_functions": MAX_FUNCTIONS,
@@ -330,6 +363,7 @@ def build_flutter_index(
                 "max_strings": MAX_STRINGS,
                 "max_scan_bytes": MAX_SCAN_BYTES,
                 "max_line_bytes": MAX_LINE_BYTES,
+                "max_path_length": MAX_PATH_LENGTH,
             },
         }
         for key, value in metadata.items():
@@ -343,7 +377,7 @@ def build_flutter_index(
             library_id: str | None = None
             library_url = ""
             class_row_id: str | None = None
-            class_name = "::"
+            class_name = ""
             pending_class_meta: tuple[int, int] | None = None
             pending_signature: tuple[int, str] | None = None
             current_function_id: str | None = None
@@ -383,7 +417,7 @@ def build_flutter_index(
                 class_match = CLASS_RE.match(line.strip())
                 if class_match and library_id:
                     raw_name = class_match.group(1)
-                    class_name = raw_name.split("<", 1)[0][:512]
+                    class_name = "" if raw_name == "::" else raw_name.split("<", 1)[0][:512]
                     cid, size = pending_class_meta or (None, None)
                     class_row_id = _stable_id(
                         "dartclass",
@@ -466,9 +500,7 @@ def build_flutter_index(
                 if current_function_id:
                     for match in XREF_TARGET_RE.finditer(line):
                         if counts["xrefs"] >= MAX_XREFS:
-                            raise FlutterIndexError(
-                                f"XREF count exceeds {MAX_XREFS}"
-                            )
+                            raise FlutterIndexError(f"XREF count exceeds {MAX_XREFS}")
                         conn.execute(
                             """INSERT INTO xrefs
                                (caller_id,target_library_url,target_class_name,target_name,
@@ -518,9 +550,9 @@ def build_flutter_index(
                     if counts["strings"] >= MAX_STRINGS:
                         break
 
-        # Blutter's annotation contains library/class/function names but not a
-        # complete Dart signature. Resolve a target only when that identity is
-        # unique. Overloaded/ambiguous names intentionally remain unresolved.
+        # Blutter annotations provide library/class/function names but not a
+        # complete Dart signature. Resolve only a unique identity. Ambiguous
+        # overloads intentionally remain unresolved rather than inventing an edge.
         conn.execute(
             """UPDATE xrefs
                SET target_id = (
@@ -569,6 +601,8 @@ def _metadata(conn: sqlite3.Connection) -> dict[str, Any]:
         if row["key"] in {
             "schema_version",
             "runtime",
+            "image_version",
+            "build_commit",
             "scan_bytes",
             "limits",
             "counts",
@@ -591,6 +625,8 @@ def _provenance(meta: dict[str, Any]) -> dict[str, Any]:
         "analyzer": meta.get("analyzer"),
         "blutter_commit": meta.get("blutter_commit"),
         "runtime": meta.get("runtime"),
+        "image_version": meta.get("image_version"),
+        "build_commit": meta.get("build_commit"),
         "index_schema_version": INDEX_SCHEMA_VERSION,
         "evidence_state": "derived",
     }
