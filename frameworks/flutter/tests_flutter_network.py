@@ -198,6 +198,31 @@ class Dio extends Object {
         self.assertNotIn("alice", json.dumps(endpoint))
         self.assertNotIn("password", json.dumps(endpoint))
 
+    def test_secret_like_query_key_is_redacted(self):
+        endpoint = network._safe_endpoint_from_url(
+            "https://api.example.com/v1?eyJ012345678901234567890123456789=value"
+        )
+        self.assertEqual(endpoint["query_keys"], ["{redacted-key}"])
+        self.assertNotIn("eyJ0123456789", json.dumps(endpoint))
+
+    def test_percent_encoded_secret_path_segment_is_redacted(self):
+        endpoint = network._safe_endpoint_from_url(
+            "https://api.example.com/users/%30%31%32%33%34%35%36%37%38%39%61%62%63%64%65%66%30%31%32%33%34%35%36%37%38%39%61%62%63%64%65%66"
+        )
+        self.assertEqual(endpoint["path"], "/users/{redacted}")
+
+    def test_short_crypto_terms_require_token_boundaries(self):
+        self.assertEqual(network._keyword_hits("versatile", network.CRYPTO_TERMS), [])
+        self.assertIn("rsa", network._keyword_hits("RSA encrypt", network.CRYPTO_TERMS))
+        self.assertIn("aes", network._keyword_hits("AES/GCM", network.CRYPTO_TERMS))
+
+    def test_package_specific_http_client_library_is_sufficient_evidence(self):
+        self.assertEqual(
+            network._client_name("package:http/src/client.dart", "Response", "get"),
+            "package:http",
+        )
+        self.assertIsNone(network._client_name("dart:io", "File", "open"))
+
     def test_model_does_not_return_raw_candidate_string_values(self):
         result = self.model()
         encoded = json.dumps(result)
