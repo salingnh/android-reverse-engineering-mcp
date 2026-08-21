@@ -12,6 +12,10 @@ import program_understanding_v2 as pu
 core.SERVER_VERSION = "0.2.1"
 
 
+class SemanticDeadlineExceeded(BaseException):
+    """Private control-flow exception that analyzer `except Exception` blocks cannot swallow."""
+
+
 @contextmanager
 def _deadline(seconds: int):
     """Bound semantic work in the Linux sandbox without exposing a worker shell."""
@@ -21,7 +25,7 @@ def _deadline(seconds: int):
         return
 
     def on_alarm(_signum, _frame):
-        raise TimeoutError(f"semantic analysis exceeded {seconds}s deadline")
+        raise SemanticDeadlineExceeded(f"semantic analysis exceeded {seconds}s deadline")
 
     old_handler = signal.getsignal(signal.SIGALRM)
     old_timer = signal.setitimer(signal.ITIMER_REAL, 0)
@@ -46,6 +50,8 @@ def _pu_call(fn, *args, timeout_seconds: int | None = None, **kwargs):
             return fn(*args, **kwargs)
         with _deadline(timeout_seconds):
             return fn(*args, **kwargs)
+    except SemanticDeadlineExceeded as exc:
+        raise core.ToolError(str(exc)) from exc
     except core.ToolError:
         raise
     except (ValueError, RuntimeError, ImportError, ModuleNotFoundError, OSError, sqlite3.Error) as exc:
