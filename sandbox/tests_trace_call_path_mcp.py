@@ -44,15 +44,28 @@ class TraceCallPathMcpTests(unittest.TestCase):
         )
 
     def test_deadline_interrupts_bounded_work(self):
+        self.assertFalse(issubclass(server.SemanticDeadlineExceeded, Exception))
         started = time.monotonic()
-        with self.assertRaises(TimeoutError):
+        with self.assertRaises(server.SemanticDeadlineExceeded):
             with server._deadline(1):
                 time.sleep(2)
         self.assertLess(time.monotonic() - started, 1.8)
 
-    def test_pu_call_converts_timeout_to_tool_error(self):
+    def test_analyzer_exception_handler_cannot_swallow_deadline(self):
+        def analyzer_like_code():
+            try:
+                with server._deadline(1):
+                    time.sleep(2)
+            except Exception:
+                return "swallowed"
+            return "completed"
+
+        with self.assertRaises(server.SemanticDeadlineExceeded):
+            analyzer_like_code()
+
+    def test_pu_call_converts_semantic_deadline_to_tool_error(self):
         def fail():
-            raise TimeoutError("synthetic timeout")
+            raise server.SemanticDeadlineExceeded("synthetic deadline")
 
         with self.assertRaises(server.core.ToolError):
             server._pu_call(fail)
@@ -71,9 +84,11 @@ class TraceCallPathMcpTests(unittest.TestCase):
             )
 
             with mock.patch.object(
-                pu_index, "_dex_index", side_effect=TimeoutError("deadline")
+                pu_index,
+                "_dex_index",
+                side_effect=server.SemanticDeadlineExceeded("deadline"),
             ), mock.patch.object(pu_index, "_source_index") as fallback:
-                with self.assertRaises(TimeoutError):
+                with self.assertRaises(server.SemanticDeadlineExceeded):
                     pu_index.build_program_index(job, workspace, {}, force=True)
                 fallback.assert_not_called()
         finally:
