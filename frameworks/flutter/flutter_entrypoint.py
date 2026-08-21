@@ -10,6 +10,7 @@ import sys
 import tempfile
 from pathlib import Path
 
+import flutter_network as network
 import flutter_semantic as semantic
 import safe_blutter_adapter as adapter
 
@@ -19,6 +20,7 @@ SEMANTIC_COMMANDS = {
     "find_dart_strings",
     "find_dart_xrefs",
     "map_dart_to_native",
+    "extract_flutter_network_model",
 }
 INDEX_NAME = "flutter-index.sqlite"
 MANIFEST_NAME = "safe-flutter-analysis.json"
@@ -307,6 +309,10 @@ def _semantic_main() -> int:
     mapping.add_argument("output")
     mapping.add_argument("symbol")
 
+    model = sub.add_parser("extract_flutter_network_model")
+    model.add_argument("output")
+    model.add_argument("--limit", type=int, default=100)
+
     args = parser.parse_args()
     if args.command == "build_flutter_index":
         payload = _build_index_from_manifest(_output_dir(args.output))
@@ -322,8 +328,12 @@ def _semantic_main() -> int:
         payload = semantic.find_dart_xrefs(
             _index_path(args.output), args.symbol, args.direction, args.limit
         )
-    else:
+    elif args.command == "map_dart_to_native":
         payload = semantic.map_dart_to_native(_index_path(args.output), args.symbol)
+    else:
+        payload = network.extract_flutter_network_model(
+            _index_path(args.output), args.limit
+        )
     adapter._emit(payload)
     return 0 if payload.get("status") not in {"failed", "timeout", "error"} else 2
 
@@ -349,6 +359,7 @@ def main() -> int:
                 "operations": sorted(SEMANTIC_COMMANDS),
                 "max_query_results": semantic.MAX_QUERY_LIMIT,
                 "max_scan_bytes": semantic.MAX_SCAN_BYTES,
+                "network_model_max_items": network.MAX_MODEL_ITEMS,
             }
             adapter._emit(payload)
             return 0

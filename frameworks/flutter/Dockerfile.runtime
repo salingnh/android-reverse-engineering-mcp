@@ -77,6 +77,7 @@ COPY --from=runtime-builder /opt/blutter/bin/ /opt/blutter/bin/
 COPY frameworks/flutter/cache_identity.py /opt/safe-flutter/cache_identity.py
 COPY frameworks/flutter/safe_blutter_adapter.py /opt/safe-flutter/safe_blutter_adapter.py
 COPY frameworks/flutter/flutter_semantic.py /opt/safe-flutter/flutter_semantic.py
+COPY frameworks/flutter/flutter_network.py /opt/safe-flutter/flutter_network.py
 COPY frameworks/flutter/flutter_entrypoint.py /opt/safe-flutter/flutter_entrypoint.py
 COPY frameworks/flutter/tools.lock.env /opt/safe-flutter/tools.lock.env
 
@@ -93,6 +94,7 @@ RUN set -eux; \
       /opt/safe-flutter/cache_identity.py \
       /opt/safe-flutter/safe_blutter_adapter.py \
       /opt/safe-flutter/flutter_semantic.py \
+      /opt/safe-flutter/flutter_network.py \
       /opt/safe-flutter/flutter_entrypoint.py \
       /opt/blutter/blutter.py \
       /opt/blutter/extract_dart_info.py \
