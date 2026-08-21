@@ -29,7 +29,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Validate build identity
+      - name: Validate exact build identity
         id: identity
         shell: bash
         env:
@@ -40,12 +40,16 @@ jobs:
           set -euo pipefail
           source frameworks/flutter/tools.lock.env
           version="$(tr -d '[:space:]' < plugins/safe-android-reverser/VERSION)"
-          [[ "$DART_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-+][A-Za-z0-9._-]+)?$ ]]
-          [[ "$SNAPSHOT_HASH" =~ ^[0-9a-fA-F]{32,64}$ ]]
           snapshot="$(printf '%s' "$SNAPSHOT_HASH" | tr '[:upper:]' '[:lower:]')"
-          if [[ "$COMPRESSED_POINTERS" == "true" ]]; then mode=cp; else mode=ncp; fi
-          tag="dart-${DART_VERSION}-arm64-${mode}-${snapshot:0:12}"
+          tag="$(python3 frameworks/flutter/cache_identity.py \
+            --dart-version "$DART_VERSION" \
+            --snapshot-hash "$snapshot" \
+            --arch arm64 \
+            --os android \
+            --compressed-pointers "$COMPRESSED_POINTERS" \
+            --blutter-commit "$BLUTTER_COMMIT")"
           [[ "$tag" =~ ^[A-Za-z0-9_.-]+$ ]]
+          test "${#tag}" -le 128
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "blutter_repository=$BLUTTER_REPOSITORY" >> "$GITHUB_OUTPUT"
           echo "blutter_commit=$BLUTTER_COMMIT" >> "$GITHUB_OUTPUT"
@@ -95,8 +99,29 @@ jobs:
           assert payload["blutter_commit"] == sys.argv[2], payload
           assert payload["cached_binary_count"] >= 1, payload
           assert payload["network_required_at_runtime"] is False, payload
+          assert payload["network_capable_upstream_path_used"] is False, payload
           assert payload["build_on_demand_allowed"] is False, payload
+          assert payload["required_runtime_constraints"]["output_mount"] == "writable-bounded", payload
           PY
+
+      - name: Verify runtime binary and redistribution licenses
+        run: |
+          docker run --rm \
+            --network=none \
+            --read-only \
+            --cap-drop=ALL \
+            --security-opt=no-new-privileges \
+            --tmpfs=/tmp:rw,nosuid,nodev,size=256m \
+            --tmpfs=/work:rw,nosuid,nodev,size=256m \
+            --entrypoint=/bin/sh \
+            safe-android-reverser-flutter-runtime:ci \
+            -ec '
+              binary="$(find /opt/blutter/bin -maxdepth 1 -type f -name "blutter_*" -print -quit)"
+              test -n "$binary"
+              "$binary" --help >/dev/null
+              grep -q "MIT License" /opt/licenses/BLUTTER-LICENSE
+              grep -q "Redistribution and use in source and binary forms" /opt/licenses/DART-SDK-LICENSE
+            '
 
       - name: Log in to GHCR
         uses: docker/login-action@v4
