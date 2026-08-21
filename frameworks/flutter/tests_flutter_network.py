@@ -3,6 +3,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import flutter_network as network
 import flutter_semantic as semantic
@@ -222,6 +223,17 @@ class Dio extends Object {
             "package:http",
         )
         self.assertIsNone(network._client_name("dart:io", "File", "open"))
+
+    def test_candidate_text_memory_budget_is_reported(self):
+        with mock.patch.object(network, "MAX_CANDIDATE_TEXT_BYTES", 1):
+            result = self.model()
+        self.assertTrue(result["scan"]["candidate_text_bytes_truncated"])
+        self.assertEqual(result["scan"]["candidate_text_bytes_limit"], 1)
+
+    def test_wall_clock_budget_interrupts_analysis(self):
+        with mock.patch.object(network, "MAX_NETWORK_SECONDS", -1.0):
+            with self.assertRaises(network.FlutterNetworkError):
+                self.model()
 
     def test_model_does_not_return_raw_candidate_string_values(self):
         result = self.model()
