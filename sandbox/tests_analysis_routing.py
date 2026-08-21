@@ -1,0 +1,103 @@
+#!/usr/bin/env python3
+import importlib
+import os
+import tempfile
+import unittest
+import zipfile
+from pathlib import Path
+
+
+class AnalysisRoutingTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.workspace = Path(cls.tmp.name) / "workspace"
+        cls.data = Path(cls.tmp.name) / "data"
+        cls.workspace.mkdir()
+        cls.data.mkdir()
+        os.environ["SAFE_REVERSER_WORKSPACE"] = str(cls.workspace)
+        os.environ["SAFE_REVERSER_DATA_ROOT"] = str(cls.data)
+        cls.routing = importlib.import_module("analysis_routing")
+        cls.server = importlib.import_module("mcp_server_v2")
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    def make_apk(self, name: str, members: dict[str, bytes]) -> Path:
+        apk = self.workspace / name
+        with zipfile.ZipFile(apk, "w") as archive:
+            for path, content in members.items():
+                archive.writestr(path, content)
+        return apk
+
+    def test_native_android_routes_to_static_core(self):
+        route = self.routing.route_fingerprint({
+            "framework": {"type": "Native Android (Kotlin)"},
+            "native_libraries": [],
+        })
+        self.assertEqual(route["framework_id"], "native-android")
+        self.assertEqual(route["primary_profile"], "static-core")
+        self.assertEqual(route["primary_profile_status"], "available")
+        self.assertTrue(route["allow_java_decompile_as_primary"])
+
+    def test_flutter_never_routes_jadx_as_primary(self):
+        route = self.routing.route_fingerprint({
+            "framework": {"type": "Flutter"},
+            "native_libraries": [
+                "lib/arm64-v8a/libapp.so",
+                "lib/arm64-v8a/libflutter.so",
+            ],
+        })
+        self.assertEqual(route["framework_id"], "flutter")
+        self.assertEqual(route["primary_profile"], "framework-flutter")
+        self.assertEqual(route["primary_profile_status"], "planned")
+        self.assertFalse(route["allow_java_decompile_as_primary"])
+        secondary = {item["profile"]: item["purpose"] for item in route["secondary_profiles"]}
+        self.assertIn("static-core", secondary)
+        self.assertIn("host shell", secondary["static-core"])
+
+    def test_il2cpp_native_marker_overrides_generic_android_route(self):
+        route = self.routing.route_fingerprint({
+            "framework": {"type": "Native Android (Java/Kotlin)"},
+            "native_libraries": ["lib/arm64-v8a/libil2cpp.so"],
+        })
+        self.assertEqual(route["framework_id"], "unity-il2cpp")
+        self.assertEqual(route["primary_profile"], "framework-il2cpp")
+        self.assertFalse(route["allow_java_decompile_as_primary"])
+
+    def test_wrapped_fingerprint_returns_flutter_analysis_route(self):
+        self.make_apk(
+            "flutter.apk",
+            {
+                "classes.dex": b"Lio/flutter/embedding/android/FlutterActivity;",
+                "lib/arm64-v8a/libflutter.so": b"flutter",
+                "lib/arm64-v8a/libapp.so": b"dart-aot",
+                "assets/flutter_assets/AssetManifest.json": b"{}",
+            },
+        )
+        result = self.server.fingerprint({"artifact": "flutter.apk"})
+        self.assertEqual(result["framework"]["type"], "Flutter")
+        self.assertEqual(result["analysis_route"]["primary_profile"], "framework-flutter")
+        self.assertFalse(result["analysis_route"]["allow_java_decompile_as_primary"])
+
+    def test_route_analysis_tool_is_registered(self):
+        names = {tool["name"] for tool in self.server.core.TOOLS}
+        self.assertIn("route_analysis", names)
+        self.assertIs(self.server.core.TOOL_HANDLERS["route_analysis"], self.server.route_analysis)
+
+    def test_health_exposes_profile_registry(self):
+        result = self.server.health({})
+        self.assertTrue(result["analysis_routing"]["enabled"])
+        self.assertEqual(
+            result["analysis_routing"]["profiles"]["static-core"]["status"],
+            "available",
+        )
+        self.assertEqual(
+            result["analysis_routing"]["profiles"]["framework-flutter"]["status"],
+            "planned",
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()
