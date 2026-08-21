@@ -1,0 +1,106 @@
+# syntax=docker/dockerfile:1.7
+FROM ubuntu:24.04 AS runtime-builder
+
+ARG DEBIAN_FRONTEND=noninteractive
+ARG BLUTTER_REPOSITORY=https://github.com/worawit/blutter.git
+ARG BLUTTER_COMMIT=4a60ac648bf448c5a7596437243bcd0b9376fdf0
+ARG DART_VERSION
+ARG SNAPSHOT_HASH
+ARG TARGET_ARCH=arm64
+ARG COMPRESSED_POINTERS=true
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      ca-certificates git python3 python3-pyelftools python3-requests \
+      cmake ninja-build build-essential pkg-config libicu-dev libcapstone-dev \
+ && rm -rf /var/lib/apt/lists/*
+
+RUN set -eux; \
+    test -n "$DART_VERSION"; \
+    test -n "$SNAPSHOT_HASH"; \
+    git init /opt/blutter; \
+    git -C /opt/blutter remote add origin "$BLUTTER_REPOSITORY"; \
+    git -C /opt/blutter fetch --depth 1 origin "$BLUTTER_COMMIT"; \
+    git -C /opt/blutter checkout --detach FETCH_HEAD; \
+    test "$(git -C /opt/blutter rev-parse HEAD)" = "$BLUTTER_COMMIT"; \
+    test -f /opt/blutter/LICENSE; \
+    grep -q "MIT License" /opt/blutter/LICENSE
+
+COPY frameworks/flutter/cache_identity.py /opt/cache_identity.py
+COPY frameworks/flutter/build_runtime.py /opt/build_runtime.py
+
+RUN python3 /opt/build_runtime.py \
+      --dart-version "$DART_VERSION" \
+      --snapshot-hash "$SNAPSHOT_HASH" \
+      --arch "$TARGET_ARCH" \
+      --compressed-pointers "$COMPRESSED_POINTERS" \
+      --blutter-commit "$BLUTTER_COMMIT" \
+ && find /opt/blutter/bin -maxdepth 1 -type f -name 'blutter_*' -print -quit | grep -q . \
+ && test -s /opt/licenses/DART-SDK-LICENSE
+
+FROM ubuntu:24.04
+
+ARG DEBIAN_FRONTEND=noninteractive
+ARG SAFE_REVERSER_VERSION
+ARG SAFE_REVERSER_BUILD_COMMIT=unknown
+ARG BLUTTER_COMMIT=4a60ac648bf448c5a7596437243bcd0b9376fdf0
+ARG DART_VERSION
+ARG SNAPSHOT_HASH
+ARG TARGET_ARCH=arm64
+ARG COMPRESSED_POINTERS=true
+
+LABEL org.opencontainers.image.title="safe-android-reverser-flutter-runtime" \
+      org.opencontainers.image.version="${SAFE_REVERSER_VERSION}" \
+      org.opencontainers.image.revision="${SAFE_REVERSER_BUILD_COMMIT}" \
+      org.opencontainers.image.description="Exact prebuilt offline Blutter runtime cache" \
+      org.opencontainers.image.licenses="Apache-2.0 AND MIT AND BSD-3-Clause" \
+      io.safe-reverser.blutter.commit="${BLUTTER_COMMIT}" \
+      io.safe-reverser.dart.version="${DART_VERSION}" \
+      io.safe-reverser.dart.snapshot="${SNAPSHOT_HASH}" \
+      io.safe-reverser.dart.arch="${TARGET_ARCH}" \
+      io.safe-reverser.dart.compressed-pointers="${COMPRESSED_POINTERS}"
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      ca-certificates python3 python3-pyelftools python3-requests libcapstone4 libicu74 \
+ && rm -rf /var/lib/apt/lists/* \
+ && useradd --uid 10001 --create-home --home-dir /nonexistent --shell /usr/sbin/nologin reverser \
+ && mkdir -p /opt/blutter/bin /opt/safe-flutter /opt/licenses /input /output /work \
+ && chown -R 10001:10001 /output /work
+
+COPY --from=runtime-builder /opt/blutter/LICENSE /opt/licenses/BLUTTER-LICENSE
+COPY --from=runtime-builder /opt/licenses/DART-SDK-LICENSE /opt/licenses/DART-SDK-LICENSE
+COPY --from=runtime-builder /opt/blutter/blutter.py /opt/blutter/blutter.py
+COPY --from=runtime-builder /opt/blutter/extract_dart_info.py /opt/blutter/extract_dart_info.py
+COPY --from=runtime-builder /opt/blutter/dartvm_fetch_build.py /opt/blutter/dartvm_fetch_build.py
+COPY --from=runtime-builder /opt/blutter/bin/ /opt/blutter/bin/
+COPY frameworks/flutter/cache_identity.py /opt/safe-flutter/cache_identity.py
+COPY frameworks/flutter/safe_blutter_adapter.py /opt/safe-flutter/safe_blutter_adapter.py
+COPY frameworks/flutter/tools.lock.env /opt/safe-flutter/tools.lock.env
+
+RUN set -eux; \
+    test -n "$SAFE_REVERSER_VERSION"; \
+    test -s /opt/licenses/BLUTTER-LICENSE; \
+    test -s /opt/licenses/DART-SDK-LICENSE; \
+    grep -q "MIT License" /opt/licenses/BLUTTER-LICENSE; \
+    grep -q "Redistribution and use in source and binary forms" /opt/licenses/DART-SDK-LICENSE; \
+    binary="$(find /opt/blutter/bin -maxdepth 1 -type f -name 'blutter_*' -print -quit)"; \
+    test -n "$binary"; \
+    "$binary" --help >/dev/null; \
+    python3 -m py_compile /opt/safe-flutter/cache_identity.py /opt/safe-flutter/safe_blutter_adapter.py /opt/blutter/blutter.py /opt/blutter/extract_dart_info.py /opt/blutter/dartvm_fetch_build.py; \
+    chmod 0555 /opt/safe-flutter/cache_identity.py /opt/safe-flutter/safe_blutter_adapter.py; \
+    chmod -R a-w /opt/blutter /opt/safe-flutter /opt/licenses
+
+ENV SAFE_FLUTTER_INPUT=/input \
+    SAFE_FLUTTER_OUTPUT=/output \
+    SAFE_BLUTTER_ROOT=/opt/blutter \
+    SAFE_BLUTTER_COMMIT=${BLUTTER_COMMIT} \
+    SAFE_REVERSER_IMAGE_VERSION=${SAFE_REVERSER_VERSION} \
+    SAFE_REVERSER_BUILD_COMMIT=${SAFE_REVERSER_BUILD_COMMIT} \
+    HOME=/tmp/home \
+    LANG=C.UTF-8 \
+    LC_ALL=C.UTF-8
+
+WORKDIR /work
+USER 10001:10001
+ENTRYPOINT ["python3", "/opt/safe-flutter/safe_blutter_adapter.py"]
