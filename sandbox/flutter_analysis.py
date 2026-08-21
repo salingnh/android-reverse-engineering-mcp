@@ -14,7 +14,7 @@ MAX_ASSET_PREVIEW_BYTES = 64 * 1024
 MAX_ASSET_PREVIEWS = 50
 
 DART_VERSION_RE = re.compile(
-    rb"Dart VM version:\s*([0-9]+\.[0-9]+\.[0-9]+(?:[-+A-Za-z0-9._ ]{0,96})?)",
+    rb"Dart VM version:\s*([0-9]+\.[0-9]+\.[0-9]+(?:[-+][A-Za-z0-9._-]+)?)",
     re.IGNORECASE,
 )
 SNAPSHOT_HASH_RE = re.compile(
