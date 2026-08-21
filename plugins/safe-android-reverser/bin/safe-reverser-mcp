@@ -1,7 +1,20 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-IMAGE="${SAFE_REVERSER_IMAGE:-ghcr.io/salingnh/safe-android-reverser:0.2.0}"
+fail() { printf 'safe-android-reverser: %s\n' "$*" >&2; exit 1; }
+info() { printf 'safe-android-reverser: %s\n' "$*" >&2; }
+
+PLUGIN_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+VERSION_FILE="$PLUGIN_ROOT/VERSION"
+[[ -r "$VERSION_FILE" ]] || fail "missing plugin VERSION file: $VERSION_FILE"
+VERSION="$(tr -d '[:space:]' < "$VERSION_FILE")"
+[[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail "invalid plugin version: $VERSION"
+
+IMAGE_OVERRIDDEN=0
+if [[ -n "${SAFE_REVERSER_IMAGE+x}" ]]; then
+  IMAGE_OVERRIDDEN=1
+fi
+IMAGE="${SAFE_REVERSER_IMAGE:-ghcr.io/salingnh/safe-android-reverser:$VERSION}"
 RUNTIME="${SAFE_REVERSER_RUNTIME:-auto}"
 PROJECT_DIR="${SAFE_REVERSER_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}"
 DATA_DIR="${SAFE_REVERSER_DATA_DIR:-${CLAUDE_PLUGIN_DATA:-$HOME/.local/share/safe-android-reverser}}"
@@ -9,9 +22,6 @@ MEMORY="${SAFE_REVERSER_MEMORY:-4g}"
 CPUS="${SAFE_REVERSER_CPUS:-2}"
 PIDS="${SAFE_REVERSER_PIDS_LIMIT:-256}"
 AUTO_PULL="${SAFE_REVERSER_AUTO_PULL:-1}"
-
-fail() { printf 'safe-android-reverser: %s\n' "$*" >&2; exit 1; }
-info() { printf 'safe-android-reverser: %s\n' "$*" >&2; }
 
 choose_runtime() {
   if [[ "$RUNTIME" != "auto" ]]; then
@@ -28,13 +38,32 @@ choose_runtime() {
   fi
 }
 
+image_version_label() {
+  if [[ "$RUNTIME" == "podman" ]]; then
+    "$RUNTIME" image inspect "$IMAGE" --format '{{ index .Labels "org.opencontainers.image.version" }}' 2>/dev/null || true
+  else
+    "$RUNTIME" image inspect "$IMAGE" --format '{{ index .Config.Labels "org.opencontainers.image.version" }}' 2>/dev/null || true
+  fi
+}
+
+image_id() {
+  "$RUNTIME" image inspect "$IMAGE" --format '{{.Id}}' 2>/dev/null || true
+}
+
 RUNTIME="$(choose_runtime)"
 [[ -d "$PROJECT_DIR" ]] || fail "project directory not found: $PROJECT_DIR"
-mkdir -p "$DATA_DIR"
+mkdir -p "$DATA_DIR" || fail "cannot create data directory: $DATA_DIR"
 PROJECT_DIR="$(cd "$PROJECT_DIR" && pwd -P)"
 DATA_DIR="$(cd "$DATA_DIR" && pwd -P)"
 HOST_UID="$(id -u)"
 HOST_GID="$(id -g)"
+
+[[ -w "$DATA_DIR" ]] || fail "data directory is not writable by uid $HOST_UID:$HOST_GID: $DATA_DIR"
+PROBE="$DATA_DIR/.safe-reverser-write-test-$$"
+touch "$PROBE" 2>/dev/null || fail "cannot write to data directory: $DATA_DIR"
+rm -f "$PROBE"
+mkdir -p "$DATA_DIR/jobs" || fail "cannot create jobs directory: $DATA_DIR/jobs"
+[[ -w "$DATA_DIR/jobs" ]] || fail "jobs directory is not writable by uid $HOST_UID:$HOST_GID: $DATA_DIR/jobs"
 
 if ! "$RUNTIME" image inspect "$IMAGE" >/dev/null 2>&1; then
   if [[ "$AUTO_PULL" != "1" ]]; then
@@ -47,6 +76,13 @@ if ! "$RUNTIME" image inspect "$IMAGE" >/dev/null 2>&1; then
   "$RUNTIME" image inspect "$IMAGE" >/dev/null 2>&1 || fail "sandbox image is still unavailable after pull: $IMAGE"
 fi
 
+if [[ "$IMAGE_OVERRIDDEN" == "0" ]]; then
+  ACTUAL_IMAGE_VERSION="$(image_version_label)"
+  [[ -n "$ACTUAL_IMAGE_VERSION" ]] || fail "sandbox image $IMAGE is missing org.opencontainers.image.version metadata; reinstall/update the plugin image"
+  [[ "$ACTUAL_IMAGE_VERSION" == "$VERSION" ]] || fail "plugin/image version mismatch: plugin=$VERSION image=$ACTUAL_IMAGE_VERSION ($IMAGE)"
+fi
+
+IMAGE_ID="$(image_id)"
 COMMON=(
   run --rm --interactive
   --network=none
@@ -58,6 +94,9 @@ COMMON=(
   --cpus="$CPUS"
   --tmpfs=/tmp:rw,nosuid,nodev,size=1g
   --tmpfs=/work:rw,nosuid,nodev,size=2g
+  --env="SAFE_REVERSER_PLUGIN_VERSION=$VERSION"
+  --env="SAFE_REVERSER_IMAGE_REF=$IMAGE"
+  --env="SAFE_REVERSER_IMAGE_ID=$IMAGE_ID"
 )
 
 if [[ "$RUNTIME" == "podman" ]]; then
