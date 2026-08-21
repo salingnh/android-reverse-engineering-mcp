@@ -54,6 +54,7 @@ LABEL org.opencontainers.image.title="safe-android-reverser-flutter-runtime" \
       org.opencontainers.image.revision="${SAFE_REVERSER_BUILD_COMMIT}" \
       org.opencontainers.image.description="Exact prebuilt offline Blutter runtime cache" \
       org.opencontainers.image.licenses="Apache-2.0 AND MIT AND BSD-3-Clause" \
+      io.safe-reverser.runtime-cache.schema="2" \
       io.safe-reverser.blutter.commit="${BLUTTER_COMMIT}" \
       io.safe-reverser.dart.version="${DART_VERSION}" \
       io.safe-reverser.dart.snapshot="${SNAPSHOT_HASH}" \
