@@ -160,6 +160,12 @@ class Dio extends Object {
         self.assertEqual(xref["caller"]["native_offset_hex"], "0x1234")
         self.assertEqual(xref["target"]["library_url"], "package:dio/src/dio.dart")
 
+    def test_http_client_limit_prioritizes_app_xref_over_library_symbols(self):
+        result = self.model(limit=1)
+        self.assertEqual(len(result["http_clients"]), 1)
+        self.assertEqual(result["http_clients"][0]["evidence_kind"], "xref-call-adjacency")
+        self.assertEqual(result["http_clients"][0]["caller"]["name"], "login")
+
     def test_object_pool_endpoint_has_no_fabricated_function_owner(self):
         result = self.model()
         endpoint = next(
@@ -211,6 +217,16 @@ class Dio extends Object {
             "https://api.example.com/users/%30%31%32%33%34%35%36%37%38%39%61%62%63%64%65%66%30%31%32%33%34%35%36%37%38%39%61%62%63%64%65%66"
         )
         self.assertEqual(endpoint["path"], "/users/{redacted}")
+
+    def test_ipv6_host_is_validated_and_rendered_with_brackets(self):
+        endpoint = network._safe_endpoint_from_url("https://[2001:db8::1]:8443/api/v1")
+        self.assertEqual(endpoint["host"], "2001:db8::1")
+        self.assertEqual(endpoint["sanitized_url"], "https://[2001:db8::1]:8443/api/v1")
+
+    def test_invalid_or_oversized_host_is_rejected(self):
+        self.assertIsNone(network._safe_endpoint_from_url("https://bad_host.example/api"))
+        oversized = "a" * 64 + ".example.com"
+        self.assertIsNone(network._safe_endpoint_from_url(f"https://{oversized}/api"))
 
     def test_short_crypto_terms_require_token_boundaries(self):
         self.assertEqual(network._keyword_hits("versatile", network.CRYPTO_TERMS), [])
