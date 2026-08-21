@@ -44,39 +44,74 @@ def _lib_paths(libdir: Path) -> tuple[Path, Path]:
     return libapp, libflutter
 
 
-def _import_blutter():
-    sys.path.insert(0, str(BLUTTER_ROOT))
+def _import_runtime_helpers():
+    if str(BLUTTER_ROOT) not in sys.path:
+        sys.path.insert(0, str(BLUTTER_ROOT))
     try:
-        from blutter import BlutterInput, get_dart_lib_info  # type: ignore
+        from blutter import BlutterInput  # type: ignore
+        from dartvm_fetch_build import DartLibInfo  # type: ignore
+        from extract_dart_info import extract_libflutter_info, extract_snapshot_hash_flags  # type: ignore
     except Exception as exc:
         raise AdapterError(f"cannot import pinned Blutter source: {type(exc).__name__}: {exc}") from exc
-    return BlutterInput, get_dart_lib_info
+    return BlutterInput, DartLibInfo, extract_snapshot_hash_flags, extract_libflutter_info
 
 
-def _runtime_info(libdir: Path) -> tuple[Any, dict[str, Any]]:
+def _runtime_info(libdir: Path) -> dict[str, Any]:
+    """Identify only locally observable runtime data.
+
+    Upstream Blutter's `extract_dart_info()` can perform HTTP requests when a
+    Flutter engine does not embed a stable Dart version. This adapter never calls
+    that network-capable path. If the Dart version cannot be recovered from the
+    local ELF files, the result is explicitly `runtime_identity_incomplete`.
+    """
+
     libapp, libflutter = _lib_paths(libdir)
-    BlutterInput, get_dart_lib_info = _import_blutter()
+    BlutterInput, DartLibInfo, extract_snapshot_hash_flags, extract_libflutter_info = (
+        _import_runtime_helpers()
+    )
     try:
-        info = get_dart_lib_info(str(libapp), str(libflutter))
+        snapshot_hash, flags = extract_snapshot_hash_flags(str(libapp))
+        engine_ids, dart_version, arch, os_name = extract_libflutter_info(str(libflutter))
     except SystemExit as exc:
         raise AdapterError(f"Blutter runtime identification failed: {exc}") from exc
     except Exception as exc:
         raise AdapterError(f"Blutter runtime identification failed: {type(exc).__name__}: {exc}") from exc
+
+    base = {
+        "dart_version": dart_version,
+        "os": str(os_name),
+        "arch": str(arch),
+        "snapshot_hash": str(snapshot_hash),
+        "engine_ids": [str(item) for item in engine_ids],
+        "flags": [str(item) for item in flags[:200]],
+        "compressed_pointers": "compressed-pointers" in flags,
+        "runtime_key": None,
+        "expected_binary": None,
+        "binary_cached": False,
+        "identity_status": "identified" if dart_version else "runtime_identity_incomplete",
+    }
+    if not dart_version:
+        return base
+
+    info = DartLibInfo(
+        str(dart_version),
+        str(os_name),
+        str(arch),
+        "compressed-pointers" in flags,
+        str(snapshot_hash),
+    )
     probe = BlutterInput(str(libapp), info, "/output/probe", False, False, False)
     binary = Path(probe.blutter_file).resolve()
     if binary != BLUTTER_ROOT and BLUTTER_ROOT not in binary.parents:
         raise AdapterError("derived Blutter binary path escapes pinned analyzer root")
-    payload = {
-        "dart_version": str(info.version),
-        "os": str(info.os_name),
-        "arch": str(info.arch),
-        "snapshot_hash": info.snapshot_hash,
-        "compressed_pointers": bool(info.has_compressed_ptrs),
-        "runtime_key": str(info.lib_name),
-        "expected_binary": str(binary.relative_to(BLUTTER_ROOT)),
-        "binary_cached": binary.is_file(),
-    }
-    return info, payload
+    base.update(
+        {
+            "runtime_key": str(info.lib_name),
+            "expected_binary": str(binary.relative_to(BLUTTER_ROOT)),
+            "binary_cached": binary.is_file(),
+        }
+    )
+    return base
 
 
 def health() -> dict[str, Any]:
@@ -84,14 +119,18 @@ def health() -> dict[str, Any]:
     bin_dir = BLUTTER_ROOT / "bin"
     if bin_dir.is_dir():
         binaries = sorted(
-            path.name for path in bin_dir.iterdir() if path.is_file() and path.name.startswith("blutter_")
+            path.name
+            for path in bin_dir.iterdir()
+            if path.is_file() and path.name.startswith("blutter_")
         )[:500]
     return {
+        "status": "ok",
         "profile": "framework-flutter",
         "adapter": "safe-blutter-adapter",
         "blutter_commit": BLUTTER_COMMIT,
         "blutter_root": str(BLUTTER_ROOT),
         "network_required_at_runtime": False,
+        "network_capable_upstream_path_used": False,
         "build_on_demand_allowed": False,
         "cached_binary_count": len(binaries),
         "cached_binaries": binaries,
@@ -102,15 +141,22 @@ def inspect(libdir_value: str) -> dict[str, Any]:
     libdir = _safe_under(INPUT_ROOT, libdir_value)
     if not libdir.is_dir():
         raise AdapterError("libdir must be a directory")
-    _, runtime = _runtime_info(libdir)
+    runtime = _runtime_info(libdir)
+    if runtime["identity_status"] != "identified":
+        status = "runtime_identity_incomplete"
+        next_action = "publish a cache entry from a controlled builder after resolving the engine/Dart version outside the analysis runtime"
+    elif runtime["binary_cached"]:
+        status = "ready"
+        next_action = "run_analyze"
+    else:
+        status = "runtime_cache_miss"
+        next_action = "publish a framework-flutter image containing the exact prebuilt runtime analyzer"
     return {
-        "status": "ready" if runtime["binary_cached"] else "runtime_cache_miss",
+        "status": status,
         "profile": "framework-flutter",
         "blutter_commit": BLUTTER_COMMIT,
         "runtime": runtime,
-        "next_action": (
-            "run_analyze" if runtime["binary_cached"] else "publish a framework-flutter image containing the exact prebuilt runtime analyzer"
-        ),
+        "next_action": next_action,
     }
 
 
@@ -123,8 +169,17 @@ def analyze(libdir_value: str, output_value: str, timeout: int) -> dict[str, Any
         raise AdapterError("output must be a directory")
     output.mkdir(parents=True, exist_ok=True)
     libapp, _ = _lib_paths(libdir)
-    _, runtime = _runtime_info(libdir)
-    binary = (BLUTTER_ROOT / runtime["expected_binary"]).resolve()
+    runtime = _runtime_info(libdir)
+    if runtime["identity_status"] != "identified":
+        return {
+            "status": "runtime_identity_incomplete",
+            "profile": "framework-flutter",
+            "blutter_commit": BLUTTER_COMMIT,
+            "runtime": runtime,
+            "executed": False,
+            "reason": "network-based Dart version lookup is disabled in the analysis runtime",
+        }
+    binary = (BLUTTER_ROOT / str(runtime["expected_binary"])).resolve()
     if not runtime["binary_cached"]:
         return {
             "status": "runtime_cache_miss",
@@ -169,13 +224,13 @@ def analyze(libdir_value: str, output_value: str, timeout: int) -> dict[str, Any
             "output": raw[-MAX_PROCESS_OUTPUT:],
         }
 
-    generated = []
+    all_files = []
     if output.is_dir():
-        generated = sorted(
-            str(path.relative_to(output))
-            for path in output.rglob("*")
-            if path.is_file()
-        )[:20_000]
+        for path in output.rglob("*"):
+            if path.is_file():
+                all_files.append(str(path.relative_to(output)))
+                if len(all_files) > 20_000:
+                    break
     return {
         "status": "ok" if proc.returncode == 0 else "failed",
         "profile": "framework-flutter",
@@ -184,13 +239,15 @@ def analyze(libdir_value: str, output_value: str, timeout: int) -> dict[str, Any
         "executed": True,
         "exit_code": proc.returncode,
         "output": proc.stdout[-MAX_PROCESS_OUTPUT:],
-        "generated_files": generated,
-        "generated_files_truncated": len(generated) >= 20_000,
+        "generated_files": sorted(all_files[:20_000]),
+        "generated_files_truncated": len(all_files) > 20_000,
     }
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Offline-safe wrapper around a pinned Blutter checkout")
+    parser = argparse.ArgumentParser(
+        description="Offline-safe wrapper around a pinned Blutter checkout"
+    )
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("health")
     inspect_parser = sub.add_parser("inspect")
@@ -208,7 +265,7 @@ def main() -> int:
         else:
             payload = analyze(args.libdir, args.output, args.timeout)
         _emit(payload)
-        return 0 if payload.get("status") not in {"failed", "timeout"} else 2
+        return 0 if payload.get("status") not in {"failed", "timeout", "error"} else 2
     except AdapterError as exc:
         _emit({"status": "error", "error": str(exc)})
         return 2
