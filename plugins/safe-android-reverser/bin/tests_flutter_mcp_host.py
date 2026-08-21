@@ -13,6 +13,7 @@ class FlutterMcpHostTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         root = Path(self.tmp.name)
+        self.root = root
         self.project = root / "project"
         self.data = root / "data"
         self.project.mkdir()
@@ -33,7 +34,9 @@ class FlutterMcpHostTests(unittest.TestCase):
         self.env_patch = mock.patch.dict(os.environ, env, clear=False)
         self.env_patch.start()
         path = Path(__file__).with_name("flutter-mcp-host.py")
-        spec = importlib.util.spec_from_file_location("flutter_mcp_host_tested", path)
+        spec = importlib.util.spec_from_file_location(
+            f"flutter_mcp_host_tested_{id(self)}", path
+        )
         assert spec and spec.loader
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
@@ -75,6 +78,31 @@ class FlutterMcpHostTests(unittest.TestCase):
         self.assertNotIn("docker.sock", joined)
         self.assertNotIn("podman.sock", joined)
 
+    def test_resource_limits_are_typed_not_generic_suffixes(self):
+        with mock.patch.object(self.host, "CPUS", "2g"), self.assertRaises(
+            self.host.ControllerError
+        ):
+            self.host._validate_config()
+        with mock.patch.object(self.host, "MEMORY", "0"), self.assertRaises(
+            self.host.ControllerError
+        ):
+            self.host._validate_config()
+        with mock.patch.object(
+            self.host, "OUTPUT_TMPFS_SIZE", "-1g"
+        ), self.assertRaises(self.host.ControllerError):
+            self.host._validate_config()
+
+    def test_flutter_data_symlink_cannot_escape_plugin_data_root(self):
+        outside = self.root / "outside"
+        outside.mkdir()
+        link = self.data / "flutter"
+        try:
+            link.symlink_to(outside, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            self.skipTest("symlinks unavailable")
+        with self.assertRaises(self.host.ControllerError):
+            self.host._flutter_data_root()
+
     def test_runtime_image_reference_is_derived_not_caller_controlled(self):
         prepared = self.prepared()
         image, runtime = self.host._runtime_image_reference(prepared)
@@ -100,13 +128,20 @@ class FlutterMcpHostTests(unittest.TestCase):
         with mock.patch.object(self.host, "_inspect_image", return_value=info):
             ready, _ = self.host._ensure_runtime_image(image, runtime, "c" * 40)
         self.assertTrue(ready)
-        bad = {"Config": {"Labels": {**labels, "io.safe-reverser.runtime-cache.schema": "1"}}}
-        with mock.patch.object(self.host, "_inspect_image", return_value=bad), self.assertRaises(
-            self.host.ControllerError
-        ):
+        bad = {
+            "Config": {
+                "Labels": {
+                    **labels,
+                    "io.safe-reverser.runtime-cache.schema": "1",
+                }
+            }
+        }
+        with mock.patch.object(
+            self.host, "_inspect_image", return_value=bad
+        ), self.assertRaises(self.host.ControllerError):
             self.host._ensure_runtime_image(image, runtime, "c" * 40)
 
-    def test_analyze_orchestrates_prepare_verify_and_execute(self):
+    def test_analyze_orchestrates_prepare_verify_execute_and_cleanup(self):
         prepared = self.prepared()
         image = prepared["recommended_image"]
         analysis = {
@@ -114,8 +149,16 @@ class FlutterMcpHostTests(unittest.TestCase):
             "analysis_id": "flutter-aot:" + "d" * 64,
             "semantic_index": {"status": "ok"},
         }
-        with mock.patch.object(self.host, "_ensure_base_image", return_value={}), mock.patch.object(
-            self.host, "_prepare", return_value=prepared
+
+        def fake_prepare(job, _artifact):
+            (job / "input").mkdir()
+            (job / "input" / "libapp.so").write_bytes(b"app")
+            return prepared
+
+        with mock.patch.object(
+            self.host, "_ensure_base_image", return_value={}
+        ), mock.patch.object(
+            self.host, "_prepare", side_effect=fake_prepare
         ) as prepare_call, mock.patch.object(
             self.host, "_ensure_runtime_image", return_value=(True, "ready")
         ), mock.patch.object(
@@ -130,14 +173,23 @@ class FlutterMcpHostTests(unittest.TestCase):
         execute_call.assert_called_once()
         self.assertEqual(execute_call.call_args.args[1], image)
         job = self.host._job(result["job_id"])
+        self.assertFalse((job / "input").exists())
         meta = self.host._read_job(job)
         self.assertEqual(meta["status"], "ok")
         self.assertEqual(meta["runtime_image"], image)
 
-    def test_missing_runtime_cache_is_explicit_and_never_executes_analyzer(self):
+    def test_missing_runtime_cache_is_explicit_never_executes_and_cleans_input(self):
         prepared = self.prepared()
-        with mock.patch.object(self.host, "_ensure_base_image", return_value={}), mock.patch.object(
-            self.host, "_prepare", return_value=prepared
+
+        def fake_prepare(job, _artifact):
+            (job / "input").mkdir()
+            (job / "input" / "libapp.so").write_bytes(b"app")
+            return prepared
+
+        with mock.patch.object(
+            self.host, "_ensure_base_image", return_value={}
+        ), mock.patch.object(
+            self.host, "_prepare", side_effect=fake_prepare
         ), mock.patch.object(
             self.host,
             "_ensure_runtime_image",
@@ -147,6 +199,22 @@ class FlutterMcpHostTests(unittest.TestCase):
         self.assertEqual(result["status"], "runtime_cache_unavailable")
         self.assertFalse(result["executed"])
         execute_call.assert_not_called()
+        job = self.host._job(result["job_id"])
+        self.assertFalse((job / "input").exists())
+
+    def test_query_and_symbol_bounds_match_semantic_surface(self):
+        with self.assertRaises(self.host.ControllerError):
+            self.host._query_text("q" * 513, "query", self.host.MAX_QUERY_TEXT)
+        self.assertEqual(
+            self.host._query_text(
+                "s" * 1024, "symbol", self.host.MAX_SYMBOL_TEXT
+            ),
+            "s" * 1024,
+        )
+        with self.assertRaises(self.host.ControllerError):
+            self.host._query_text(
+                "s" * 1025, "symbol", self.host.MAX_SYMBOL_TEXT
+            )
 
     def test_project_symlinks_and_path_escape_are_rejected(self):
         with self.assertRaises(self.host.ControllerError):
