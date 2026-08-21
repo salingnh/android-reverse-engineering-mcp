@@ -128,7 +128,10 @@ class Auth extends Object {
 
     def test_rejects_oversized_untrusted_line_and_removes_partial_index(self):
         bad = self.root / "asm" / "app" / "bad.dart"
-        bad.write_bytes(b"// lib: , url: package:app/bad.dart\n" + b"A" * (semantic.MAX_LINE_BYTES + 10))
+        bad.write_bytes(
+            b"// lib: , url: package:app/bad.dart\n"
+            + b"A" * (semantic.MAX_LINE_BYTES + 10)
+        )
         with self.assertRaises(semantic.FlutterIndexError):
             self.build()
         self.assertFalse(self.index.exists())
@@ -148,21 +151,10 @@ class FlutterSemanticEntrypointTests(unittest.TestCase):
         cls.output_root = root / "output"
         cls.blutter_root = root / "blutter"
         (cls.input_root / "libs").mkdir(parents=True)
-        (cls.output_root / "job" / "asm" / "app").mkdir(parents=True)
+        cls.output_root.mkdir()
         (cls.blutter_root / "bin").mkdir(parents=True)
         (cls.input_root / "libs" / "libapp.so").write_bytes(b"app-aot")
         (cls.input_root / "libs" / "libflutter.so").write_bytes(b"flutter")
-        (cls.output_root / "job" / "asm" / "app" / "api.dart").write_text(
-            """// lib: , url: package:app/api.dart
-// class id: 1, size: 0x20
-class Api extends Object {
-  void ping() {
-    // ** addr: 0x100, size: 0x20
-  }
-}
-""",
-            encoding="utf-8",
-        )
         os.environ["SAFE_FLUTTER_INPUT"] = str(cls.input_root)
         os.environ["SAFE_FLUTTER_OUTPUT"] = str(cls.output_root)
         os.environ["SAFE_BLUTTER_ROOT"] = str(cls.blutter_root)
@@ -174,20 +166,73 @@ class Api extends Object {
     def tearDownClass(cls):
         cls.tmp.cleanup()
 
-    def test_build_index_uses_local_runtime_and_libapp_hash(self):
-        runtime = {
+    def setUp(self):
+        self.job_name = self._testMethodName
+        self.job = self.output_root / self.job_name
+        (self.job / "asm" / "app").mkdir(parents=True)
+        (self.job / "asm" / "app" / "api.dart").write_text(
+            """// lib: , url: package:app/api.dart
+// class id: 1, size: 0x20
+class Api extends Object {
+  void ping() {
+    // ** addr: 0x100, size: 0x20
+  }
+}
+""",
+            encoding="utf-8",
+        )
+
+    def runtime(self):
+        return {
             "identity_status": "identified",
             "dart_version": "3.5.4",
             "arch": "arm64",
             "os": "android",
             "snapshot_hash": "a" * 32,
         }
-        args = mock.Mock(libdir="libs", output="job")
-        with mock.patch.object(self.adapter, "_runtime_info", return_value=runtime):
-            result = self.entry._build_index(args)
+
+    def test_build_index_requires_profile_generated_manifest(self):
+        with self.assertRaises(self.adapter.AdapterError):
+            self.entry._build_index_from_manifest(self.job)
+
+    def test_manifest_binds_index_to_local_libapp_hash(self):
+        manifest = self.entry._write_manifest(
+            self.job, self.input_root / "libs", self.runtime()
+        )
+        result = self.entry._build_index_from_manifest(self.job)
         self.assertEqual(result["status"], "ok")
-        self.assertTrue((self.output_root / "job" / self.entry.INDEX_NAME).is_file())
-        self.assertTrue(result["analysis_id"].startswith("flutter-aot:"))
+        self.assertTrue((self.job / self.entry.INDEX_NAME).is_file())
+        self.assertEqual(result["artifact_sha256"], manifest["artifact_sha256"])
+        self.assertEqual(result["analysis_id"], manifest["analysis_id"])
+
+    def test_successful_analyze_automatically_builds_semantic_index(self):
+        args = mock.Mock(libdir="libs", output=self.job_name, timeout=10)
+        with mock.patch.object(
+            self.adapter,
+            "analyze",
+            return_value={
+                "status": "ok",
+                "profile": "framework-flutter",
+                "runtime": self.runtime(),
+                "executed": True,
+            },
+        ):
+            result = self.entry._analyze_command(args)
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["semantic_index"]["status"], "ok")
+        self.assertTrue((self.job / self.entry.MANIFEST_NAME).is_file())
+        self.assertTrue((self.job / self.entry.INDEX_NAME).is_file())
+
+    def test_manifest_rejects_different_blutter_revision(self):
+        manifest = self.entry._write_manifest(
+            self.job, self.input_root / "libs", self.runtime()
+        )
+        path = self.job / self.entry.MANIFEST_NAME
+        os.chmod(path, 0o644)
+        manifest["blutter_commit"] = "e" * 40
+        path.write_text(__import__("json").dumps(manifest), encoding="utf-8")
+        with self.assertRaises(self.adapter.AdapterError):
+            self.entry._read_manifest(self.job)
 
     def test_index_path_cannot_escape_output_root(self):
         with self.assertRaises(self.adapter.AdapterError):
