@@ -39,6 +39,13 @@ RUN apt-get update \
 
 FROM eclipse-temurin:21-jre-jammy
 ARG DEBIAN_FRONTEND=noninteractive
+ARG SAFE_REVERSER_VERSION
+ARG SAFE_REVERSER_BUILD_COMMIT=unknown
+
+LABEL org.opencontainers.image.title="safe-android-reverser" \
+      org.opencontainers.image.version="${SAFE_REVERSER_VERSION}" \
+      org.opencontainers.image.revision="${SAFE_REVERSER_BUILD_COMMIT}"
+
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates python3 file binutils libmagic1 \
  && rm -rf /var/lib/apt/lists/* \
@@ -49,21 +56,29 @@ RUN apt-get update \
 COPY --from=tools /opt/jadx /opt/jadx
 COPY --from=tools /tmp/vineflower.jar /opt/vineflower/vineflower.jar
 COPY --from=python-tools /opt/python-site /opt/python-site
+COPY plugins/safe-android-reverser/VERSION /opt/safe-reverser/VERSION
 COPY sandbox/mcp_server.py /opt/safe-reverser/mcp_server.py
+COPY sandbox/mcp_server_v2.py /opt/safe-reverser/mcp_server_v2.py
+COPY sandbox/mcp_entrypoint.py /opt/safe-reverser/mcp_entrypoint.py
 COPY sandbox/program_understanding.py /opt/safe-reverser/program_understanding.py
 COPY sandbox/program_understanding_v2.py /opt/safe-reverser/program_understanding_v2.py
 COPY sandbox/pu_source.py /opt/safe-reverser/pu_source.py
 COPY sandbox/pu_index.py /opt/safe-reverser/pu_index.py
 COPY sandbox/pu_network.py /opt/safe-reverser/pu_network.py
-COPY sandbox/mcp_server_v2.py /opt/safe-reverser/mcp_server_v2.py
 
-RUN ln -s /opt/jadx/bin/jadx /usr/local/bin/jadx \
- && PYTHONPATH=/opt/python-site:/opt/safe-reverser python3 -c 'import program_understanding_v2 as pu; caps=pu.capabilities(); assert caps["androguard"], caps' \
- && chmod 0555 /opt/safe-reverser/mcp_server.py /opt/safe-reverser/mcp_server_v2.py /opt/safe-reverser/program_understanding.py /opt/safe-reverser/program_understanding_v2.py /opt/safe-reverser/pu_source.py /opt/safe-reverser/pu_index.py /opt/safe-reverser/pu_network.py \
- && chmod -R a-w /opt/jadx /opt/vineflower /opt/python-site /opt/safe-reverser
+RUN set -eux; \
+    test -n "$SAFE_REVERSER_VERSION"; \
+    test "$(tr -d '[:space:]' < /opt/safe-reverser/VERSION)" = "$SAFE_REVERSER_VERSION"; \
+    ln -s /opt/jadx/bin/jadx /usr/local/bin/jadx; \
+    PYTHONPATH=/opt/python-site:/opt/safe-reverser python3 -c 'import program_understanding_v2 as pu; caps=pu.capabilities(); assert caps["androguard"], caps'; \
+    chmod 0444 /opt/safe-reverser/VERSION; \
+    chmod 0555 /opt/safe-reverser/mcp_server.py /opt/safe-reverser/mcp_server_v2.py /opt/safe-reverser/mcp_entrypoint.py /opt/safe-reverser/program_understanding.py /opt/safe-reverser/program_understanding_v2.py /opt/safe-reverser/pu_source.py /opt/safe-reverser/pu_index.py /opt/safe-reverser/pu_network.py; \
+    chmod -R a-w /opt/jadx /opt/vineflower /opt/python-site /opt/safe-reverser
 
 ENV SAFE_REVERSER_WORKSPACE=/workspace \
     SAFE_REVERSER_DATA_ROOT=/data/jobs \
+    SAFE_REVERSER_IMAGE_VERSION=${SAFE_REVERSER_VERSION} \
+    SAFE_REVERSER_BUILD_COMMIT=${SAFE_REVERSER_BUILD_COMMIT} \
     VINEFLOWER_JAR=/opt/vineflower/vineflower.jar \
     PYTHONPATH=/opt/python-site:/opt/safe-reverser \
     HOME=/tmp/home \
@@ -72,4 +87,4 @@ ENV SAFE_REVERSER_WORKSPACE=/workspace \
 
 WORKDIR /work
 USER 10001:10001
-ENTRYPOINT ["python3", "/opt/safe-reverser/mcp_server_v2.py"]
+ENTRYPOINT ["python3", "/opt/safe-reverser/mcp_entrypoint.py"]
