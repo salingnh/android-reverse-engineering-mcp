@@ -51,6 +51,14 @@ class TraceCallPathMcpTests(unittest.TestCase):
                 time.sleep(2)
         self.assertLess(time.monotonic() - started, 1.8)
 
+    def test_nested_deadline_cannot_extend_stricter_outer_deadline(self):
+        started = time.monotonic()
+        with self.assertRaises(server.SemanticDeadlineExceeded):
+            with server._deadline(1):
+                with server._deadline(5):
+                    time.sleep(2)
+        self.assertLess(time.monotonic() - started, 1.8)
+
     def test_analyzer_exception_handler_cannot_swallow_deadline(self):
         def analyzer_like_code():
             try:
