@@ -50,6 +50,7 @@ COPY --from=blutter-source /opt/blutter /opt/blutter
 COPY frameworks/flutter/cache_identity.py /opt/safe-flutter/cache_identity.py
 COPY frameworks/flutter/safe_blutter_adapter.py /opt/safe-flutter/safe_blutter_adapter.py
 COPY frameworks/flutter/flutter_semantic.py /opt/safe-flutter/flutter_semantic.py
+COPY frameworks/flutter/flutter_network.py /opt/safe-flutter/flutter_network.py
 COPY frameworks/flutter/flutter_entrypoint.py /opt/safe-flutter/flutter_entrypoint.py
 COPY frameworks/flutter/tools.lock.env /opt/safe-flutter/tools.lock.env
 
@@ -61,11 +62,13 @@ RUN set -eux; \
     test -f /opt/safe-flutter/cache_identity.py; \
     test -f /opt/safe-flutter/safe_blutter_adapter.py; \
     test -f /opt/safe-flutter/flutter_semantic.py; \
+    test -f /opt/safe-flutter/flutter_network.py; \
     test -f /opt/safe-flutter/flutter_entrypoint.py; \
     python3 -m py_compile \
       /opt/safe-flutter/cache_identity.py \
       /opt/safe-flutter/safe_blutter_adapter.py \
       /opt/safe-flutter/flutter_semantic.py \
+      /opt/safe-flutter/flutter_network.py \
       /opt/safe-flutter/flutter_entrypoint.py; \
     chmod 0555 /opt/safe-flutter/*.py; \
     chmod -R a-w /opt/blutter /opt/safe-flutter
