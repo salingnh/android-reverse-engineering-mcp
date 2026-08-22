@@ -166,15 +166,40 @@ worker_text = (PLUGIN_ROOT / "lib" / "safe_reverser" / "worker.py").read_text(
 flutter_text = (PLUGIN_ROOT / "lib" / "safe_reverser" / "flutter.py").read_text(
     encoding="utf-8"
 )
+control_text = (PLUGIN_ROOT / "lib" / "safe_reverser" / "control_plane.py").read_text(
+    encoding="utf-8"
+)
 for fragment in ("class VerifiedImage", "immutable_image_ref", "immutable_ref"):
     if fragment not in runtime_text:
         fail(f"Runtime Driver lost immutable-image contract marker: {fragment}")
+for fragment in (
+    "MAX_MOUNTS",
+    "MAX_COMMAND_ARGS",
+    "MAX_STDIN_BYTES",
+    "_validate_mount",
+):
+    if fragment not in runtime_text:
+        fail(f"Runtime Driver lost bounded invocation marker: {fragment}")
 for fragment in ("verified.immutable_ref", "SAFE_REVERSER_IMAGE_ID"):
     if fragment not in worker_text:
         fail(f"MCP worker lost immutable-image execution marker: {fragment}")
-for fragment in ("runtime_image_id", "_immutable_ref(verified"):
+for fragment in (
+    "runtime_image_id",
+    "_immutable_ref(verified",
+    "_probe_base_worker",
+    "runtime_download_inside_sandbox",
+):
     if fragment not in flutter_text:
-        fail(f"Flutter adapter lost immutable-image execution marker: {fragment}")
+        fail(f"Flutter adapter lost worker verification marker: {fragment}")
+for fragment in (
+    "MAX_REQUEST_CHARS",
+    "MAX_REQUEST_BYTES",
+    "MAX_TOOL_TEXT_BYTES",
+    "_bounded_request_lines",
+    "result exceeds bounded response size",
+):
+    if fragment not in control_text:
+        fail(f"control plane lost bounded MCP framing marker: {fragment}")
 
 image_checks = {
     ROOT / "sandbox" / "Dockerfile": [
@@ -231,10 +256,12 @@ for fragment in (
     "test_public_operation_contract.py",
     "test_cross_worker_contracts.py",
     "test_runtime_image_pinning.py",
+    "test_platform_bounds.py",
     "SAFE_REVERSER_CAPABILITY_IMAGE_STATIC_CORE",
     "SAFE_REVERSER_CAPABILITY_IMAGE_FRAMEWORK_FLUTTER",
     "capabilities']['diagnostics']",
     "image_id'].startswith('sha256:')",
+    "network_required_at_runtime",
 ):
     if fragment not in control_workflow:
         fail(f"control-plane CI is missing contract gate: {fragment}")
@@ -252,5 +279,6 @@ print(
     "release consistency OK: "
     f"version={version} capability_api={CAPABILITY_API} "
     f"worker_abi={WORKER_ABI} evidence={EVIDENCE_ENVELOPE} "
-    f"flutter_cache_schema={FLUTTER_CACHE_SCHEMA} immutable_image_execution=required"
+    f"flutter_cache_schema={FLUTTER_CACHE_SCHEMA} "
+    "immutable_image_execution=required bounded_platform_io=required"
 )
