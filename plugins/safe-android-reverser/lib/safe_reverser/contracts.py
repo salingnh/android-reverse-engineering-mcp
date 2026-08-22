@@ -49,6 +49,24 @@ def _strict_int(value: Any, field: str) -> int:
     return value
 
 
+def _strict_str(value: Any, field: str, *, allow_empty: bool = False) -> str:
+    if type(value) is not str:
+        raise ContractError(f"{field} must be a string")
+    normalized = value.strip()
+    if not allow_empty and not normalized:
+        raise ContractError(f"{field} must not be empty")
+    return normalized
+
+
+def _strict_string_list(value: Any, field: str) -> tuple[str, ...]:
+    if not isinstance(value, list) or not value:
+        raise ContractError(f"{field} must be a non-empty array")
+    result: list[str] = []
+    for index, item in enumerate(value):
+        result.append(_strict_str(item, f"{field}[{index}]"))
+    return tuple(result)
+
+
 @dataclass(frozen=True)
 class SandboxPolicy:
     network: str = "none"
@@ -81,7 +99,7 @@ class SandboxPolicy:
         if unknown:
             raise ContractError(f"unknown sandbox policy fields: {sorted(unknown)}")
         policy = cls(
-            network=str(raw.get("network", "none")),
+            network=_strict_str(raw.get("network", "none"), "network"),
             read_only_root=_strict_bool(raw.get("read_only_root", True), "read_only_root"),
             drop_all_capabilities=_strict_bool(
                 raw.get("drop_all_capabilities", True), "drop_all_capabilities"
@@ -89,11 +107,11 @@ class SandboxPolicy:
             no_new_privileges=_strict_bool(
                 raw.get("no_new_privileges", True), "no_new_privileges"
             ),
-            memory=str(raw.get("memory", "4g")),
-            cpus=str(raw.get("cpus", "2")),
+            memory=_strict_str(raw.get("memory", "4g"), "memory"),
+            cpus=_strict_str(raw.get("cpus", "2"), "cpus"),
             pids_limit=_strict_int(raw.get("pids_limit", 256), "pids_limit"),
-            tmpfs_tmp=str(raw.get("tmpfs_tmp", "1g")),
-            tmpfs_work=str(raw.get("tmpfs_work", "1g")),
+            tmpfs_tmp=_strict_str(raw.get("tmpfs_tmp", "1g"), "tmpfs_tmp"),
+            tmpfs_work=_strict_str(raw.get("tmpfs_work", "1g"), "tmpfs_work"),
         )
         if policy.network not in VALID_NETWORK_POLICIES:
             raise ContractError("invalid capability network policy")
@@ -102,9 +120,7 @@ class SandboxPolicy:
             or not policy.drop_all_capabilities
             or not policy.no_new_privileges
         ):
-            raise ContractError(
-                "capability must preserve locked sandbox invariants"
-            )
+            raise ContractError("capability must preserve locked sandbox invariants")
         if policy.pids_limit < 16 or policy.pids_limit > 4096:
             raise ContractError("invalid capability PID limit")
         return policy
@@ -145,24 +161,12 @@ class CapabilityManifest:
         unknown = set(value) - allowed
         if unknown:
             raise ContractError(f"unknown capability manifest fields: {sorted(unknown)}")
-        required = {
-            "id",
-            "capability_api",
-            "worker_abi",
-            "representations",
-            "trust_boundary",
-            "activation",
-            "adapter",
-            "protocol",
-            "image",
-            "operations",
-            "sandbox",
-        }
+        required = set(allowed)
         missing = required - set(value)
         if missing:
             raise ContractError(f"missing capability manifest fields: {sorted(missing)}")
 
-        capability_id = str(value.get("id") or "").strip()
+        capability_id = _strict_str(value.get("id"), "id")
         if not CAPABILITY_ID_RE.fullmatch(capability_id):
             raise ContractError("invalid capability id")
         capability_api = _strict_int(value.get("capability_api"), "capability_api")
@@ -175,41 +179,40 @@ class CapabilityManifest:
             raise ContractError(
                 f"unsupported worker_abi={worker_abi}; expected {WORKER_ABI_VERSION}"
             )
-        trust_boundary = str(value.get("trust_boundary") or "").strip()
+
+        trust_boundary = _strict_str(value.get("trust_boundary"), "trust_boundary")
         if trust_boundary not in VALID_TRUST_BOUNDARIES:
             raise ContractError("invalid capability trust boundary")
-        activation = str(value.get("activation") or "").strip()
+        activation = _strict_str(value.get("activation"), "activation")
         if activation not in VALID_ACTIVATIONS:
             raise ContractError("invalid capability activation")
         if trust_boundary == "dynamic-opt-in" and activation != "opt-in":
             raise ContractError("dynamic capability must use opt-in activation")
-        adapter = str(value.get("adapter") or "").strip()
+        adapter = _strict_str(value.get("adapter"), "adapter")
         if not ADAPTER_RE.fullmatch(adapter):
             raise ContractError("invalid capability adapter")
-        protocol = str(value.get("protocol") or "").strip()
+        protocol = _strict_str(value.get("protocol"), "protocol")
         if protocol not in VALID_PROTOCOLS:
             raise ContractError("invalid capability worker protocol")
 
         image = value.get("image")
-        if not isinstance(image, dict) or set(image) - {"repository", "role"}:
-            raise ContractError("invalid capability image descriptor")
-        repository = str(image.get("repository") or "").strip()
-        role = str(image.get("role") or "").strip()
+        if not isinstance(image, dict) or set(image) != {"repository", "role"}:
+            raise ContractError("capability image descriptor requires repository and role only")
+        repository = _strict_str(image.get("repository"), "image.repository")
+        role = _strict_str(image.get("role"), "image.role")
         if not IMAGE_REPOSITORY_RE.fullmatch(repository):
             raise ContractError("invalid capability image repository")
         if not IMAGE_ROLE_RE.fullmatch(role):
             raise ContractError("invalid capability image role")
 
-        representations = value.get("representations")
-        operations_value = value.get("operations")
-        if not isinstance(representations, list) or not representations:
-            raise ContractError("capability representations are required")
-        if not isinstance(operations_value, list) or not operations_value:
-            raise ContractError("capability operations are required")
-        representation = tuple(str(item).strip() for item in representations)
-        operations = tuple(str(item).strip() for item in operations_value)
+        representation = _strict_string_list(
+            value.get("representations"), "representations"
+        )
+        operations = _strict_string_list(value.get("operations"), "operations")
         if any(not REPRESENTATION_RE.fullmatch(item) for item in representation):
             raise ContractError("invalid capability representation")
+        if len(set(representation)) != len(representation):
+            raise ContractError("capability representations must be unique")
         if any(not OPERATION_RE.fullmatch(item) for item in operations):
             raise ContractError("invalid capability operation name")
         if len(set(operations)) != len(operations):
