@@ -45,6 +45,7 @@ jobs:
             plugins/safe-android-reverser/bin/mcp-control-plane.py \
             plugins/safe-android-reverser/lib/safe_reverser/__init__.py \
             plugins/safe-android-reverser/lib/safe_reverser/contracts.py \
+            plugins/safe-android-reverser/lib/safe_reverser/evidence.py \
             plugins/safe-android-reverser/lib/safe_reverser/paths.py \
             plugins/safe-android-reverser/lib/safe_reverser/runtime.py \
             plugins/safe-android-reverser/lib/safe_reverser/registry.py \
