@@ -8,6 +8,7 @@ from typing import Any
 from .contracts import CapabilityManifest, ContractError, VALID_STATES
 
 MAX_MANIFEST_BYTES = 64 * 1024
+RESERVED_CONTROL_PLANE_OPERATIONS = {"list_capabilities"}
 
 
 @dataclass(frozen=True)
@@ -28,11 +29,18 @@ class CapabilityStatus:
 
 class CapabilityRegistry:
     def __init__(self, manifest_dir: Path) -> None:
-        self.manifest_dir = manifest_dir.resolve()
+        raw_dir = Path(manifest_dir)
+        if raw_dir.is_symlink():
+            raise ContractError("capability manifest directory must not be a symlink")
+        self.manifest_dir = raw_dir.resolve()
         self._manifests = self._load()
         self._operation_owner: dict[str, str] = {}
         for capability_id, manifest in self._manifests.items():
             for operation in manifest.operations:
+                if operation in RESERVED_CONTROL_PLANE_OPERATIONS:
+                    raise ContractError(
+                        f"operation {operation!r} is reserved by the control plane"
+                    )
                 previous = self._operation_owner.get(operation)
                 if previous is not None:
                     raise ContractError(
@@ -45,7 +53,11 @@ class CapabilityRegistry:
             raise ContractError("capability manifest directory is unavailable")
         result: dict[str, CapabilityManifest] = {}
         for path in sorted(self.manifest_dir.glob("*.json")):
-            if path.is_symlink() or not path.is_file() or path.stat().st_size > MAX_MANIFEST_BYTES:
+            if (
+                path.is_symlink()
+                or not path.is_file()
+                or path.stat().st_size > MAX_MANIFEST_BYTES
+            ):
                 raise ContractError(f"unsafe capability manifest: {path.name}")
             try:
                 raw = json.loads(path.read_text(encoding="utf-8"))
@@ -81,6 +93,7 @@ class CapabilityRegistry:
                 "worker_abi": manifest.worker_abi,
                 "representations": list(manifest.representation),
                 "trust_boundary": manifest.trust_boundary,
+                "adapter": manifest.adapter,
                 "protocol": manifest.protocol,
                 "operations": list(manifest.operations),
                 "image_role": manifest.image_role,
