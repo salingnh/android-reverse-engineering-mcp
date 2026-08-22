@@ -2,7 +2,7 @@
 
 **MCP-first, sandboxed Android reverse engineering with semantic program understanding for AI agents.**
 
-Safe Android Reverser is an AI-native reverse code-intelligence platform. The agent asks semantic questions; a host control plane selects and verifies isolated capability workers; analyzers return bounded evidence with provenance.
+Safe Android Reverser is an AI-native reverse code-intelligence platform. The agent asks semantic questions; one host control plane selects and verifies isolated capability workers; analyzers return bounded evidence with provenance.
 
 > **The agent reasons. The MCP control plane controls. Capability workers execute.**
 
@@ -11,194 +11,155 @@ Safe Android Reverser is an AI-native reverse code-intelligence platform. The ag
 ## Documentation
 
 - **[Install / update / troubleshoot](docs/INSTALL_MCP.md)**
-- **[Capability SPI v1](docs/CAPABILITY_SPI.md)**
 - **[Project direction](docs/PROJECT_DIRECTION.md)**
 - **[Roadmap](docs/ROADMAP.md)**
+- **[Capability SPI v1](docs/CAPABILITY_SPI.md)**
+- **[Development and review rules](docs/DEVELOPMENT.md)**
 - **[Release procedure](docs/RELEASING.md)**
-- **[Program-understanding implementation](docs/PROGRAM_UNDERSTANDING_PHASE1.md)**
+- **[Program-understanding phase 1](docs/PROGRAM_UNDERSTANDING_PHASE1.md)**
 - **[Research: AI-agent program understanding](docs/research/AI_AGENT_PROGRAM_UNDERSTANDING.md)**
+
+Coding agents must also follow [`AGENTS.md`](AGENTS.md).
+
+## Release status
+
+Current published release: **0.2.1**.
+
+**0.3.0 is the active platform-foundation milestone and is not released until exact-head CI, architecture/security review, and senior acceptance pass.**
 
 ## Quick start
 
 ```text
-1. Install Podman or Docker
+1. Install rootless Podman or Docker
 2. /plugin marketplace add salingnh/android-reverse-engineering-mcp
 3. /plugin install safe-android-reverser@salingnh-reverse-tools
 4. /reload-plugins
 5. /mcp
 6. Call health
-7. Call fingerprint on an APK/XAPK/APKS/APKM
-8. Follow the returned framework/capability route
+7. Call fingerprint on APK/XAPK/APKS/APKM
+8. Follow analysis_route.primary_capability_id
 ```
 
-Normal installation does not require a manual repository clone, `podman run`, or separate `claude mcp add` command.
+Normal users do not manually clone the repository, register multiple MCP servers, or run analyzer containers themselves.
 
-For updates:
-
-```text
-/plugin marketplace update salingnh-reverse-tools
-/plugin update safe-android-reverser@salingnh-reverse-tools
-/reload-plugins
-```
-
-Current published release: **0.2.1**.
-
-**0.3.0 is in development and is not released until its architecture/security milestone gate passes.**
-
-## 0.3.0 architecture
-
-0.3.0 establishes the platform architecture intended to remain in place through later roadmap milestones:
+## 0.3 architecture
 
 ```text
                          AI Agent
-                            │
-                            ▼
-              ┌────────────────────────┐
-              │ safe-android-reverser  │
-              │ host MCP control plane │
-              └───────────┬────────────┘
-                          │
-         ┌────────────────┼──────────────────┐
-         │                │                  │
-         ▼                ▼                  ▼
- Capability Registry   Runtime Driver   shared contracts
-         │             Docker/Podman     paths / jobs /
-         │                                evidence / PEG
-         │
-         ├───────────────────────┐
-         ▼                       ▼
-   static-core worker     framework-flutter worker
- APK/DEX/JVM/resources       Dart AOT/libapp.so
+                            |
+                            v
+              safe-android-reverser MCP
+                 Host Control Plane
+                            |
+          +-----------------+------------------+
+          |                 |                  |
+   Capability/Adapter    Runtime/Path       Evidence/PEG
+      Registries          Job services        Contracts
+          |
+     +----+----------------------+-------------------+
+     |                           |                   |
+     v                           v                   v
+ static-core              framework-flutter     future capabilities
+ worker                    worker                native / Hermes /
+                                                  IL2CPP / .NET /
+                                                  security / dynamic
 ```
 
-There is **one public MCP server**. Frameworks are capability modules, not separate public MCP control planes.
+There is exactly **one public MCP server**.
 
-Only the host control plane invokes Docker/Podman. Workers do not receive runtime sockets.
+Only the host control plane invokes Docker/Podman. Workers never receive runtime sockets.
 
-Static/framework-static workers preserve the default trust boundary:
+Static/framework/native-static workers preserve:
 
 ```text
 network=none
-read-only root filesystem
-drop all Linux capabilities
+read-only root
+cap-drop=ALL
 no-new-privileges
-non-root user
-bounded CPU / memory / PID / tmpfs
-explicit read-only/read-write mounts
+non-root UID/GID
+bounded CPU / memory / PIDs / tmpfs / traversal / output
 ```
 
-## Capability SPI
+Future dynamic analysis uses a separate `dynamic-opt-in` trust boundary and explicit enablement; static workers are not weakened to support it.
 
-Capability modules declare a versioned manifest:
+## Capability platform
+
+0.3 establishes:
 
 ```text
-capability id
-Capability API version
-Worker ABI version
-business-logic representations
-trust boundary
-worker protocol
+Capability API       v1
+Worker ABI           v1
+EvidenceEnvelope     v1
+PEG schema           v2
+Flutter cache schema v2
+```
+
+A capability manifest declares:
+
+```text
+id
+representations
+trust_boundary
+activation
+adapter
+protocol
 image repository/role
-public semantic operations
+public operations
 sandbox policy
 ```
 
-Release 0.3 introduces:
+Activation semantics are:
 
 ```text
-Capability API v1
-Worker ABI v1
-EvidenceEnvelope v1
+required
+optional
+opt-in
 ```
 
-The host control plane verifies worker OCI labels before execution.
+`dynamic-opt-in` must use `opt-in`. Opt-in modules are inactive until explicitly listed in `SAFE_REVERSER_ENABLE_CAPABILITIES`.
 
-Runtime readiness is separate from framework topology. `fingerprint` can identify Flutter and return:
+Public operation ownership is manifest-driven and unique. The control plane resolves operation -> capability -> adapter rather than maintaining framework-specific dispatch branches.
+
+## Runtime identity
+
+The host verifies required OCI labels and executes the verified immutable image ID:
 
 ```text
-primary_capability_id = framework-flutter
+requested tag
+   ↓
+inspect / pull
+   ↓
+verify version + capability id + Capability API + Worker ABI
+   ↓
+resolve sha256 image ID
+   ↓
+run immutable image ID
 ```
 
-while the host independently reports whether that capability is:
-
-```text
-declared / installed / ready / degraded / unavailable / unsupported
-```
-
-This prevents routing code from falsely claiming that an analyzer image/runtime is ready.
-
-See [`docs/CAPABILITY_SPI.md`](docs/CAPABILITY_SPI.md).
+This prevents mutable-tag drift between image verification and execution.
 
 ## Framework-aware routing
 
 ```text
 artifact
    ↓
-fingerprint / router
-   ├─ Native Android      → static-core / DEX / Java / Kotlin
-   ├─ Flutter             → framework-flutter / Dart AOT / libapp.so
-   ├─ React Native/Hermes → JavaScript/Hermes capability
-   ├─ Unity IL2CPP        → metadata + native capability
-   └─ .NET MAUI/Xamarin   → managed-code capability
+fingerprint / route_analysis
+   ├─ Native Android      -> static-core / DEX / Java / Kotlin
+   ├─ Flutter             -> framework-flutter / Dart AOT / libapp.so
+   ├─ React Native/Hermes -> Hermes/JS capability when positively detected
+   ├─ Unity IL2CPP        -> IL2CPP metadata + native capability
+   └─ Xamarin/.NET MAUI   -> managed-code capability
 ```
 
-JADX is not a universal business-logic analyzer. For Flutter release builds it mainly exposes the Android host shell and plugin bridges; the main Dart logic is usually AOT-compiled into `libapp.so`.
+JADX is not a universal business-logic analyzer. A missing framework analyzer is reported as unavailable/unsupported rather than silently replaced by semantically wrong Java/Kotlin analysis.
 
-## Flutter AOT capability
+## Capability responsibilities
 
-The Flutter pipeline is:
+### `static-core`
 
-```text
-APK/XAPK/APKS/APKM
-       ↓
-bounded extraction of arm64-v8a libapp.so + libflutter.so
-       ↓
-local Dart runtime/snapshot identity
-       ↓
-registry-independent immutable cache_tag
-       ↓
-host selects exact runtime-cache image
-       ↓
-verify Capability API / Worker ABI / Dart / snapshot / Blutter provenance
-       ↓
-offline Blutter execution
-       ↓
-bounded Flutter semantic index
-       ↓
-semantic evidence queries
-```
+Owns generic Android package/DEX/JVM/resource triage and semantics, framework-routing preflight, and fast generic native triage.
 
-The analyzer worker never silently downloads or builds a missing Dart runtime. Cache miss is an explicit state. Exact runtime images are produced through the controlled build workflow.
-
-Merged Flutter semantic capabilities include:
-
-```text
-find_dart_symbols
-find_dart_strings
-find_dart_xrefs
-map_dart_to_native
-extract_flutter_network_model
-```
-
-The final 0.3 control-plane slice exposes these through the same public MCP using `analyze_flutter_aot` and a returned `job_id`.
-
-`extract_flutter_network_model` reconstructs bounded endpoint/host, HTTP-client, header, auth/token, signing/crypto, owning Dart function and native-offset evidence. It does **not** claim XREF adjacency is true value flow.
-
-## Static-core capability
-
-The static-core worker currently includes:
-
-```text
-Java 21
-JADX 1.5.6
-Vineflower 1.12.0
-Androguard 4.1.4
-file
-binutils: strings / readelf / objdump / nm
-Python MCP worker
-```
-
-Current static semantic operations include:
+Current public operations include:
 
 ```text
 fingerprint
@@ -220,47 +181,59 @@ recover_kotlin_names
 list_jobs
 ```
 
-`build_program_index` prefers Androguard DEX semantics and persists a bounded method/call-edge index. Decompiled source is a presentation/localization layer, not canonical truth.
+Framework-specific deep semantics must not accumulate in `static-core`.
 
-## Public control-plane operations
+### `framework-flutter`
 
-The 0.3 control plane adds:
+Owns Flutter/Dart AOT business-logic analysis:
 
 ```text
-health
-list_capabilities
+analyze_flutter_aot
+find_dart_symbols
+find_dart_strings
+find_dart_xrefs
+map_dart_to_native
+extract_flutter_network_model
+list_flutter_jobs
 ```
 
-`health` reports actual capability readiness and the architecture/contract versions.
+Pipeline:
 
-`list_capabilities` exposes manifest topology and runtime readiness without analyzing an artifact.
+```text
+APK/XAPK/APKS/APKM
+   ↓
+bounded extraction of libapp.so + libflutter.so
+   ↓
+local Dart/snapshot/runtime identity
+   ↓
+registry-independent runtime cache tag
+   ↓
+host selects and verifies exact immutable runtime image
+   ↓
+offline Blutter
+   ↓
+bounded persistent Flutter semantic index
+   ↓
+semantic evidence queries
+```
 
-The public tool surface deliberately does **not** expose generic shell, exec, bash, Docker, Podman, raw Blutter/Rizin/Ghidra consoles, or unrestricted Frida JavaScript.
+A runtime-cache miss never triggers a hidden build/download in the analysis worker.
+
+The cache identity binds cache schema, Capability API, Worker ABI, Dart version, snapshot hash, architecture, OS, compressed-pointer mode, and full Blutter commit.
 
 ## Evidence model
 
-Capability-specific optimized indexes remain private implementation details:
+Capability-private optimized storage remains implementation detail:
 
 ```text
-DEX semantic SQLite
-Flutter semantic SQLite
-future native/IR/Hermes caches
+DEX SQLite
+Flutter SQLite
+future data-flow/native/Hermes/IL2CPP caches
 ```
 
-The control plane adds a stable compatibility descriptor to public results:
+Public results carry a common compatibility descriptor. Valid material provenance is normalized into `EvidenceEnvelope`.
 
-```text
-safe_reverser_contract
-  capability_id
-  capability_api
-  worker_abi
-  operation
-  evidence_envelope_version
-```
-
-When a producer supplies valid material provenance, results also receive a common `evidence_envelope`.
-
-Evidence states are strictly:
+Evidence state is strictly:
 
 ```text
 observed
@@ -268,28 +241,28 @@ derived
 hypothesized
 ```
 
-No numeric confidence is invented by the platform.
+The platform never invents numeric confidence.
 
-The Program Evidence Graph remains the cross-capability semantic model. Future data-flow/native/dynamic/security engines add evidence and graph relations rather than replacing the 0.3 orchestration architecture.
+CALLS/XREFS are not proven value flow. True `FLOWS_TO`/source/sink/sanitizer semantics are a 0.4 data-flow capability.
 
-## Recommended investigation workflow
+## Recommended investigation flow
 
 ```text
 health
   ↓
-list_capabilities if readiness needs inspection
+list_capabilities when readiness needs inspection
   ↓
 fingerprint
   ↓
-route by primary_capability_id
-  ├─ static-core → decompile/index/query DEX/JVM evidence
-  └─ framework-flutter → analyze_flutter_aot/query Dart evidence
+follow primary_capability_id
+  ├─ static-core          -> DEX/JVM semantic analysis
+  └─ framework-flutter   -> Dart AOT semantic analysis
   ↓
 network/auth/crypto localization
   ↓
 CFG/native/framework escalation only where needed
   ↓
-read bounded high-signal evidence for verification
+bounded evidence verification
 ```
 
 Example prompt:
@@ -297,61 +270,53 @@ Example prompt:
 ```text
 Analyze artifacts/app.xapk using only safe-android-reverser MCP.
 
-1. Call health and verify the control-plane/capability states.
+1. Call health and inspect capability readiness.
 2. Fingerprint the artifact and follow primary_capability_id.
-3. Never use Java/Kotlin decompilation as primary Flutter business-logic evidence.
-4. For Flutter, call analyze_flutter_aot and retain its job_id.
-5. Query Dart symbols, strings, XREFs, native mappings and the Flutter network model.
+3. Do not use Java/Kotlin decompilation as primary Flutter business-logic evidence.
+4. For Flutter, call analyze_flutter_aot and retain job_id.
+5. Query Dart symbols, strings, XREFs, native mappings, and Flutter network model.
 6. For native Android, use decompile + build_program_index + semantic queries.
 7. Read only bounded high-signal evidence needed to verify conclusions.
-8. Preserve analyzer/provenance/evidence states.
-9. Do not describe CALLS/XREFS as proven data flow.
-10. Report unsupported or unavailable capability boundaries explicitly.
+8. Preserve provenance and evidence state.
+9. Never describe CALLS/XREFS as proven data flow.
+10. Report unavailable/unsupported capability boundaries explicitly.
 ```
 
-## Roadmap invariant
-
-0.3.0 is the foundation, not a temporary bridge. Later milestones extend the same contracts:
+## Roadmap
 
 ```text
-0.3  platform foundation + Flutter AOT
-0.4  true data-flow intelligence
-0.5  security intelligence
-0.6  dynamic correlation capability
-0.7  native/JNI capability
-0.8  Hermes / IL2CPP / .NET capabilities
-0.9  pattern discovery + independent verification
-1.0  stable compatibility contracts
+0.3 Platform Foundation + Flutter AOT
+0.4 Data-flow Intelligence
+0.5 Security Intelligence
+0.6 Dynamic Correlation
+0.7 Native/JNI Intelligence
+0.8 Framework Coverage
+0.9 Pattern Discovery + Independent Verification
+1.0 Stable Platform Contracts
 ```
 
-A later milestone must not introduce a mechanism already known to replace the previous milestone's control plane, capability, job/runtime, or evidence architecture. Breaking contract changes require an explicit architecture decision, migration path, compatibility tests, and senior review.
+0.3 is intentionally the last planned orchestration-foundation milestone. After acceptance, normal development should focus on analysis intelligence and evidence quality rather than repeated MCP/runtime restructuring.
 
-See [`docs/ROADMAP.md`](docs/ROADMAP.md) for acceptance criteria and current status.
+## Development gate
 
-## Development process
-
-Code changes follow:
+Non-trivial work follows:
 
 ```text
-feature branch
-  ↓
-implementation
-  ↓
-unit / integration / static checks
-  ↓
-mandatory code review
-  ↓
-fix Blocker / High findings
-  ↓
-rerun tests
-  ↓
-review gate PASS
-  ↓
-create PR
-  ↓
-PR CI
-  ↓
-merge only after explicit approval
+feature/integration branch
+   ↓
+implementation + deterministic tests
+   ↓
+architecture/security review
+   ↓
+fix Blocker/High findings
+   ↓
+dead-reference/code sweep
+   ↓
+exact-head GitHub Actions
+   ↓
+senior acceptance for milestone/platform changes
+   ↓
+merge
 ```
 
-Milestones require a senior acceptance review before development moves to the next milestone.
+See [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) for mandatory engineering, capability-boundary, CI, documentation, and release rules.
