@@ -74,6 +74,7 @@ class FlutterCapability:
         )
         self.jobs = AnalysisJobStore(self.data_dir, manifest.capability_id)
         self._verified_base: VerifiedImage | None = None
+        self._base_probe: dict[str, Any] | None = None
 
     def required_base_labels(self) -> dict[str, str]:
         return {
@@ -91,6 +92,38 @@ class FlutterCapability:
             )
         return self._verified_base
 
+    def _probe_base_worker(self) -> dict[str, Any]:
+        if self._base_probe is not None:
+            return dict(self._base_probe)
+        verified = self.ensure_base_ready()
+        payload = self._run_cli(
+            image=_immutable_ref(verified, self.base_image),
+            mounts=[],
+            command=["health"],
+            timeout=90,
+        )
+        constraints = payload.get("required_runtime_constraints")
+        orchestration = payload.get("orchestration")
+        if (
+            payload.get("status") != "ok"
+            or payload.get("network_required_at_runtime") is not False
+            or payload.get("build_on_demand_allowed") is not False
+            or payload.get("registry_selection_owned_by_worker") is not False
+            or not isinstance(constraints, dict)
+            or constraints.get("network") != "none"
+            or not isinstance(orchestration, dict)
+            or orchestration.get("runtime_download_inside_sandbox") is not False
+            or orchestration.get("runtime_build_inside_sandbox") is not False
+        ):
+            raise FlutterCapabilityError(
+                "Flutter worker health does not satisfy Worker ABI offline/runtime constraints"
+            )
+        self._base_probe = dict(payload)
+        return dict(payload)
+
+    def diagnostics(self) -> dict[str, Any]:
+        return self._probe_base_worker()
+
     def status(self) -> dict[str, Any]:
         try:
             verified = self.ensure_base_ready()
@@ -99,6 +132,15 @@ class FlutterCapability:
                 "state": "unavailable",
                 "detail": str(exc),
                 "image": self.base_image,
+            }
+        try:
+            self._probe_base_worker()
+        except (FlutterCapabilityError, RuntimeErrorSafe) as exc:
+            return {
+                "state": "degraded",
+                "detail": str(exc),
+                "image": self.base_image,
+                "image_id": _immutable_ref(verified, self.base_image),
             }
         return {
             "state": "ready",
@@ -273,7 +315,7 @@ class FlutterCapability:
                 "timeout_seconds must be an integer"
             ) from exc
         timeout = max(30, min(timeout, 3480))
-        self.ensure_base_ready()
+        self._probe_base_worker()
         try:
             job_id, job, meta = self.jobs.create(
                 artifact=artifact_rel,
@@ -368,6 +410,7 @@ class FlutterCapability:
         except JobStoreError as exc:
             raise FlutterCapabilityError(str(exc)) from exc
         analysis = self._analysis_dir(job)
+        self._probe_base_worker()
         verified = self.ensure_base_ready()
         payload = self._run_cli(
             image=_immutable_ref(verified, self.base_image),
