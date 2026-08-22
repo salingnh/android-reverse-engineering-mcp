@@ -9,6 +9,7 @@ from .paths import PathPolicyError, atomic_write_json, ensure_private_child, rea
 
 MAX_JOB_META = 128 * 1024
 MAX_LIST_JOBS = 100
+MAX_JOB_SCAN = 10_000
 
 
 class JobStoreError(RuntimeError):
@@ -27,7 +28,9 @@ class AnalysisJobStore:
         except PathPolicyError as exc:
             raise JobStoreError(str(exc)) from exc
 
-    def create(self, *, artifact: str, profile: str, controller_version: str) -> tuple[str, Path, dict[str, Any]]:
+    def create(
+        self, *, artifact: str, profile: str, controller_version: str
+    ) -> tuple[str, Path, dict[str, Any]]:
         for _ in range(32):
             job_id = secrets.token_hex(6)
             job = self.root / job_id
@@ -72,7 +75,13 @@ class AnalysisJobStore:
 
     def list(self) -> list[dict[str, Any]]:
         rows: list[tuple[float, dict[str, Any]]] = []
+        scanned = 0
         for path in self.root.iterdir():
+            scanned += 1
+            if scanned > MAX_JOB_SCAN:
+                raise JobStoreError(
+                    f"analysis job directory exceeds scan budget of {MAX_JOB_SCAN} entries"
+                )
             if path.is_symlink() or not path.is_dir():
                 continue
             try:
