@@ -36,13 +36,12 @@ RUNTIME="$(choose_runtime)"
 [[ -d "$PROJECT_DIR" ]] || fail "project directory not found: $PROJECT_DIR"
 PROJECT_DIR="$(cd "$PROJECT_DIR" && pwd -P)"
 
+# Do not create or canonicalize the plugin data path here. The shared Python
+# Path SDK must inspect every existing path component before any mkdir/resolve
+# so a symlinked parent cannot be traversed and hidden by `pwd -P`.
 if [[ -L "$DATA_DIR" ]]; then
   fail "plugin data directory must not be a symlink: $DATA_DIR"
 fi
-mkdir -p "$DATA_DIR" || fail "cannot create data directory: $DATA_DIR"
-[[ -L "$DATA_DIR" ]] && fail "plugin data directory must not be a symlink: $DATA_DIR"
-DATA_DIR="$(cd "$DATA_DIR" && pwd -P)"
-[[ -w "$DATA_DIR" ]] || fail "plugin data directory is not writable: $DATA_DIR"
 
 export SAFE_REVERSER_PLUGIN_VERSION="$VERSION"
 export SAFE_REVERSER_RUNTIME="$RUNTIME"
