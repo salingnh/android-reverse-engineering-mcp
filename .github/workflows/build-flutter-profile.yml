@@ -1,10 +1,12 @@
-name: Build Flutter analysis profile
+name: Build framework-flutter capability
 
 on:
   pull_request:
     paths:
       - 'frameworks/flutter/**'
       - 'plugins/safe-android-reverser/VERSION'
+      - 'plugins/safe-android-reverser/capabilities/framework-flutter.json'
+      - 'scripts/check_release_consistency.py'
       - '.github/workflows/build-flutter-profile.yml'
   push:
     branches: [master, 'feat/**']
@@ -12,6 +14,8 @@ on:
     paths:
       - 'frameworks/flutter/**'
       - 'plugins/safe-android-reverser/VERSION'
+      - 'plugins/safe-android-reverser/capabilities/framework-flutter.json'
+      - 'scripts/check_release_consistency.py'
       - '.github/workflows/build-flutter-profile.yml'
   workflow_dispatch:
 
@@ -40,6 +44,9 @@ jobs:
           test "$BLUTTER_LICENSE" = "MIT"
           [[ "$BLUTTER_COMMIT" =~ ^[0-9a-f]{40}$ ]]
 
+      - name: Check release and capability consistency
+        run: python3 scripts/check_release_consistency.py
+
       - name: Test offline-safe Blutter adapter
         run: PYTHONPATH=frameworks/flutter python3 frameworks/flutter/tests_safe_blutter_adapter.py
 
@@ -49,7 +56,7 @@ jobs:
       - name: Test Flutter network model
         run: PYTHONPATH=frameworks/flutter python3 frameworks/flutter/tests_flutter_network.py
 
-      - name: Test Flutter orchestration primitives
+      - name: Test Flutter worker orchestration primitives
         run: PYTHONPATH=frameworks/flutter python3 frameworks/flutter/tests_flutter_orchestration.py
 
       - name: Validate Python syntax
@@ -71,7 +78,7 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
-      - name: Build Flutter capability image
+      - name: Build framework-flutter worker image
         uses: docker/build-push-action@v7
         with:
           context: .
@@ -86,6 +93,24 @@ jobs:
             BLUTTER_COMMIT=${{ steps.versions.outputs.blutter_commit }}
           cache-from: type=gha,scope=flutter-profile
           cache-to: type=gha,mode=max,scope=flutter-profile
+
+      - name: Verify capability ABI labels
+        env:
+          VERSION: ${{ steps.versions.outputs.version }}
+          EXPECTED_COMMIT: ${{ steps.versions.outputs.blutter_commit }}
+        run: |
+          python3 - "$VERSION" "$EXPECTED_COMMIT" <<'PY'
+          import json
+          import subprocess
+          import sys
+          info = json.loads(subprocess.check_output(['docker', 'image', 'inspect', 'safe-android-reverser-flutter:ci']))[0]
+          labels = info['Config']['Labels']
+          assert labels['org.opencontainers.image.version'] == sys.argv[1], labels
+          assert labels['io.safe-reverser.capability.id'] == 'framework-flutter', labels
+          assert labels['io.safe-reverser.capability.api'] == '1', labels
+          assert labels['io.safe-reverser.worker.abi'] == '1', labels
+          assert labels['io.safe-reverser.blutter.commit'] == sys.argv[2], labels
+          PY
 
       - name: Verify locked offline runtime and semantic surface
         env:
@@ -103,45 +128,40 @@ jobs:
           import json
           import sys
           payload = json.loads(sys.argv[1])
-          assert payload["status"] == "ok", payload
-          assert payload["profile"] == "framework-flutter", payload
-          assert payload["blutter_commit"] == sys.argv[2], payload
-          assert payload["network_required_at_runtime"] is False, payload
-          assert payload["network_capable_upstream_path_used"] is False, payload
-          assert payload["build_on_demand_allowed"] is False, payload
-          constraints = payload["required_runtime_constraints"]
-          assert constraints["network"] == "none", payload
-          assert constraints["output_mount"] == "writable-bounded", payload
-          semantic = payload["semantic_index"]
-          assert semantic["available"] is True, payload
-          assert semantic["storage"] == "sqlite", payload
-          assert semantic["schema_version"] == 1, payload
-          assert semantic["network_model_max_items"] == 200, payload
+          assert payload['status'] == 'ok', payload
+          assert payload['profile'] == 'framework-flutter', payload
+          assert payload['blutter_commit'] == sys.argv[2], payload
+          assert payload['network_required_at_runtime'] is False, payload
+          assert payload['network_capable_upstream_path_used'] is False, payload
+          assert payload['build_on_demand_allowed'] is False, payload
+          assert payload['registry_selection_owned_by_worker'] is False, payload
+          constraints = payload['required_runtime_constraints']
+          assert constraints['network'] == 'none', payload
+          assert constraints['output_mount'] == 'writable-bounded', payload
+          semantic = payload['semantic_index']
+          assert semantic['available'] is True, payload
+          assert semantic['storage'] == 'sqlite', payload
+          assert semantic['schema_version'] == 1, payload
+          assert semantic['network_model_max_items'] == 200, payload
           expected = {
-              "build_flutter_index",
-              "find_dart_symbols",
-              "find_dart_strings",
-              "find_dart_xrefs",
-              "map_dart_to_native",
-              "extract_flutter_network_model",
+              'build_flutter_index', 'find_dart_symbols', 'find_dart_strings',
+              'find_dart_xrefs', 'map_dart_to_native', 'extract_flutter_network_model',
           }
-          assert expected == set(semantic["operations"]), payload
-          orchestration = payload["orchestration"]
-          assert orchestration["prepare_artifact"] is True, payload
-          assert orchestration["analyze_export"] is True, payload
-          assert orchestration["supported_abi"] == "arm64-v8a", payload
-          assert orchestration["persistent_export_max_bytes"] == 4 * 1024**3, payload
-          assert orchestration["persistent_export_max_files"] == 20_000, payload
-          assert orchestration["runtime_download_inside_sandbox"] is False, payload
-          assert orchestration["runtime_build_inside_sandbox"] is False, payload
+          assert expected == set(semantic['operations']), payload
+          orchestration = payload['orchestration']
+          assert orchestration['prepare_artifact'] is True, payload
+          assert orchestration['analyze_export'] is True, payload
+          assert orchestration['supported_abi'] == 'arm64-v8a', payload
+          assert orchestration['persistent_export_max_bytes'] == 4 * 1024**3, payload
+          assert orchestration['persistent_export_max_files'] == 20_000, payload
+          assert orchestration['runtime_download_inside_sandbox'] is False, payload
+          assert orchestration['runtime_build_inside_sandbox'] is False, payload
           PY
 
       - name: Verify pinned upstream license is preserved
         run: |
           docker run --rm -i \
-            --network=none \
-            --read-only \
-            --cap-drop=ALL \
+            --network=none --read-only --cap-drop=ALL \
             --security-opt=no-new-privileges \
             --entrypoint=python3 \
             safe-android-reverser-flutter:ci - <<'PY'
@@ -199,7 +219,7 @@ jobs:
             type=sha,prefix=sha-
             type=match,pattern=safe-v(.*),group=1
 
-      - name: Publish Flutter capability image
+      - name: Publish framework-flutter worker image
         uses: docker/build-push-action@v7
         with:
           context: .
