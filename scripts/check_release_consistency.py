@@ -157,6 +157,25 @@ if flutter_cache.WORKER_ABI_VERSION != WORKER_ABI:
 if flutter_cache.CACHE_SCHEMA_VERSION != FLUTTER_CACHE_SCHEMA:
     fail("Flutter runtime-cache schema drift")
 
+runtime_text = (PLUGIN_ROOT / "lib" / "safe_reverser" / "runtime.py").read_text(
+    encoding="utf-8"
+)
+worker_text = (PLUGIN_ROOT / "lib" / "safe_reverser" / "worker.py").read_text(
+    encoding="utf-8"
+)
+flutter_text = (PLUGIN_ROOT / "lib" / "safe_reverser" / "flutter.py").read_text(
+    encoding="utf-8"
+)
+for fragment in ("class VerifiedImage", "immutable_image_ref", "immutable_ref"):
+    if fragment not in runtime_text:
+        fail(f"Runtime Driver lost immutable-image contract marker: {fragment}")
+for fragment in ("verified.immutable_ref", "SAFE_REVERSER_IMAGE_ID"):
+    if fragment not in worker_text:
+        fail(f"MCP worker lost immutable-image execution marker: {fragment}")
+for fragment in ("runtime_image_id", "_immutable_ref(verified"):
+    if fragment not in flutter_text:
+        fail(f"Flutter adapter lost immutable-image execution marker: {fragment}")
+
 image_checks = {
     ROOT / "sandbox" / "Dockerfile": [
         'io.safe-reverser.capability.id="static-core"',
@@ -211,9 +230,11 @@ for fragment in (
     "test_platform_architecture.py",
     "test_public_operation_contract.py",
     "test_cross_worker_contracts.py",
+    "test_runtime_image_pinning.py",
     "SAFE_REVERSER_CAPABILITY_IMAGE_STATIC_CORE",
     "SAFE_REVERSER_CAPABILITY_IMAGE_FRAMEWORK_FLUTTER",
     "capabilities']['diagnostics']",
+    "image_id'].startswith('sha256:')",
 ):
     if fragment not in control_workflow:
         fail(f"control-plane CI is missing contract gate: {fragment}")
@@ -231,5 +252,5 @@ print(
     "release consistency OK: "
     f"version={version} capability_api={CAPABILITY_API} "
     f"worker_abi={WORKER_ABI} evidence={EVIDENCE_ENVELOPE} "
-    f"flutter_cache_schema={FLUTTER_CACHE_SCHEMA}"
+    f"flutter_cache_schema={FLUTTER_CACHE_SCHEMA} immutable_image_execution=required"
 )
