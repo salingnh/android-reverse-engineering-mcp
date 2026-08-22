@@ -18,7 +18,7 @@ class AnalysisRoutingTests(unittest.TestCase):
         os.environ["SAFE_REVERSER_WORKSPACE"] = str(cls.workspace)
         os.environ["SAFE_REVERSER_DATA_ROOT"] = str(cls.data)
         cls.routing = importlib.import_module("analysis_routing")
-        cls.server = importlib.import_module("mcp_server_v2")
+        cls.server = importlib.import_module("static_semantic_worker")
 
     @classmethod
     def tearDownClass(cls):
@@ -40,10 +40,11 @@ class AnalysisRoutingTests(unittest.TestCase):
         )
         self.assertEqual(route["framework_id"], "native-android")
         self.assertEqual(route["primary_profile"], "static-core")
+        self.assertEqual(route["primary_capability_id"], "static-core")
         self.assertEqual(route["primary_profile_status"], "available")
         self.assertTrue(route["allow_java_decompile_as_primary"])
 
-    def test_flutter_never_routes_jadx_as_primary(self):
+    def test_flutter_route_declares_capability_without_claiming_runtime_readiness(self):
         route = self.routing.route_fingerprint(
             {
                 "framework": {"type": "Flutter"},
@@ -55,8 +56,12 @@ class AnalysisRoutingTests(unittest.TestCase):
         )
         self.assertEqual(route["framework_id"], "flutter")
         self.assertEqual(route["primary_profile"], "framework-flutter")
-        self.assertEqual(route["primary_profile_status"], "partial")
+        self.assertEqual(route["primary_capability_id"], "framework-flutter")
+        self.assertEqual(route["primary_profile_status"], "declared")
         self.assertFalse(route["allow_java_decompile_as_primary"])
+        self.assertTrue(
+            any("Runtime readiness" in item for item in route["limitations"])
+        )
         secondary = {
             item["profile"]: item["purpose"] for item in route["secondary_profiles"]
         }
@@ -109,7 +114,7 @@ class AnalysisRoutingTests(unittest.TestCase):
         self.assertEqual(route["framework_id"], "unknown")
         self.assertFalse(route["allow_java_decompile_as_primary"])
 
-    def test_wrapped_fingerprint_returns_flutter_analysis_route(self):
+    def test_wrapped_fingerprint_returns_declared_flutter_route(self):
         self.make_apk(
             "flutter.apk",
             {
@@ -121,11 +126,11 @@ class AnalysisRoutingTests(unittest.TestCase):
         )
         result = self.server.fingerprint({"artifact": "flutter.apk"})
         self.assertEqual(result["framework"]["type"], "Flutter")
-        self.assertEqual(
-            result["analysis_route"]["primary_profile"], "framework-flutter"
-        )
-        self.assertEqual(result["analysis_route"]["primary_profile_status"], "partial")
-        self.assertFalse(result["analysis_route"]["allow_java_decompile_as_primary"])
+        route = result["analysis_route"]
+        self.assertEqual(route["primary_profile"], "framework-flutter")
+        self.assertEqual(route["primary_capability_id"], "framework-flutter")
+        self.assertEqual(route["primary_profile_status"], "declared")
+        self.assertFalse(route["allow_java_decompile_as_primary"])
 
     def test_route_analysis_tool_is_registered(self):
         names = {tool["name"] for tool in self.server.core.TOOLS}
@@ -134,17 +139,19 @@ class AnalysisRoutingTests(unittest.TestCase):
             self.server.core.TOOL_HANDLERS["route_analysis"], self.server.route_analysis
         )
 
-    def test_health_exposes_profile_registry(self):
+    def test_health_exposes_topology_not_host_runtime_state(self):
         result = self.server.health({})
         self.assertTrue(result["analysis_routing"]["enabled"])
+        self.assertEqual(result["analysis_routing"]["schema_version"], 2)
         self.assertEqual(
             result["analysis_routing"]["profiles"]["static-core"]["status"],
             "available",
         )
         flutter = result["analysis_routing"]["profiles"]["framework-flutter"]
-        self.assertEqual(flutter["status"], "partial")
-        self.assertIn("artifact-inventory", flutter["available_capabilities"])
-        self.assertIn("dart-aot-index", flutter["planned_capabilities"])
+        self.assertEqual(flutter["status"], "declared")
+        self.assertEqual(flutter["capability_id"], "framework-flutter")
+        self.assertIn("dart-aot-index", flutter["available_capabilities"])
+        self.assertNotIn("capability_server", flutter)
         self.assertEqual(
             result["analysis_routing"]["profiles"]["framework-react-native"][
                 "status"

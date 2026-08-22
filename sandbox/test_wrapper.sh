@@ -3,98 +3,81 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 WRAPPER="$ROOT/plugins/safe-android-reverser/bin/safe-reverser-mcp"
-PLUGIN_VERSION="$(tr -d '[:space:]' < "$ROOT/plugins/safe-android-reverser/VERSION")"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
 mkdir -p "$TMP/bin" "$TMP/project" "$TMP/data"
-LOG="$TMP/podman.log"
-STATE="$TMP/image-present"
+PYLOG="$TMP/python.log"
 
 cat > "$TMP/bin/podman" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-printf 'CALL' >> "$PODMAN_LOG"
-for arg in "$@"; do printf ' <%s>' "$arg" >> "$PODMAN_LOG"; done
-printf '\n' >> "$PODMAN_LOG"
-
-if [[ "${1:-}" == "image" && "${2:-}" == "inspect" ]]; then
-  [[ -f "$PODMAN_STATE" ]] || exit 1
-  if [[ "$*" == *'org.opencontainers.image.version'* ]]; then
-    printf '%s\n' "$PODMAN_IMAGE_VERSION"
-  elif [[ "$*" == *'--format'* ]]; then
-    printf 'sha256:test-image\n'
-  fi
-  exit 0
-fi
-if [[ "${1:-}" == "pull" ]]; then
-  touch "$PODMAN_STATE"
-  exit 0
-fi
-if [[ "${1:-}" == "run" ]]; then
-  exit 0
-fi
-exit 0
+printf 'unexpected podman call:' >&2
+printf ' <%s>' "$@" >&2
+printf '\n' >&2
+exit 99
 EOF
 chmod +x "$TMP/bin/podman"
 
-# Custom image override: automatic pull, UID/GID mapping, writable data mount and release metadata.
-PODMAN_LOG="$LOG" \
-PODMAN_STATE="$STATE" \
-PODMAN_IMAGE_VERSION="$PLUGIN_VERSION" \
+cat > "$TMP/bin/python3" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+{
+  printf 'ARGV'
+  for arg in "$@"; do printf ' <%s>' "$arg"; done
+  printf '\nRUNTIME <%s>\n' "${SAFE_REVERSER_RUNTIME:-}"
+  printf 'PROJECT <%s>\n' "${SAFE_REVERSER_PROJECT_DIR:-}"
+  printf 'DATA <%s>\n' "${SAFE_REVERSER_DATA_DIR:-}"
+  printf 'VERSION <%s>\n' "${SAFE_REVERSER_PLUGIN_VERSION:-}"
+} > "$PYTHON_LOG"
+EOF
+chmod +x "$TMP/bin/python3"
+
+PYTHON_LOG="$PYLOG" \
 PATH="$TMP/bin:$PATH" \
 SAFE_REVERSER_RUNTIME=podman \
 SAFE_REVERSER_PROJECT_DIR="$TMP/project" \
 SAFE_REVERSER_DATA_DIR="$TMP/data" \
-SAFE_REVERSER_IMAGE=test.local/safe-reverser:1 \
-"$WRAPPER"
+"$WRAPPER" </dev/null
 
-grep -F 'CALL <image> <inspect> <test.local/safe-reverser:1>' "$LOG" >/dev/null
-grep -F 'CALL <pull> <test.local/safe-reverser:1>' "$LOG" >/dev/null
-grep -F '<--userns=keep-id>' "$LOG" >/dev/null
-grep -F "<--user=$(id -u):$(id -g)>" "$LOG" >/dev/null
-grep -F "<--volume=$TMP/project:/workspace:ro,z>" "$LOG" >/dev/null
-grep -F "<--volume=$TMP/data:/data:rw,z>" "$LOG" >/dev/null
-grep -F "<--env=SAFE_REVERSER_PLUGIN_VERSION=$PLUGIN_VERSION>" "$LOG" >/dev/null
-test -d "$TMP/data/jobs"
+grep -F 'ARGV' "$PYLOG" | grep -F '/bin/mcp-control-plane.py>' >/dev/null
+grep -F 'RUNTIME <podman>' "$PYLOG" >/dev/null
+grep -F "PROJECT <$TMP/project>" "$PYLOG" >/dev/null
+grep -F "DATA <$TMP/data>" "$PYLOG" >/dev/null
+VERSION="$(tr -d '[:space:]' < "$ROOT/plugins/safe-android-reverser/VERSION")"
+grep -F "VERSION <$VERSION>" "$PYLOG" >/dev/null
 
-# Default image must derive its immutable semver tag from the bundled VERSION file.
-: > "$LOG"
-touch "$STATE"
-PODMAN_LOG="$LOG" \
-PODMAN_STATE="$STATE" \
-PODMAN_IMAGE_VERSION="$PLUGIN_VERSION" \
-PATH="$TMP/bin:$PATH" \
-SAFE_REVERSER_RUNTIME=podman \
-SAFE_REVERSER_PROJECT_DIR="$TMP/project" \
-SAFE_REVERSER_DATA_DIR="$TMP/data" \
-"$WRAPPER"
+# The launcher must not own image/container lifecycle anymore.
+# If it accidentally invokes the fake runtime the test exits with status 99.
 
-grep -F "<ghcr.io/salingnh/safe-android-reverser:$PLUGIN_VERSION>" "$LOG" >/dev/null
-grep -F "<--env=SAFE_REVERSER_IMAGE_REF=ghcr.io/salingnh/safe-android-reverser:$PLUGIN_VERSION>" "$LOG" >/dev/null
-
-# Disabling automatic pull must fail before running a missing image.
-rm -f "$STATE"
-: > "$LOG"
+# A symlinked plugin data root must be rejected before the control plane starts.
+rm -f "$PYLOG"
+mkdir -p "$TMP/outside"
+ln -s "$TMP/outside" "$TMP/data-link"
 set +e
-PODMAN_LOG="$LOG" \
-PODMAN_STATE="$STATE" \
-PODMAN_IMAGE_VERSION="$PLUGIN_VERSION" \
+PYTHON_LOG="$PYLOG" \
 PATH="$TMP/bin:$PATH" \
 SAFE_REVERSER_RUNTIME=podman \
 SAFE_REVERSER_PROJECT_DIR="$TMP/project" \
-SAFE_REVERSER_DATA_DIR="$TMP/data" \
-SAFE_REVERSER_IMAGE=test.local/safe-reverser:1 \
-SAFE_REVERSER_AUTO_PULL=0 \
-"$WRAPPER" >"$TMP/stdout" 2>"$TMP/stderr"
+SAFE_REVERSER_DATA_DIR="$TMP/data-link" \
+"$WRAPPER" </dev/null >"$TMP/stdout" 2>"$TMP/stderr"
 STATUS=$?
 set -e
-
 [[ "$STATUS" -ne 0 ]]
-grep -F 'sandbox image is not installed' "$TMP/stderr" >/dev/null
-if grep -F 'CALL <pull>' "$LOG" >/dev/null; then
-  echo 'wrapper unexpectedly pulled image with SAFE_REVERSER_AUTO_PULL=0' >&2
-  exit 1
-fi
+grep -F 'plugin data directory must not be a symlink' "$TMP/stderr" >/dev/null
+test ! -f "$PYLOG"
 
-echo 'safe-reverser-mcp wrapper tests passed'
+# Runtime selection remains constrained to Podman or Docker.
+set +e
+PYTHON_LOG="$PYLOG" \
+PATH="$TMP/bin:$PATH" \
+SAFE_REVERSER_RUNTIME=not-a-runtime \
+SAFE_REVERSER_PROJECT_DIR="$TMP/project" \
+SAFE_REVERSER_DATA_DIR="$TMP/data" \
+"$WRAPPER" </dev/null >"$TMP/stdout" 2>"$TMP/stderr"
+STATUS=$?
+set -e
+[[ "$STATUS" -ne 0 ]]
+grep -F 'runtime must be podman, docker, or auto' "$TMP/stderr" >/dev/null
+
+echo 'safe-reverser host control-plane launcher tests passed'

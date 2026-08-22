@@ -22,7 +22,7 @@ class FlutterAnalysisTests(unittest.TestCase):
         os.environ["SAFE_REVERSER_IMAGE_VERSION"] = "0.2.1"
         os.environ["SAFE_REVERSER_BUILD_COMMIT"] = "test-build"
         cls.flutter = importlib.import_module("flutter_analysis")
-        cls.server = importlib.import_module("mcp_server_v2")
+        cls.server = importlib.import_module("static_semantic_worker")
 
     @classmethod
     def tearDownClass(cls):
@@ -177,7 +177,7 @@ class FlutterAnalysisTests(unittest.TestCase):
         with self.assertRaises(self.server.core.ToolError):
             self.server.inspect_flutter({"artifact": "native.apk"})
 
-    def test_flutter_tools_are_registered_and_health_is_partial(self):
+    def test_flutter_tools_are_registered_and_health_reports_declared_topology(self):
         names = {tool["name"] for tool in self.server.core.TOOLS}
         self.assertTrue(
             {
@@ -189,7 +189,7 @@ class FlutterAnalysisTests(unittest.TestCase):
         health = self.server.health({})
         self.assertEqual(
             health["analysis_routing"]["profiles"]["framework-flutter"]["status"],
-            "partial",
+            "declared",
         )
         self.assertTrue(
             health["framework_analysis"]["flutter"]["artifact_inspection"]

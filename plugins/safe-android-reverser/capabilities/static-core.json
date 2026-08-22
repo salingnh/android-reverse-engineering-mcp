@@ -1,0 +1,44 @@
+{
+  "id": "static-core",
+  "capability_api": 1,
+  "worker_abi": 1,
+  "representations": ["apk", "dex", "java", "kotlin", "resources", "jar", "aar"],
+  "trust_boundary": "static",
+  "activation": "required",
+  "adapter": "mcp-container",
+  "protocol": "mcp-stdio",
+  "image": {
+    "repository": "ghcr.io/salingnh/safe-android-reverser",
+    "role": "static-core"
+  },
+  "operations": [
+    "fingerprint",
+    "route_analysis",
+    "inspect_flutter",
+    "identify_dart_runtime",
+    "extract_flutter_assets",
+    "decompile",
+    "extract_api",
+    "build_program_index",
+    "find_symbols",
+    "find_xrefs",
+    "get_cfg",
+    "identify_protector",
+    "extract_network_model",
+    "search_source",
+    "read_source_file",
+    "recover_kotlin_names",
+    "list_jobs"
+  ],
+  "sandbox": {
+    "network": "none",
+    "read_only_root": true,
+    "drop_all_capabilities": true,
+    "no_new_privileges": true,
+    "memory": "4g",
+    "cpus": "2",
+    "pids_limit": 256,
+    "tmpfs_tmp": "1g",
+    "tmpfs_work": "2g"
+  }
+}

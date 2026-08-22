@@ -18,10 +18,6 @@ BLUTTER_ROOT = Path(os.environ.get("SAFE_BLUTTER_ROOT", "/opt/blutter")).resolve
 INPUT_ROOT = Path(os.environ.get("SAFE_FLUTTER_INPUT", "/input")).resolve()
 OUTPUT_ROOT = Path(os.environ.get("SAFE_FLUTTER_OUTPUT", "/output")).resolve()
 BLUTTER_COMMIT = os.environ.get("SAFE_BLUTTER_COMMIT", "unknown").strip().lower()
-IMAGE_REPOSITORY = os.environ.get(
-    "SAFE_FLUTTER_IMAGE_REPOSITORY",
-    "ghcr.io/salingnh/safe-android-reverser-flutter",
-).strip()
 MAX_PROCESS_OUTPUT = 120_000
 MAX_GENERATED_FILES = 20_000
 MAX_GENERATED_FILE_BYTES = 512 * 1024 * 1024
@@ -98,10 +94,8 @@ def _bounded_flags(values: Any) -> list[str]:
 def _runtime_info(libdir: Path) -> dict[str, Any]:
     """Identify only locally observable runtime data.
 
-    Upstream Blutter's `extract_dart_info()` can perform HTTP requests when a
-    Flutter engine does not embed a stable Dart version. This adapter never calls
-    that network-capable path. If the Dart version cannot be recovered from the
-    local ELF files, the result is explicitly `runtime_identity_incomplete`.
+    The worker deliberately returns a registry-independent cache identity. Image
+    repository selection belongs exclusively to the host control plane.
     """
 
     libapp, libflutter = _lib_paths(libdir)
@@ -136,15 +130,11 @@ def _runtime_info(libdir: Path) -> dict[str, Any]:
         "compressed_pointers": compressed,
         "runtime_key": None,
         "cache_tag": None,
-        "recommended_image": None,
         "expected_binary": None,
         "binary_cached": False,
         "identity_status": "identified" if dart_version else "runtime_identity_incomplete",
     }
     if not dart_version:
-        # The snapshot/arch values are still evidence, but an exact runtime
-        # analyzer must not be selected until the Dart version is known locally
-        # or resolved by the controlled builder.
         return base
 
     try:
@@ -181,7 +171,6 @@ def _runtime_info(libdir: Path) -> dict[str, Any]:
             "snapshot_hash": identity["snapshot_hash"],
             "runtime_key": str(info.lib_name),
             "cache_tag": cache_tag,
-            "recommended_image": f"{IMAGE_REPOSITORY}:{cache_tag}",
             "expected_binary": str(binary.relative_to(BLUTTER_ROOT)),
             "binary_cached": binary.is_file(),
         }
@@ -190,9 +179,6 @@ def _runtime_info(libdir: Path) -> dict[str, Any]:
 
 
 def _limit_child_files() -> None:
-    # Blutter writes multiple outputs. The container launcher must still put
-    # /output on a bounded filesystem for an aggregate quota, while RLIMIT_FSIZE
-    # prevents any one generated file from growing without bound.
     resource.setrlimit(
         resource.RLIMIT_FSIZE,
         (MAX_GENERATED_FILE_BYTES, MAX_GENERATED_FILE_BYTES),
@@ -220,11 +206,10 @@ def health() -> dict[str, Any]:
         "profile": "framework-flutter",
         "adapter": "safe-blutter-adapter",
         "blutter_commit": BLUTTER_COMMIT,
-        "blutter_root": str(BLUTTER_ROOT),
-        "image_repository": IMAGE_REPOSITORY,
         "network_required_at_runtime": False,
         "network_capable_upstream_path_used": False,
         "build_on_demand_allowed": False,
+        "registry_selection_owned_by_worker": False,
         "cached_binary_count": len(binaries),
         "cached_binaries": binaries,
         "required_runtime_constraints": {
@@ -256,7 +241,7 @@ def inspect(libdir_value: str) -> dict[str, Any]:
         next_action = "run_analyze"
     else:
         status = "runtime_cache_miss"
-        next_action = f"publish or pull exact cache image {runtime['recommended_image']}"
+        next_action = f"resolve cache_tag {runtime['cache_tag']} through the host capability registry"
     return {
         "status": status,
         "profile": "framework-flutter",
@@ -294,7 +279,7 @@ def analyze(libdir_value: str, output_value: str, timeout: int) -> dict[str, Any
             "runtime": runtime,
             "executed": False,
             "reason": "Blutter build-on-demand is disabled in the analysis runtime",
-            "recommended_image": runtime["recommended_image"],
+            "cache_tag": runtime["cache_tag"],
         }
 
     timeout = max(1, min(int(timeout), 3600))

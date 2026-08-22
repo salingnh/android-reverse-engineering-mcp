@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Release-aware entrypoint for the Safe Android Reverser MCP server."""
+"""Release-aware entrypoint for the isolated static-core capability worker."""
 from __future__ import annotations
 
 import os
@@ -7,7 +7,8 @@ import re
 from pathlib import Path
 from typing import Any
 
-import mcp_server_v2 as server
+import archive_safety
+import static_semantic_worker as server
 
 SEMVER_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
 
@@ -23,12 +24,27 @@ def _release_version() -> str:
         value = value.strip()
         if SEMVER_RE.fullmatch(value):
             return value
-    raise RuntimeError("safe-android-reverser image has no valid release version metadata")
+    raise RuntimeError(
+        "safe-android-reverser image has no valid release version metadata"
+    )
 
 
 RELEASE_VERSION = _release_version()
 server.core.SERVER_VERSION = RELEASE_VERSION
 _original_health = server.health
+
+
+def _bounded_nested_apks(artifact: Path):
+    try:
+        yield from archive_safety.nested_apks(artifact)
+    except archive_safety.ArchiveSafetyError as exc:
+        raise server.core.ToolError(str(exc)) from exc
+
+
+# All static-core operations that use core._nested_apks now inherit the same
+# hard archive budgets. The legacy helper remains an implementation detail and
+# is not allowed to bypass this worker-entrypoint policy.
+server.core._nested_apks = _bounded_nested_apks
 
 
 def health(args: dict[str, Any]) -> dict[str, Any]:
@@ -46,6 +62,20 @@ def health(args: dict[str, Any]) -> dict[str, Any]:
         "image_id": os.environ.get("SAFE_REVERSER_IMAGE_ID") or None,
         "build_commit": os.environ.get("SAFE_REVERSER_BUILD_COMMIT") or None,
         "version_consistent": len(set(versions)) == 1,
+    }
+    result["capability_worker"] = {
+        "id": "static-core",
+        "capability_api": 1,
+        "worker_abi": 1,
+        "runtime_readiness_authority": "host-control-plane",
+    }
+    result["archive_safety"] = {
+        "max_outer_entries": archive_safety.MAX_OUTER_ENTRIES,
+        "max_apk_entries": archive_safety.MAX_APK_ENTRIES,
+        "max_nested_apks": archive_safety.MAX_NESTED_APKS,
+        "max_nested_apk_bytes": archive_safety.MAX_NESTED_APK_BYTES,
+        "max_total_nested_apk_bytes": archive_safety.MAX_TOTAL_NESTED_APK_BYTES,
+        "max_apk_declared_bytes": archive_safety.MAX_APK_DECLARED_BYTES,
     }
     return result
 

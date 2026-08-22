@@ -1,0 +1,237 @@
+name: Test Safe Reverser control plane
+
+on:
+  pull_request:
+    paths:
+      - 'plugins/safe-android-reverser/**'
+      - 'frameworks/flutter/**'
+      - 'sandbox/**'
+      - 'scripts/check_release_consistency.py'
+      - '.claude-plugin/marketplace.json'
+      - '.github/workflows/test-control-plane.yml'
+  push:
+    branches: [master, 'feat/**']
+    tags: ['safe-v*']
+    paths:
+      - 'plugins/safe-android-reverser/**'
+      - 'frameworks/flutter/**'
+      - 'sandbox/**'
+      - 'scripts/check_release_consistency.py'
+      - '.claude-plugin/marketplace.json'
+      - '.github/workflows/test-control-plane.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  contracts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Check release consistency
+        run: python3 scripts/check_release_consistency.py
+
+      - name: Test platform architecture contracts
+        run: PYTHONPATH=plugins/safe-android-reverser/lib python3 plugins/safe-android-reverser/tests/test_platform_architecture.py
+
+      - name: Test public operation ownership contracts
+        run: PYTHONPATH=plugins/safe-android-reverser/lib python3 plugins/safe-android-reverser/tests/test_public_operation_contract.py
+
+      - name: Test cross-worker ABI contracts
+        run: PYTHONPATH=plugins/safe-android-reverser/lib python3 plugins/safe-android-reverser/tests/test_cross_worker_contracts.py
+
+      - name: Test immutable worker image pinning
+        run: PYTHONPATH=plugins/safe-android-reverser/lib python3 plugins/safe-android-reverser/tests/test_runtime_image_pinning.py
+
+      - name: Test shared platform resource bounds
+        run: PYTHONPATH=plugins/safe-android-reverser/lib python3 plugins/safe-android-reverser/tests/test_platform_bounds.py
+
+      - name: Test host launcher
+        run: bash sandbox/test_wrapper.sh
+
+      - name: Validate control-plane Python syntax
+        run: |
+          python3 -m py_compile \
+            plugins/safe-android-reverser/bin/mcp-control-plane.py \
+            plugins/safe-android-reverser/lib/safe_reverser/__init__.py \
+            plugins/safe-android-reverser/lib/safe_reverser/contracts.py \
+            plugins/safe-android-reverser/lib/safe_reverser/evidence.py \
+            plugins/safe-android-reverser/lib/safe_reverser/paths.py \
+            plugins/safe-android-reverser/lib/safe_reverser/runtime.py \
+            plugins/safe-android-reverser/lib/safe_reverser/registry.py \
+            plugins/safe-android-reverser/lib/safe_reverser/jobs.py \
+            plugins/safe-android-reverser/lib/safe_reverser/worker.py \
+            plugins/safe-android-reverser/lib/safe_reverser/flutter.py \
+            plugins/safe-android-reverser/lib/safe_reverser/adapters.py \
+            plugins/safe-android-reverser/lib/safe_reverser/control_plane.py \
+            plugins/safe-android-reverser/tests/test_platform_architecture.py \
+            plugins/safe-android-reverser/tests/test_public_operation_contract.py \
+            plugins/safe-android-reverser/tests/test_cross_worker_contracts.py \
+            plugins/safe-android-reverser/tests/test_runtime_image_pinning.py \
+            plugins/safe-android-reverser/tests/test_platform_bounds.py
+
+      - name: Validate single public MCP manifest
+        run: |
+          python3 -m json.tool plugins/safe-android-reverser/.mcp.json >/dev/null
+          python3 - <<'PY'
+          import json
+          manifest = json.load(open('plugins/safe-android-reverser/.mcp.json', encoding='utf-8'))
+          assert set(manifest['mcpServers']) == {'safe-android-reverser'}, manifest
+          PY
+
+      - name: Validate capability manifests
+        run: |
+          PYTHONPATH=plugins/safe-android-reverser/lib python3 - <<'PY'
+          from pathlib import Path
+          from safe_reverser.contracts import RESERVED_PUBLIC_OPERATIONS
+          from safe_reverser.registry import CapabilityRegistry
+          registry = CapabilityRegistry(Path('plugins/safe-android-reverser/capabilities'))
+          baseline = {'static-core', 'framework-flutter'}
+          assert baseline.issubset(registry.manifests()), registry.manifests()
+          static = registry.get('static-core')
+          flutter = registry.get('framework-flutter')
+          assert static.protocol == 'mcp-stdio'
+          assert static.adapter == 'mcp-container'
+          assert static.activation == 'required'
+          assert not RESERVED_PUBLIC_OPERATIONS.intersection(static.operations)
+          assert flutter.protocol == 'cli-json'
+          assert flutter.adapter == 'flutter-aot'
+          assert flutter.activation == 'required'
+          assert not RESERVED_PUBLIC_OPERATIONS.intersection(flutter.operations)
+          PY
+
+  integration:
+    needs: contracts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Read release inputs
+        id: inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          source frameworks/flutter/tools.lock.env
+          version="$(tr -d '[:space:]' < plugins/safe-android-reverser/VERSION)"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "blutter_repository=$BLUTTER_REPOSITORY" >> "$GITHUB_OUTPUT"
+          echo "blutter_commit=$BLUTTER_COMMIT" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build static-core worker
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: sandbox/Dockerfile
+          load: true
+          push: false
+          tags: safe-android-reverser:ci
+          build-args: |
+            SAFE_REVERSER_VERSION=${{ steps.inputs.outputs.version }}
+            SAFE_REVERSER_BUILD_COMMIT=${{ github.sha }}
+          cache-from: type=gha,scope=static-core
+          cache-to: type=gha,mode=max,scope=static-core
+
+      - name: Build framework-flutter worker
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: frameworks/flutter/Dockerfile
+          load: true
+          push: false
+          tags: safe-android-reverser-flutter:ci
+          build-args: |
+            SAFE_REVERSER_VERSION=${{ steps.inputs.outputs.version }}
+            SAFE_REVERSER_BUILD_COMMIT=${{ github.sha }}
+            BLUTTER_REPOSITORY=${{ steps.inputs.outputs.blutter_repository }}
+            BLUTTER_COMMIT=${{ steps.inputs.outputs.blutter_commit }}
+          cache-from: type=gha,scope=flutter-profile
+
+      - name: Verify worker ABI labels
+        env:
+          VERSION: ${{ steps.inputs.outputs.version }}
+        run: |
+          python3 - "$VERSION" <<'PY'
+          import json
+          import subprocess
+          import sys
+          version = sys.argv[1]
+          expected = {
+              'safe-android-reverser:ci': 'static-core',
+              'safe-android-reverser-flutter:ci': 'framework-flutter',
+          }
+          for image, capability_id in expected.items():
+              info = json.loads(subprocess.check_output(['docker', 'image', 'inspect', image]))[0]
+              labels = info['Config']['Labels']
+              assert labels['org.opencontainers.image.version'] == version, labels
+              assert labels['io.safe-reverser.capability.id'] == capability_id, labels
+              assert labels['io.safe-reverser.capability.api'] == '1', labels
+              assert labels['io.safe-reverser.worker.abi'] == '1', labels
+          PY
+
+      - name: Smoke test one public MCP control plane
+        env:
+          SAFE_REVERSER_RUNTIME: docker
+          SAFE_REVERSER_AUTO_PULL: '0'
+          SAFE_REVERSER_CAPABILITY_IMAGE_STATIC_CORE: safe-android-reverser:ci
+          SAFE_REVERSER_CAPABILITY_IMAGE_FRAMEWORK_FLUTTER: safe-android-reverser-flutter:ci
+        run: |
+          export SAFE_REVERSER_PROJECT_DIR="$PWD"
+          export SAFE_REVERSER_DATA_DIR="$RUNNER_TEMP/safe-reverser-control-plane"
+          output="$RUNNER_TEMP/control-plane.jsonl"
+          printf '%s\n' \
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"ci","version":"1"}}}' \
+            '{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}' \
+            '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' \
+            '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"health","arguments":{}}}' \
+            '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"list_capabilities","arguments":{}}}' \
+          | plugins/safe-android-reverser/bin/safe-reverser-mcp > "$output"
+          python3 - "$output" <<'PY'
+          import json
+          import sys
+          rows = [json.loads(line) for line in open(sys.argv[1], encoding='utf-8') if line.strip()]
+          baseline = {'static-core', 'framework-flutter'}
+          tool_response = next(item for item in rows if item.get('id') == 2)
+          names = {item['name'] for item in tool_response['result']['tools']}
+          assert 'health' in names
+          assert 'list_capabilities' in names
+          assert 'fingerprint' in names
+          assert 'build_program_index' in names
+          assert 'analyze_flutter_aot' in names
+          assert 'find_dart_symbols' in names
+          health_response = next(item for item in rows if item.get('id') == 3)
+          health = json.loads(health_response['result']['content'][0]['text'])
+          assert health['status'] == 'ok', health
+          assert health['architecture'] == 'single-host-control-plane', health
+          assert health['control_plane']['runtime_socket_mounted_into_workers'] is False
+          static_state = health['capabilities']['states']['static-core']
+          flutter_state = health['capabilities']['states']['framework-flutter']
+          assert static_state['state'] == 'ready', health
+          assert flutter_state['state'] == 'ready', health
+          assert static_state['activation'] == 'required', health
+          assert flutter_state['activation'] == 'required', health
+          assert static_state['image_id'].startswith('sha256:'), static_state
+          assert flutter_state['image_id'].startswith('sha256:'), flutter_state
+          assert len(static_state['image_id']) == 71, static_state
+          assert len(flutter_state['image_id']) == 71, flutter_state
+          diagnostics = health['capabilities']['diagnostics']
+          assert baseline.issubset(diagnostics), diagnostics
+          assert diagnostics['static-core']['capability_worker']['id'] == 'static-core', diagnostics
+          assert diagnostics['framework-flutter']['runtime_cache_schema'] == 2, diagnostics
+          flutter_worker = diagnostics['framework-flutter']['worker']
+          assert flutter_worker['status'] == 'ok', flutter_worker
+          assert flutter_worker['network_required_at_runtime'] is False, flutter_worker
+          assert flutter_worker['build_on_demand_allowed'] is False, flutter_worker
+          caps_response = next(item for item in rows if item.get('id') == 4)
+          caps = json.loads(caps_response['result']['content'][0]['text'])
+          assert caps['capability_api'] == 1, caps
+          assert caps['worker_abi'] == 1, caps
+          assert baseline.issubset(caps['registry']), caps
+          assert caps['registry']['static-core']['adapter'] == 'mcp-container', caps
+          assert caps['registry']['framework-flutter']['adapter'] == 'flutter-aot', caps
+          assert 'health' not in caps['registry']['static-core']['operations'], caps
+          PY

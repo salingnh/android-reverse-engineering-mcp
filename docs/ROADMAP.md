@@ -1,275 +1,228 @@
-# Reverse Engineering Roadmap
+# Safe Android Reverser Roadmap
 
 ## Vision
 
-Safe Android Reverser should become an **AI-native Android security and program-understanding platform**, not a container that merely accumulates reverse-engineering tools.
+Safe Android Reverser is an **AI-native Android security and program-understanding platform**. The agent asks semantic questions; one host MCP control plane routes work to isolated capability workers; workers return bounded, provenance-carrying evidence.
 
-The target is an orchestration and evidence layer where an AI agent asks high-level questions, the MCP server selects the correct analyzer for the artifact representation, executes it inside an appropriate capability profile, normalizes the evidence, and returns bounded, reproducible facts for reasoning.
+Core invariants:
 
-Core principles:
-
-> **The agent reasons. The MCP server controls. The sandbox executes.**
+> **The agent reasons. The MCP control plane controls. Capability workers execute.**
 
 > **Detect the framework first, then analyze the representation that actually contains the business logic.**
 
-The canonical long-term direction and decision log live in [`PROJECT_DIRECTION.md`](PROJECT_DIRECTION.md).
+The long-term architecture is defined in [`PROJECT_DIRECTION.md`](PROJECT_DIRECTION.md), Capability SPI in [`CAPABILITY_SPI.md`](CAPABILITY_SPI.md), and engineering process in [`DEVELOPMENT.md`](DEVELOPMENT.md).
 
 ---
 
-## Current status — release 0.2.1
-
-The current static-safe baseline already contains:
+# Release train
 
 ```text
-Java 21
-JADX 1.5.6
-Vineflower 1.12.0
-Androguard 4.1.4
-file
-binutils: strings / readelf / objdump / nm
-Python MCP implementation
+0.3.0  Platform Foundation + Flutter AOT
+0.4.0  Data-flow Intelligence
+0.5.0  Security Intelligence
+0.6.0  Dynamic Correlation
+0.7.0  Native/JNI Intelligence
+0.8.0  Framework Coverage
+0.9.0  Pattern Discovery + Independent Verification
+1.0.0  Stable Platform Contracts
 ```
 
-Current semantic MCP operations include:
+From 0.3 onward, milestones extend the same control-plane/capability/runtime/job/evidence architecture. A milestone must not intentionally ship a mechanism already expected to be replaced in the next milestone.
 
-```text
-health
-fingerprint
-decompile
-extract_api
-search_source
-read_source_file
-recover_kotlin_names
-list_jobs
-build_program_index
-find_symbols
-find_xrefs
-get_cfg
-identify_protector
-extract_network_model
-```
-
-Current strengths:
-
-- APK/XAPK/APKS/APKM/JAR/AAR handling;
-- framework fingerprinting;
-- Java/Kotlin decompilation;
-- Androguard-backed DEX semantic indexing;
-- symbol localization and method XREFs;
-- bounded CFG extraction;
-- first-pass structured network modeling;
-- basic ELF/native inventory;
-- evidence provenance and bounded output;
-- rootless/network-isolated static execution with no generic shell MCP surface.
-
-Current gaps that materially block deeper analysis:
-
-- framework-aware routing after fingerprinting;
-- Flutter Dart AOT semantic recovery from `libapp.so`;
-- true interprocedural value/data-flow tracing;
-- richer Android manifest/resources/Smali analysis;
-- deep native/JNI analysis;
-- security knowledge/rule verification;
-- React Native/Hermes, Unity/IL2CPP and managed-runtime analyzers;
-- controlled dynamic instrumentation and static↔dynamic correlation.
+Breaking platform contract changes require an explicit architecture decision, migration path, compatibility tests, documentation, and senior review.
 
 ---
 
-# 1. Current development track — Framework Router + Flutter AOT
+# 0.3.0 — Platform Foundation + Flutter AOT
 
-**Priority: P0 / active next development track**
+**Priority:** P0 / active integration and acceptance
 
-A real Flutter application exposed an important architectural limitation: recognizing Flutter is not sufficient if the workflow then continues through Java/Kotlin-oriented analysis. In release Flutter apps, most Dart business logic is AOT-compiled into `libapp.so`; JADX therefore mainly exposes the Android host shell and plugins.
+0.3 is the architecture-foundation release. Flutter is the first external framework capability proving that new analyzers can be added without creating another public MCP or duplicating generic orchestration.
 
-The platform must route analysis by framework:
+## Already merged into `master`
+
+- [x] framework-aware routing foundation;
+- [x] PEG schema v2 foundation;
+- [x] bounded Flutter artifact/runtime inspection;
+- [x] pinned offline-safe Blutter profile;
+- [x] Flutter Dart AOT semantic index;
+- [x] `find_dart_symbols`;
+- [x] `find_dart_strings`;
+- [x] `find_dart_xrefs`;
+- [x] `map_dart_to_native`;
+- [x] bounded Flutter network/auth/signing/crypto reconstruction.
+
+## Final 0.3 platform branch
+
+The 0.3 integration branch now contains:
+
+- [x] exactly one public host-side MCP control plane;
+- [x] Capability API v1;
+- [x] Worker ABI v1;
+- [x] EvidenceEnvelope v1 compatibility layer;
+- [x] manifest-driven operation ownership;
+- [x] generic control-plane dispatch through capability adapters;
+- [x] `required` / `optional` / `opt-in` activation semantics;
+- [x] `dynamic-opt-in` trust contract reserved for future dynamic analysis;
+- [x] explicit `SAFE_REVERSER_ENABLE_CAPABILITIES` opt-in gate;
+- [x] shared Docker/Podman Runtime Driver;
+- [x] immutable image-ID execution after OCI provenance verification;
+- [x] shared Path SDK and metadata safety primitives;
+- [x] shared bounded `AnalysisJobStore`;
+- [x] static-core converted to an isolated capability worker;
+- [x] framework-flutter behind the same public control plane;
+- [x] Flutter worker removed from deployment/registry ownership;
+- [x] exact Flutter runtime cache bound to cache schema + Capability API + Worker ABI + Dart/snapshot/arch/OS/compressed-pointers + Blutter commit;
+- [x] cross-worker ABI/cache regression tests;
+- [x] shared route-readiness enrichment;
+- [x] modular static/Flutter/control-plane CI;
+- [x] architecture release consistency gate;
+- [x] durable project/development rules in repository docs.
+
+## Remaining acceptance gate
+
+- [ ] final dead-reference/code sweep on exact branch head;
+- [ ] exact-head GitHub Actions green;
+- [ ] inspect exact-head Action logs for any failure, not an older green commit;
+- [ ] final architecture/security review `PASS`;
+- [ ] senior milestone acceptance;
+- [ ] merge 0.3 platform PR;
+- [ ] release-version/documentation commit;
+- [ ] verify at least one controlled exact Flutter runtime-cache build for production release;
+- [ ] release CI;
+- [ ] publish `safe-v0.3.0` only from the exact tested release commit.
+
+## 0.3 architecture
 
 ```text
-artifact
-   ↓
-fingerprint / framework router
-   ├─ Native Android      → DEX / JADX / Androguard
-   ├─ Flutter             → Dart AOT + libapp.so + Flutter assets
-   ├─ React Native/Hermes → Hermes / JavaScript bytecode
-   ├─ Unity IL2CPP        → metadata + native analysis
-   └─ Xamarin/.NET MAUI   → managed assemblies
+AI agent
+   |
+   v
+safe-android-reverser MCP
+host control plane
+   |
+   +-- Capability Registry
+   +-- Adapter Registry/factory
+   +-- Runtime Driver
+   +-- Path SDK
+   +-- AnalysisJobStore
+   +-- Evidence / PEG contracts
+   |
+   +-- static-core worker
+   +-- framework-flutter worker
 ```
 
-## 1.1 Flutter artifact inventory
+There is one public MCP. Frameworks are capability modules, not public orchestration servers.
 
-Implement structural inspection for:
+## 0.3 capability boundary
 
-```text
-lib/<abi>/libapp.so
-lib/<abi>/libflutter.so
-assets/flutter_assets/
-AssetManifest*
-FontManifest*
-NOTICES*
-package/config clues
-Flutter/Dart snapshot/runtime metadata
-```
+### static-core
 
-Planned MCP operations:
+Owns generic Android package/DEX/JVM/resource analysis, generic routing preflight, and fast native triage.
+
+It must not become the deep semantic implementation for Dart, Hermes, IL2CPP, .NET, or other external frameworks.
+
+### framework-flutter
+
+Owns Dart AOT/Flutter-specific analysis:
 
 ```text
-inspect_flutter
-identify_dart_runtime
-extract_flutter_assets
-```
-
-Acceptance criteria:
-
-- identify all Flutter-related members across APK/XAPK splits;
-- identify available ABI(s);
-- locate the business-logic-bearing `libapp.so`;
-- collect runtime/snapshot metadata sufficient to select an AOT analyzer;
-- report explicit limitations when the runtime/version/ABI is unsupported.
-
-## 1.2 Dart AOT-aware static analysis
-
-Primary initial candidate: **Blutter**.
-
-Blutter is valuable because it does not treat `libapp.so` as a generic stripped ELF only. It uses the Dart runtime corresponding to the target snapshot and can recover object-pool data, symbol-like function information, code offsets, assemblies and Frida-oriented metadata.
-
-Do **not** allow the normal static sandbox to silently clone Dart sources or build missing analyzers during an analysis run. Blutter's build-on-demand behavior conflicts with the project's immutable, offline static trust model.
-
-Preferred deployment:
-
-```text
-framework-flutter image/profile
-        │
-        ├─ pinned Blutter source/version
-        ├─ prebuilt or controlled-cache Dart runtime analyzers
-        ├─ no arbitrary caller command execution
-        └─ normalized MCP adapter
-```
-
-Planned MCP operations:
-
-```text
-build_flutter_index
+analyze_flutter_aot
 find_dart_symbols
 find_dart_strings
 find_dart_xrefs
 map_dart_to_native
-```
-
-Normalize results into the Program Evidence Graph (PEG):
-
-```text
-DartLibrary
-DartClass
-DartFunction
-DartObject
-String
-NativeOffset
-Endpoint
-HttpHeader
-CryptoSignal
-CallEdge / XrefEdge
-Evidence
-```
-
-Acceptance criteria:
-
-- recover high-signal Dart package/library/class/function metadata where supported;
-- recover strings and object-pool values without relying only on generic `strings` output;
-- map recovered functions to `libapp.so` code offsets;
-- keep analyzer/version/runtime provenance;
-- expose bounded semantic results rather than raw multi-megabyte dumps.
-
-## 1.3 Flutter network/auth/crypto reconstruction
-
-Build on the Dart AOT index rather than merely scanning for URL-shaped strings.
-
-Planned operation:
-
-```text
 extract_flutter_network_model
+list_flutter_jobs
 ```
 
-Target evidence:
+### Future capabilities
 
-```text
-first-party host
-endpoint/path
-Dart owning library/class/function
-HTTP client clues (Dio/http/etc.)
-request/header construction clues
-auth/token/signature signals
-native offset evidence
-confidence state + limitations
-```
+New framework/native/security/dynamic modules extend Capability SPI. Central architecture CI validates invariants and required release baselines, not a forever-exact set of capability IDs.
 
-Generic Rizin/Ghidra analysis should be used only after Dart-level localization identifies a native neighborhood that needs deeper CFG/XREF/decompilation.
+## 0.3 acceptance criteria
+
+### Architecture
+
+- one public MCP control plane;
+- no framework-specific public MCP;
+- Docker/Podman lifecycle only in shared Runtime Driver;
+- no runtime socket mounted into workers;
+- capability manifests define operation ownership, activation, adapter, protocol, trust boundary, image role, and sandbox policy;
+- duplicate public operations rejected;
+- generic dispatch does not branch on framework/operation names;
+- static-core and Flutter workers publish compatible Capability API/Worker ABI labels;
+- adding a compatible optional capability does not require weakening/replacing generic runtime/job/path/evidence architecture;
+- central gates validate invariants/baseline requirements rather than exact forever capability membership.
+
+### Security
+
+- static/framework workers use `network=none`;
+- root filesystem read-only;
+- Linux capabilities dropped;
+- `no-new-privileges`;
+- non-root execution;
+- bounded CPU, memory, PIDs, tmpfs, archive entries, filesystem scans, generated files, and returned output;
+- no arbitrary shell/exec MCP;
+- no analyzer/runtime build/download during normal offline analysis;
+- path traversal/symlink/archive-bomb/job-scan defenses have regression tests;
+- worker/runtime images are provenance checked and executed by immutable image ID;
+- `network=controlled` is not executable by the 0.3 static Runtime Driver;
+- future dynamic privileges require explicit opt-in.
+
+### Flutter
+
+- bounded APK/XAPK/APKS/APKM preparation;
+- exact `arm64-v8a` `libapp.so` + `libflutter.so` handling;
+- deterministic local Dart/runtime/snapshot identity;
+- runtime cache miss explicit and never invokes in-sandbox builder;
+- semantic index persistent and bounded;
+- Dart symbols/strings/XREF/native mappings and network/auth/crypto evidence queryable;
+- XREF evidence never represented as true data flow;
+- worker returns runtime/cache identity, not registry policy;
+- host selects/verifies immutable runtime image.
+
+### Evidence
+
+- optimized analyzer indexes remain private implementation details;
+- public capability outputs receive stable `safe_reverser_contract` metadata;
+- valid material provenance receives common EvidenceEnvelope;
+- evidence state remains `observed`, `derived`, or `hypothesized`;
+- no invented numeric confidence.
+
+### CI/release
+
+- static worker CI green;
+- Flutter worker CI green;
+- control-plane contract/integration CI green;
+- exact release-consistency gate green;
+- exact-head means the exact reviewed/merged commit;
+- senior architecture/security milestone review passes;
+- required release images are published immutably from the exact tested release commit.
 
 ---
 
-# 2. Strong Android static core
+# 0.4.0 — Data-flow Intelligence
 
-**Priority: P0/P1**
+**Priority:** P0 immediately after 0.3 acceptance
 
-Java/Kotlin semantic analysis is already present, but package fidelity and bytecode/resource coverage should be extended.
+0.4 adds true value/data-flow semantics **without changing the 0.3 orchestration model**.
 
-Add or complete:
+## Objectives
 
-```text
-Apktool
-aapt2
-apksigner / apksig
-smali / baksmali
-APKiD packaging/license decision
-```
-
-Androguard, file and binutils are already present in the 0.2.1 static image and should not be tracked as missing work.
-
-Planned MCP operations:
+Move from:
 
 ```text
-inspect_manifest
-inspect_resources
-inspect_signature
-list_components
-list_permissions
-find_exported_components
-inspect_deep_links
-inspect_network_security_config
-list_dex
-inspect_dex
-search_smali
-read_smali
-map_java_to_smali
+symbol / XREF / call adjacency
 ```
 
-Acceptance criteria:
-
-- manifest/resources parsed structurally across split APKs;
-- package signing/certificate information exposed;
-- exported components/deep links/network-security configuration normalized;
-- DEX↔source↔Smali locations can be correlated;
-- no arbitrary resource/smali modification in the default analysis profile.
-
-Mutation/rebuild operations, if added later, belong in an explicit `patch-lab` capability rather than the default static profile.
-
----
-
-# 3. True data-flow and value tracing
-
-**Priority: P0/P1 — highest semantic capability after framework routing**
-
-XREF/call adjacency is not proof of value flow. The next major semantic layer is interprocedural tracing.
-
-Candidate backends:
+toward:
 
 ```text
-SootUp / Jimple
-FlowDroid-family taint/data-flow analysis
-custom bounded DEX tracing for simple cases
+source -> transformation -> field/argument/return -> sanitizer -> sink
 ```
 
-Do not run expensive whole-app FlowDroid-style analysis by default. Use the existing symbol/XREF/network indexes to localize a small relevant subgraph first.
-
-Planned MCP operations:
+Planned semantic operations:
 
 ```text
 trace_value
@@ -285,42 +238,45 @@ find_signing_logic
 trace_crypto
 ```
 
-Target flow:
+Candidate backends:
 
-```text
-source/value
-   ↓
-definition
-   ↓
-transformations
-   ↓
-serialization / crypto / encoding
-   ↓
-header / body / query / sink
-```
+- SootUp / Jimple;
+- FlowDroid-family analysis;
+- bounded custom DEX slicing/tracing;
+- framework-specific IR/data-flow producers;
+- later native/framework cross-boundary flow producers.
 
-Acceptance criteria:
+## Design rule
 
-- findings distinguish CALLS/XREFS from FLOWS_TO evidence;
-- sources, sinks and sanitizers are explicit;
-- auth/token/header/signature paths can be reconstructed across methods;
-- unsupported/reflection/native boundaries are reported instead of guessed.
+Do not run expensive whole-app taint analysis by default. Existing symbol/XREF/network models should localize a small subgraph first, then data-flow analysis escalates only where needed.
+
+## 0.4 acceptance
+
+- CALLS/XREFS remain distinct from `FLOWS_TO`;
+- sources, sinks, transformations, sanitizers, reads, writes, parameters, returns are explicit;
+- auth/token/header/signature paths can cross methods when supported;
+- reflection/native/framework gaps are reported rather than guessed;
+- evidence uses existing EvidenceEnvelope/PEG contracts;
+- no new public MCP, job store, runtime wrapper, or evidence architecture;
+- resource budgets and partial/unsupported states are explicit.
 
 ---
 
-# 4. Security knowledge and vulnerability analysis
+# 0.5.0 — Security Intelligence
 
-**Priority: P1**
+**Priority:** P1
 
-Security analysis should evolve beyond isolated Semgrep/mobsfscan hits into a machine-readable security knowledge layer mapped onto PEG evidence.
+Build a machine-readable security knowledge/verification layer over 0.3/0.4 evidence.
 
-Candidate rule sources/tooling:
+Candidate sources/backends:
 
 ```text
 Semgrep
 mobsfscan
-OWASP MASVS / MASWE / MASTG-derived knowledge
-project-specific source/sink/sanitizer registry
+OWASP MASVS
+OWASP MASWE
+OWASP MASTG
+project source/sink/sanitizer registry
 ```
 
 Planned operations:
@@ -332,9 +288,7 @@ verify_finding
 coverage_report
 ```
 
-A rule match is evidence for review, not automatically a verified vulnerability.
-
-Target lifecycle:
+Finding lifecycle:
 
 ```text
 candidate
@@ -344,177 +298,46 @@ probable
 verified / refuted / unknown
 ```
 
-Each finding should retain:
+A rule hit is evidence for review, not automatically a verified vulnerability.
 
-```text
-rule/version
-weakness mapping
-source/sink/sanitizer definitions
-graph/data-flow evidence
-location/provenance
-analyzer versions
-limitations
-runtime confirmation when available
-```
+## 0.5 acceptance
+
+- findings retain rule/version, weakness mapping, source locations, analyzer provenance, evidence state, limitations, and flow evidence when available;
+- Investigator and Verifier are logically independent;
+- security capabilities consume shared PEG/evidence instead of introducing new result architecture;
+- false-positive regression corpus exists for promoted rules.
 
 ---
 
-# 5. Native and JNI analysis
+# 0.6.0 — Dynamic Correlation
 
-**Priority: P1/P2**
+**Priority:** P2
 
-Generic native analysis remains essential for request signing, custom encryption, anti-debugging, certificate pinning, proprietary protocols, JNI bridges and framework runtimes.
+Dynamic analysis is an explicit **opt-in capability** behind the same host control plane.
 
-## 5.1 Fast ELF triage — current baseline
-
-The static image already includes:
+The contract already exists in 0.3:
 
 ```text
-file
-strings
-readelf
-objdump
-nm
+trust_boundary = dynamic-opt-in
+activation = opt-in
+sandbox.network = controlled
+SAFE_REVERSER_ENABLE_CAPABILITIES=<explicit id>
 ```
 
-Extend the semantic wrapper with:
-
-```text
-inspect_elf
-list_sections
-list_imports
-list_exports
-list_symbols
-search_native_strings
-find_jni_exports
-```
-
-## 5.2 Rizin profile — P1
-
-Use Rizin for scriptable/headless native XREF/CFG/disassembly.
-
-Planned operations:
-
-```text
-disassemble_function
-find_native_xrefs
-analyze_native_function
-find_native_callers
-find_native_callees
-inspect_jni
-```
-
-Do not expose a generic Rizin console.
-
-## 5.3 Ghidra headless — P2
-
-Use a separate native image for difficult ARM/ARM64 decompilation, P-code/IR analysis, complex JNI and crypto routines.
-
-Target cross-language graph:
-
-```text
-Java/Kotlin method
-      ↓ JNI_BINDS
-native function
-      ↓
-native CFG / data flow
-```
-
-Ghidra should be an escalation backend, not a reason to enlarge the default static image.
-
----
-
-# 6. Additional framework analyzers
-
-**Priority: P2 after Flutter foundation**
-
-The framework-adapter pattern established for Flutter should be reused rather than implemented as ad-hoc tool wrappers.
-
-## 6.1 React Native / Hermes
-
-Detect:
-
-```text
-assets/index.android.bundle
-Hermes bytecode
-source maps
-React Native bridge metadata
-```
-
-Planned operations:
-
-```text
-inspect_react_native
-decompile_hermes
-build_hermes_index
-find_js_symbols
-extract_js_endpoints
-```
-
-## 6.2 Unity / IL2CPP
-
-Detect and correlate:
-
-```text
-libil2cpp.so
-global-metadata.dat
-assets/bin/Data
-```
-
-Candidate tooling:
-
-```text
-Il2CppDumper
-Il2CppInspector or maintained alternatives after license/security review
-```
-
-Planned operations:
-
-```text
-inspect_unity
-recover_il2cpp_metadata
-map_il2cpp_methods
-search_unity_symbols
-```
-
-## 6.3 Xamarin / .NET MAUI
-
-Add managed assembly detection and IL-aware analysis instead of relying on JADX for host code.
-
-## 6.4 Protocol adapters
-
-Add specialized extraction/modeling for:
-
-```text
-protobuf / gRPC
-GraphQL
-WebSocket
-Socket.IO
-SSE
-MQTT
-custom DNS / DoH
-```
-
----
-
-# 7. Controlled dynamic analysis
-
-**Priority: P2/P3; separate trust boundary**
-
-Dynamic analysis must not be bolted onto the static container.
+The 0.3 static Runtime Driver intentionally refuses `controlled`; 0.6 supplies the privileged implementation without changing Capability SPI.
 
 Candidate components:
 
 ```text
 ADB
-Android emulator / approved device
+approved emulator/device
 Frida
 Objection where useful
 mitmproxy / controlled TLS observation
-reFlutter for Flutter-specific runtime investigation where appropriate
+reFlutter where appropriate
 ```
 
-Prefer semantic runtime operations:
+Prefer semantic operations:
 
 ```text
 list_devices
@@ -529,88 +352,173 @@ collect_runtime_coverage
 correlate_runtime
 ```
 
-Avoid making unrestricted `run_frida_script(script)` the primary interface.
+Avoid unrestricted `run_frida_script(script)` as the primary interface.
 
-Target feedback loop:
+Target loop:
 
 ```text
-static evidence
-   ↓
-unresolved hypothesis
-   ↓
+static hypothesis
+      ↓
 targeted runtime observation
-   ↓
+      ↓
 OBSERVED_* evidence
-   ↓
+      ↓
 CONFIRMS / CONTRADICTS
-   ↓
-updated PEG
+      ↓
+shared PEG
 ```
 
-Acceptance criteria:
+## 0.6 acceptance
 
 - explicit user opt-in;
-- separate image/MCP capability;
-- clear device/network privilege policy;
+- separate dynamic trust/runtime boundary;
+- static workers remain offline and unprivileged;
+- device/network scope is constrained and auditable;
 - secret/value redaction controls;
-- runtime evidence uses the same normalized evidence model as static analysis.
+- runtime observations reuse shared analysis/evidence IDs and PEG contracts.
 
 ---
 
-# 8. AI-agent architecture
+# 0.7.0 — Native/JNI Intelligence
 
-**Priority: P1/P2**
+**Priority:** P1/P2
 
-AI should orchestrate evidence rather than replace deterministic analysis.
+Add generic native/JNI analysis as capability modules behind the existing Runtime Driver.
 
-Recommended roles:
+Current fast triage substrate:
 
 ```text
-Planner
-Surface Mapper
-Graph Investigator
-Flow Analyst
-Endpoint Analyst
-Native/Framework Analyst
-Dynamic Explorer
-Pattern Miner
-Critic
-Verifier
-Reporter
+file
+strings
+readelf
+objdump
+nm
 ```
 
-The Critic/Verifier path should be logically independent of the Investigator so the same reasoning process does not both invent and approve a claim.
+Planned semantic operations:
 
-Long-lived investigations should use stable `analysis_id` / artifact hash handles and retrieve bounded graph neighborhoods/resources instead of repeatedly reading entire decompiled trees.
+```text
+inspect_elf
+list_sections
+list_imports
+list_exports
+list_symbols
+search_native_strings
+find_jni_exports
+find_native_xrefs
+disassemble_function
+analyze_native_function
+find_native_callers
+find_native_callees
+inspect_jni
+```
+
+Candidate backends:
+
+- Rizin for scriptable/headless CFG/XREF/disassembly;
+- Ghidra headless for difficult ARM/ARM64, P-code/IR, JNI, crypto, or escalation.
+
+No generic Rizin/Ghidra console is exposed to the agent.
+
+Target PEG bridge:
+
+```text
+Java/Kotlin method
+      ↓ JNI_BINDS
+native function
+      ↓
+native CFG/data flow
+```
+
+## 0.7 acceptance
+
+- generic native capability reuses 0.3 runtime/job/path/evidence contracts;
+- JNI mappings carry provenance in both managed/native representations;
+- framework-aware analyzers remain primary when they preserve higher-level semantics;
+- native escalation can consume localized offsets/symbols from Flutter/other framework capabilities.
 
 ---
 
-# 9. Novel vulnerability-pattern discovery
+# 0.8.0 — Framework Coverage
 
-**Priority: P3 after PEG + data flow + verifier are stable**
+**Priority:** P2
 
-Do not ask an LLM to scan a whole app and invent vulnerabilities directly. Use graph/data-flow motifs and anomaly ranking to generate candidates, then verify them deterministically.
+New frameworks are capability modules using the 0.3 SPI.
 
-Target pipeline:
+## React Native / Hermes
 
 ```text
-known rules / security knowledge
-          ↓
+inspect_react_native
+decompile_hermes
+build_hermes_index
+find_js_symbols
+extract_js_endpoints
+```
+
+Hermes must not be inferred from React Native alone.
+
+## Unity / IL2CPP
+
+```text
+inspect_unity
+recover_il2cpp_metadata
+map_il2cpp_methods
+search_unity_symbols
+```
+
+## Xamarin / .NET MAUI
+
+Use managed assembly/IL-aware analysis rather than relying on Android host-shell JADX output.
+
+## Protocol adapters
+
+Specialized evidence producers may cover:
+
+```text
+protobuf / gRPC
+GraphQL
+WebSocket
+Socket.IO
+SSE
+MQTT
+custom DNS / DoH
+```
+
+## 0.8 acceptance
+
+Adding a module must not require:
+
+- another public MCP;
+- another generic Docker/Podman wrapper;
+- duplicated job/path/evidence lifecycle;
+- a new evidence-state model;
+- operation-name-specific dispatch branches in the control plane;
+- weakening static sandbox policy.
+
+---
+
+# 0.9.0 — Pattern Discovery + Independent Verification
+
+**Priority:** P3
+
+Use graph/data-flow motifs and anomaly ranking to propose candidate weaknesses, then verify deterministically.
+
+```text
+known security knowledge
+        ↓
 PEG behavior motifs
-          ↓
+        ↓
 anomaly / unusual-flow ranking
-          ↓
+        ↓
 AI hypothesis
-          ↓
+        ↓
 reachability + data-flow + sanitizer verification
-          ↓
-targeted dynamic confirmation when necessary
-          ↓
+        ↓
+targeted dynamic confirmation where needed
+        ↓
 validated candidate
-          ↓
-rule synthesis
-          ↓
-positive + negative regression corpus
+        ↓
+rule synthesis + regression corpus
 ```
 
 Planned operations:
@@ -622,236 +530,80 @@ validate_rule
 regression_test_rule
 ```
 
-AI may propose rules, but promotion into production rule packs requires deterministic regression gates.
+AI may propose rules. Production promotion requires deterministic positive/negative regression gates.
 
 ---
 
-# 10. Program Evidence Graph
+# 1.0.0 — Stable Platform Contracts
 
-PEG is the long-lived core that unifies all analyzers.
+1.0 focuses on compatibility, operational hardening, reproducibility, and evidence quality rather than another orchestration rewrite.
 
-Representative nodes:
+Target guarantees:
 
-```text
-Artifact
-APK
-DexFile
-NativeLibrary
-AndroidComponent
-Class
-Method
-Field
-BasicBlock
-Value
-String
-DartLibrary
-DartFunction
-NativeFunction
-JNIBinding
-Host
-Endpoint
-HttpHeader
-CryptoOperation
-StorageKey
-ProtocolMessage
-RuntimeEvent
-Trace
-Finding
-Evidence
-```
+- one public MCP control plane;
+- documented Capability API/Worker ABI compatibility policy;
+- public semantic-operation input/output schema compatibility policy;
+- supported capability/artifact/framework/runtime matrix;
+- reproducible image provenance and SBOM;
+- bounded resource behavior;
+- durable analysis/evidence identifiers;
+- regression suites across framework/runtime versions;
+- architecture/security release gate;
+- migration policy for future contract changes.
 
-Representative edges:
-
-```text
-CONTAINS
-DECLARES
-CALLS
-XREFS
-READS
-WRITES
-FLOWS_TO
-DERIVED_FROM
-RETURNS
-IMPLEMENTS
-JNI_BINDS
-BUILDS_REQUEST
-SENDS_TO
-AUTHENTICATES_WITH
-ENCODES_WITH
-ENCRYPTS_WITH
-OBSERVED_CALL
-OBSERVED_VALUE
-CONFIRMS
-CONTRADICTS
-```
-
-Evidence state:
-
-```text
-observed     direct bytecode / binary / IR / runtime fact
-derived      deterministic analyzer inference
-hypothesized agent/heuristic interpretation requiring verification
-```
-
-Every material fact should preserve:
-
-```text
-analysis_id
-artifact/input SHA-256
-analyzer name + version
-image/build identity
-configuration/schema version
-source location or native offset
-evidence state
-limitations
-```
+Operation-name equality alone is not sufficient for 1.0 compatibility. Before 1.0, externally meaningful operation schemas must be versioned or otherwise compatibility-checked.
 
 ---
 
-# 11. Capability-image architecture
+# Cross-cutting static Android improvements
 
-Do not grow one privileged image indefinitely.
+Static Android fidelity evolves continuously behind `static-core` without changing the control-plane architecture.
 
-```text
-safe-android-reverser
-├── static-core
-│   ├── APK / bundle / manifest / resources
-│   ├── DEX / Java / Kotlin / Smali
-│   └── fast native triage
-│
-├── framework-flutter
-│   ├── Dart runtime identification
-│   ├── Dart AOT recovery
-│   └── libapp.so semantic mapping
-│
-├── framework-hermes
-├── framework-il2cpp
-├── native
-│   ├── Rizin
-│   ├── Ghidra headless
-│   └── JNI / native IR
-│
-└── dynamic
-    ├── emulator / approved device
-    ├── curated Frida instrumentation
-    └── controlled network/TLS observation
-```
-
-The static/default profile remains rootless, offline, read-only where possible, and without generic shell execution.
-
----
-
-# 12. Prioritized backlog
-
-## P0 — current/next
-
-- [x] Framework fingerprinting
-- [x] Androguard-backed DEX program index
-- [x] `find_symbols`
-- [x] `find_xrefs`
-- [x] `get_cfg`
-- [x] `extract_network_model`
-- [x] basic ELF/binutils triage
-- [ ] Framework Router that changes analyzer strategy after fingerprinting
-- [ ] Flutter artifact inventory
-- [ ] `identify_dart_runtime`
-- [ ] dedicated `framework-flutter` profile
-- [ ] Blutter integration feasibility + version/cache strategy
-- [ ] `build_flutter_index`
-- [ ] `find_dart_symbols` / `find_dart_strings`
-- [ ] `map_dart_to_native`
-- [ ] `extract_flutter_network_model`
-- [ ] structured manifest/resources/signature analysis
-
-## P1
-
-- [ ] `trace_value`
-- [ ] taint/source/sink/sanitizer engine
-- [ ] `find_auth_flow`
-- [ ] `find_signing_logic`
-- [ ] `trace_crypto`
-- [ ] Semgrep/mobsfscan integration
-- [ ] security knowledge graph/rule model
-- [ ] Rizin native profile
-- [ ] JNI cross-language mapping
-- [ ] first-party/third-party endpoint attribution improvements
-- [ ] Investigator → Critic → Verifier workflow
-
-## P2
-
-- [ ] Ghidra headless profile
-- [ ] React Native/Hermes analyzer
-- [ ] Unity/IL2CPP analyzer foundation
-- [ ] Xamarin/.NET MAUI analyzer
-- [ ] protobuf/gRPC/GraphQL/WebSocket specialized modeling
-- [ ] controlled emulator/Frida dynamic profile
-- [ ] static↔dynamic evidence correlation
-
-## P3
-
-- [ ] targeted symbolic execution for narrow native functions
-- [ ] graph-motif/anomaly mining
-- [ ] novel vulnerability-pattern discovery
-- [ ] automatic rule proposal + regression validation
-- [ ] mature multi-framework PEG querying and cross-analyzer verification
-
----
-
-# 13. Tool integration policy
-
-Before adding an analyzer:
-
-1. pin the version or exact source revision;
-2. verify hashes/provenance where redistribution allows it;
-3. review license compatibility;
-4. prefer headless/scriptable operation;
-5. record analyzer/runtime version in evidence;
-6. expose bounded semantic MCP operations, not arbitrary commands;
-7. keep runtime network disabled unless the profile explicitly requires it;
-8. add deterministic fixtures and integration tests;
-9. document resource limits and unsupported versions/architectures;
-10. do not silently fall back to host-installed tools or download/build dependencies during normal offline analysis.
-
----
-
-# 14. Testing and success metrics
-
-Every analyzer should have unit, tool-integration and end-to-end MCP tests.
-
-Critical metrics:
+Candidate additions:
 
 ```text
-framework routing accuracy
-first-party endpoint recall / precision
-auth/signature reconstruction rate
-call-edge and data-flow precision
-security finding precision
-runtime confirmation rate
-native/framework mapping coverage
-evidence completeness
-analysis p50 / p95 and peak memory
-context/token cost per verified finding
-regression rate across protected/obfuscated apps
+Apktool
+aapt2
+apksigner / apksig
+smali / baksmali
+APKiD subject to packaging/license review
 ```
 
-For framework adapters, fixtures must include multiple runtime/compiler versions and explicit unsupported-version tests.
+Candidate semantic operations:
+
+```text
+inspect_manifest
+inspect_resources
+inspect_signature
+list_components
+list_permissions
+find_exported_components
+inspect_deep_links
+inspect_network_security_config
+list_dex
+inspect_dex
+search_smali
+read_smali
+```
+
+These remain generic Android/package/DEX semantics. Framework-specific business logic remains in dedicated capabilities.
 
 ---
 
-## End state
+# Development sequencing after 0.3
 
-The intended end state is an MCP platform that can answer questions such as:
+Once 0.3 receives milestone acceptance:
 
 ```text
-Which representation contains this app's real business logic?
-Which first-party APIs does this Flutter XAPK use?
-Which Dart function constructs this request and where is it in libapp.so?
-Where does this Authorization value originate?
-Which transformations produce X-Signature?
-Which Java method crosses into which JNI/native function?
-Was this predicted path actually observed at runtime?
-Which security finding is directly supported, refuted, or still unknown?
-Which unusual source→sink graph motif may represent a new vulnerability pattern?
+freeze orchestration unless a demonstrated platform defect requires change
+        ↓
+start 0.4 data-flow spike behind existing Capability SPI
+        ↓
+small feature slices
+        ↓
+review + deterministic tests after each slice
+        ↓
+merge only exact-head green work
 ```
 
-The MCP layer should select and combine the right analyzers, preserve trust boundaries, normalize all facts into PEG, and return enough provenance for a reverse engineer or independent verifier agent to reproduce the conclusion.
+The main measure of progress from 0.4 onward should be **analysis intelligence and evidence quality**, not additional control-plane refactoring.

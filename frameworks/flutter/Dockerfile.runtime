@@ -54,6 +54,10 @@ LABEL org.opencontainers.image.title="safe-android-reverser-flutter-runtime" \
       org.opencontainers.image.revision="${SAFE_REVERSER_BUILD_COMMIT}" \
       org.opencontainers.image.description="Exact prebuilt offline Blutter runtime cache" \
       org.opencontainers.image.licenses="Apache-2.0 AND MIT AND BSD-3-Clause" \
+      io.safe-reverser.capability.id="framework-flutter" \
+      io.safe-reverser.capability.api="1" \
+      io.safe-reverser.worker.abi="1" \
+      io.safe-reverser.runtime-cache.schema="2" \
       io.safe-reverser.blutter.commit="${BLUTTER_COMMIT}" \
       io.safe-reverser.dart.version="${DART_VERSION}" \
       io.safe-reverser.dart.snapshot="${SNAPSHOT_HASH}" \
@@ -65,8 +69,8 @@ RUN apt-get update \
       ca-certificates python3 python3-pyelftools python3-requests libcapstone4 libicu74 \
  && rm -rf /var/lib/apt/lists/* \
  && useradd --uid 10001 --create-home --home-dir /nonexistent --shell /usr/sbin/nologin reverser \
- && mkdir -p /opt/blutter/bin /opt/safe-flutter /opt/licenses /input /output /work \
- && chown -R 10001:10001 /output /work
+ && mkdir -p /opt/blutter/bin /opt/safe-flutter /opt/licenses /input /output /export /workspace /work \
+ && chown -R 10001:10001 /output /export /work
 
 COPY --from=runtime-builder /opt/blutter/LICENSE /opt/licenses/BLUTTER-LICENSE
 COPY --from=runtime-builder /opt/licenses/DART-SDK-LICENSE /opt/licenses/DART-SDK-LICENSE
@@ -78,6 +82,8 @@ COPY frameworks/flutter/cache_identity.py /opt/safe-flutter/cache_identity.py
 COPY frameworks/flutter/safe_blutter_adapter.py /opt/safe-flutter/safe_blutter_adapter.py
 COPY frameworks/flutter/flutter_semantic.py /opt/safe-flutter/flutter_semantic.py
 COPY frameworks/flutter/flutter_network.py /opt/safe-flutter/flutter_network.py
+COPY frameworks/flutter/flutter_artifact.py /opt/safe-flutter/flutter_artifact.py
+COPY frameworks/flutter/flutter_export.py /opt/safe-flutter/flutter_export.py
 COPY frameworks/flutter/flutter_entrypoint.py /opt/safe-flutter/flutter_entrypoint.py
 COPY frameworks/flutter/tools.lock.env /opt/safe-flutter/tools.lock.env
 
@@ -95,6 +101,8 @@ RUN set -eux; \
       /opt/safe-flutter/safe_blutter_adapter.py \
       /opt/safe-flutter/flutter_semantic.py \
       /opt/safe-flutter/flutter_network.py \
+      /opt/safe-flutter/flutter_artifact.py \
+      /opt/safe-flutter/flutter_export.py \
       /opt/safe-flutter/flutter_entrypoint.py \
       /opt/blutter/blutter.py \
       /opt/blutter/extract_dart_info.py \
@@ -104,6 +112,8 @@ RUN set -eux; \
 
 ENV SAFE_FLUTTER_INPUT=/input \
     SAFE_FLUTTER_OUTPUT=/output \
+    SAFE_FLUTTER_EXPORT_ROOT=/export \
+    SAFE_FLUTTER_WORKSPACE=/workspace \
     SAFE_BLUTTER_ROOT=/opt/blutter \
     SAFE_BLUTTER_COMMIT=${BLUTTER_COMMIT} \
     SAFE_REVERSER_IMAGE_VERSION=${SAFE_REVERSER_VERSION} \
