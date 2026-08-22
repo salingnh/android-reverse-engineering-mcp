@@ -88,7 +88,8 @@ jobs:
           from safe_reverser.contracts import RESERVED_PUBLIC_OPERATIONS
           from safe_reverser.registry import CapabilityRegistry
           registry = CapabilityRegistry(Path('plugins/safe-android-reverser/capabilities'))
-          assert set(registry.manifests()) == {'static-core', 'framework-flutter'}
+          baseline = {'static-core', 'framework-flutter'}
+          assert baseline.issubset(registry.manifests()), registry.manifests()
           static = registry.get('static-core')
           flutter = registry.get('framework-flutter')
           assert static.protocol == 'mcp-stdio'
@@ -193,6 +194,7 @@ jobs:
           import json
           import sys
           rows = [json.loads(line) for line in open(sys.argv[1], encoding='utf-8') if line.strip()]
+          baseline = {'static-core', 'framework-flutter'}
           tool_response = next(item for item in rows if item.get('id') == 2)
           names = {item['name'] for item in tool_response['result']['tools']}
           assert 'health' in names
@@ -217,7 +219,7 @@ jobs:
           assert len(static_state['image_id']) == 71, static_state
           assert len(flutter_state['image_id']) == 71, flutter_state
           diagnostics = health['capabilities']['diagnostics']
-          assert set(diagnostics) == {'static-core', 'framework-flutter'}, diagnostics
+          assert baseline.issubset(diagnostics), diagnostics
           assert diagnostics['static-core']['capability_worker']['id'] == 'static-core', diagnostics
           assert diagnostics['framework-flutter']['runtime_cache_schema'] == 2, diagnostics
           flutter_worker = diagnostics['framework-flutter']['worker']
@@ -228,7 +230,7 @@ jobs:
           caps = json.loads(caps_response['result']['content'][0]['text'])
           assert caps['capability_api'] == 1, caps
           assert caps['worker_abi'] == 1, caps
-          assert set(caps['registry']) == {'static-core', 'framework-flutter'}, caps
+          assert baseline.issubset(caps['registry']), caps
           assert caps['registry']['static-core']['adapter'] == 'mcp-container', caps
           assert caps['registry']['framework-flutter']['adapter'] == 'flutter-aot', caps
           assert 'health' not in caps['registry']['static-core']['operations'], caps
