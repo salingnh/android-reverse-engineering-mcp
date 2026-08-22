@@ -107,7 +107,7 @@ jobs:
         run: |
           python3 -m py_compile \
             sandbox/mcp_server.py \
-            sandbox/mcp_server_v2.py \
+            sandbox/static_semantic_worker.py \
             sandbox/mcp_entrypoint.py \
             sandbox/analysis_routing.py \
             sandbox/archive_safety.py \
