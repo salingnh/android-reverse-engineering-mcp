@@ -4,6 +4,7 @@
   "worker_abi": 1,
   "representations": ["apk", "dex", "java", "kotlin", "resources", "jar", "aar"],
   "trust_boundary": "static",
+  "activation": "required",
   "adapter": "mcp-container",
   "protocol": "mcp-stdio",
   "image": {
