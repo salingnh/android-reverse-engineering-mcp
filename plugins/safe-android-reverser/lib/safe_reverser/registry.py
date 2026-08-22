@@ -5,10 +5,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .contracts import CapabilityManifest, ContractError, VALID_STATES
+from .contracts import (
+    RESERVED_PUBLIC_OPERATIONS,
+    CapabilityManifest,
+    ContractError,
+    VALID_STATES,
+)
 
 MAX_MANIFEST_BYTES = 64 * 1024
-RESERVED_CONTROL_PLANE_OPERATIONS = {"list_capabilities"}
 
 
 @dataclass(frozen=True)
@@ -37,7 +41,7 @@ class CapabilityRegistry:
         self._operation_owner: dict[str, str] = {}
         for capability_id, manifest in self._manifests.items():
             for operation in manifest.operations:
-                if operation in RESERVED_CONTROL_PLANE_OPERATIONS:
+                if operation in RESERVED_PUBLIC_OPERATIONS:
                     raise ContractError(
                         f"operation {operation!r} is reserved by the control plane"
                     )
@@ -80,7 +84,7 @@ class CapabilityRegistry:
     def owner_for_operation(self, operation: str) -> CapabilityManifest:
         owner = self._operation_owner.get(operation)
         if owner is None:
-            raise ContractError(f"no capability owns operation: {operation}")
+            raise ContractError(f"no capability owns operation: {operation}") from None
         return self._manifests[owner]
 
     def manifests(self) -> dict[str, CapabilityManifest]:
