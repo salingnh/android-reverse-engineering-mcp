@@ -81,7 +81,7 @@ Representative manifest:
 }
 ```
 
-Unknown manifest fields are rejected. Operation ownership is unique across all declared capabilities.
+Unknown or missing manifest fields are rejected. Contract booleans/integers are type-checked strictly instead of being truthiness/coercion parsed. Operation ownership is unique across all declared capabilities.
 
 ## Activation contract
 
@@ -135,6 +135,29 @@ cli-json
 ```
 
 Protocol is not equivalent to framework identity. Multiple capabilities may share a protocol or a generic adapter.
+
+## Public operations vs internal diagnostics
+
+The following names are reserved by the host control plane and must never appear in a capability manifest's public `operations` list:
+
+```text
+health
+list_capabilities
+```
+
+`health` therefore has exactly one agent-facing meaning: platform/control-plane health.
+
+Worker ABI v1 separately requires MCP-over-stdio workers to expose an **internal** `health` tool for diagnostics. The generic MCP adapter validates that this internal tool exists, removes it from the public capability tool surface, and exposes its result through the adapter `diagnostics()` contract. CLI/domain-specific adapters implement the same `diagnostics()` adapter method without claiming a public `health` operation.
+
+A capability is `ready` only when its image identity is compatible and its worker surface satisfies the declared public operations plus the required internal Worker ABI diagnostics. Image existence alone is not sufficient for `ready`.
+
+Control-plane health aggregates diagnostics generically under:
+
+```text
+capabilities.diagnostics.<capability-id>
+```
+
+Adding a capability must not require another special top-level health field or capability-specific branch in control-plane health aggregation.
 
 ## Runtime Driver contract
 
@@ -337,7 +360,8 @@ A new capability should normally require only:
 2. an existing adapter kind, or a new adapter implementation behind the adapter factory;
 3. its isolated worker image and analyzer code;
 4. deterministic tests and capability-specific CI;
-5. evidence/provenance normalization through the shared contracts.
+5. evidence/provenance normalization through the shared contracts;
+6. Worker ABI-compatible internal diagnostics through the adapter contract.
 
 It must not require:
 
@@ -346,6 +370,7 @@ It must not require:
 - another generic job store;
 - another host path security implementation;
 - another evidence-state model;
+- another public `health` implementation;
 - changes to agent-facing orchestration topology.
 
 ## Compatibility rules
@@ -359,6 +384,7 @@ The following are platform-level changes and require explicit review:
 - Runtime Driver privilege expansion;
 - path/job security invariant change;
 - operation ownership conflict;
+- internal diagnostics ABI change;
 - runtime-cache identity change that could reuse an incompatible image.
 
 A private analyzer parser/index may evolve without changing Capability API when its externally observable contract remains compatible.
