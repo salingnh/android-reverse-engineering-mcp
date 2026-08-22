@@ -25,6 +25,7 @@ class SafeBlutterAdapterTests(unittest.TestCase):
         os.environ["SAFE_FLUTTER_OUTPUT"] = str(cls.output_root)
         os.environ["SAFE_BLUTTER_ROOT"] = str(cls.blutter_root)
         os.environ["SAFE_BLUTTER_COMMIT"] = "d" * 40
+        cls.cache_identity = importlib.import_module("cache_identity")
         cls.adapter = importlib.import_module("safe_blutter_adapter")
 
     @classmethod
@@ -68,6 +69,24 @@ class SafeBlutterAdapterTests(unittest.TestCase):
         self.assertEqual(constraints["network"], "none")
         self.assertEqual(constraints["output_mount"], "writable-bounded")
         self.assertGreater(constraints["max_generated_file_bytes"], 0)
+
+    def test_runtime_cache_identity_is_bound_to_capability_and_worker_abi(self):
+        ci = self.cache_identity
+        kwargs = {
+            "dart_version": "3.5.4",
+            "snapshot_hash": "a" * 32,
+            "arch": "arm64",
+            "os_name": "android",
+            "compressed_pointers": True,
+            "blutter_commit": "d" * 40,
+        }
+        baseline = ci.runtime_cache_tag(**kwargs)
+        with mock.patch.object(ci, "WORKER_ABI_VERSION", ci.WORKER_ABI_VERSION + 1):
+            self.assertNotEqual(baseline, ci.runtime_cache_tag(**kwargs))
+        with mock.patch.object(
+            ci, "CAPABILITY_API_VERSION", ci.CAPABILITY_API_VERSION + 1
+        ):
+            self.assertNotEqual(baseline, ci.runtime_cache_tag(**kwargs))
 
     def test_inspect_returns_registry_independent_cache_identity(self):
         with mock.patch.object(
