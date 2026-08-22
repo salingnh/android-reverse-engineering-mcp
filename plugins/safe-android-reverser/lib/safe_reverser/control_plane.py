@@ -78,12 +78,29 @@ class ControlPlane:
             project_dir=self.project_dir,
             data_dir=self.data_dir,
         )
-        if set(self.adapters) != set(self.registry.manifests()):
-            raise ControlPlaneError("capability adapter registry is incomplete")
+        required = {
+            capability_id
+            for capability_id, manifest in self.registry.manifests().items()
+            if manifest.activation == "required"
+        }
+        missing_required = required - set(self.adapters)
+        if missing_required:
+            raise ControlPlaneError(
+                f"required capability adapters are missing: {sorted(missing_required)}"
+            )
 
     def _capability_states(self) -> dict[str, Any]:
         states: dict[str, Any] = {}
-        for capability_id, adapter in sorted(self.adapters.items()):
+        for capability_id, manifest in sorted(self.registry.manifests().items()):
+            adapter = self.adapters.get(capability_id)
+            if adapter is None:
+                states[capability_id] = {
+                    "state": "declared",
+                    "activation": manifest.activation,
+                    "enabled": False,
+                    "detail": "capability is declared but not enabled",
+                }
+                continue
             try:
                 state = adapter.status()
             except (RuntimeErrorSafe, WorkerProtocolError, FlutterCapabilityError) as exc:
@@ -93,7 +110,11 @@ class ControlPlane:
                     "state": "degraded",
                     "detail": "capability adapter returned invalid readiness state",
                 }
-            states[capability_id] = state
+            states[capability_id] = {
+                **state,
+                "activation": manifest.activation,
+                "enabled": True,
+            }
         return states
 
     def _enrich_route(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -166,9 +187,15 @@ class ControlPlane:
 
     def health(self) -> dict[str, Any]:
         states = self._capability_states()
+        required_ids = {
+            capability_id
+            for capability_id, manifest in self.registry.manifests().items()
+            if manifest.activation == "required"
+        }
         overall = (
             "ok"
-            if states and all(item.get("state") == "ready" for item in states.values())
+            if required_ids
+            and all(states.get(item, {}).get("state") == "ready" for item in required_ids)
             else "degraded"
         )
         static_health: dict[str, Any] | None = None
@@ -220,7 +247,7 @@ class ControlPlane:
         adapter = self.adapters.get(owner.capability_id)
         if adapter is None:
             raise ControlPlaneError(
-                f"capability adapter is unavailable: {owner.capability_id}"
+                f"capability is not enabled: {owner.capability_id}"
             )
         payload = adapter.call(name, arguments)
         if name in {"fingerprint", "route_analysis"}:
