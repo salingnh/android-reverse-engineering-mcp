@@ -31,6 +31,9 @@ LABEL org.opencontainers.image.title="safe-android-reverser-flutter" \
       org.opencontainers.image.revision="${SAFE_REVERSER_BUILD_COMMIT}" \
       org.opencontainers.image.description="Offline-safe Flutter/Dart AOT analysis capability profile" \
       org.opencontainers.image.licenses="Apache-2.0 AND MIT" \
+      io.safe-reverser.capability.id="framework-flutter" \
+      io.safe-reverser.capability.api="1" \
+      io.safe-reverser.worker.abi="1" \
       io.safe-reverser.blutter.commit="${BLUTTER_COMMIT}"
 
 RUN apt-get update \
