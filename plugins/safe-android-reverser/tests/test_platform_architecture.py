@@ -25,7 +25,7 @@ from safe_reverser.jobs import AnalysisJobStore, JobStoreError
 import safe_reverser.jobs as jobs_module
 from safe_reverser.paths import PathPolicyError, secure_child, secure_directory_root
 from safe_reverser.registry import CapabilityRegistry
-from safe_reverser.runtime import ContainerRuntime, RuntimeErrorSafe
+from safe_reverser.runtime import ContainerRuntime, RunResult, RuntimeErrorSafe
 
 
 class FakeRuntime:
@@ -40,6 +40,30 @@ class FakeRuntime:
 
     def validate_tmpfs_spec(self, spec):
         ContainerRuntime.validate_tmpfs_spec(spec)
+
+    def run_container(self, *, command, **_kwargs):
+        if command != ["health"]:
+            raise AssertionError(f"unexpected fake runtime command: {command}")
+        payload = {
+            "status": "ok",
+            "network_required_at_runtime": False,
+            "build_on_demand_allowed": False,
+            "registry_selection_owned_by_worker": False,
+            "required_runtime_constraints": {"network": "none"},
+            "orchestration": {
+                "runtime_download_inside_sandbox": False,
+                "runtime_build_inside_sandbox": False,
+            },
+        }
+        return RunResult(
+            exit_code=0,
+            timed_out=False,
+            stdout=json.dumps(payload) + "\n",
+            stderr="",
+        )
+
+    def parse_json_tail(self, run):
+        return json.loads(run.stdout)
 
 
 class PlatformArchitectureTests(unittest.TestCase):
