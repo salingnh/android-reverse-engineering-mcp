@@ -44,7 +44,10 @@ ARG SAFE_REVERSER_BUILD_COMMIT=unknown
 
 LABEL org.opencontainers.image.title="safe-android-reverser" \
       org.opencontainers.image.version="${SAFE_REVERSER_VERSION}" \
-      org.opencontainers.image.revision="${SAFE_REVERSER_BUILD_COMMIT}"
+      org.opencontainers.image.revision="${SAFE_REVERSER_BUILD_COMMIT}" \
+      io.safe-reverser.capability.id="static-core" \
+      io.safe-reverser.capability.api="1" \
+      io.safe-reverser.worker.abi="1"
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates python3 file binutils libmagic1 \
@@ -73,7 +76,7 @@ RUN set -eux; \
     test -n "$SAFE_REVERSER_VERSION"; \
     test "$(tr -d '[:space:]' < /opt/safe-reverser/VERSION)" = "$SAFE_REVERSER_VERSION"; \
     ln -s /opt/jadx/bin/jadx /usr/local/bin/jadx; \
-    PYTHONPATH=/opt/python-site:/opt/safe-reverser python3 -c 'import program_understanding_v2 as pu; import analysis_routing as routing; import peg_schema as peg; import flutter_analysis as flutter; caps=pu.capabilities(); assert caps["androguard"], caps; assert routing.PROFILE_REGISTRY["static-core"]["status"] == "available"; assert routing.PROFILE_REGISTRY["framework-flutter"]["status"] == "partial"; assert peg.PEG_SCHEMA_VERSION == 2; assert flutter.MAX_ASSET_COUNT == 20000'; \
+    PYTHONPATH=/opt/python-site:/opt/safe-reverser python3 -c 'import program_understanding_v2 as pu; import analysis_routing as routing; import peg_schema as peg; import flutter_analysis as flutter; caps=pu.capabilities(); assert caps["androguard"], caps; assert routing.PROFILE_REGISTRY["static-core"]["status"] == "available"; assert routing.PROFILE_REGISTRY["framework-flutter"]["status"] == "declared"; assert peg.PEG_SCHEMA_VERSION == 2; assert flutter.MAX_ASSET_COUNT == 20000'; \
     chmod 0444 /opt/safe-reverser/VERSION; \
     chmod 0555 /opt/safe-reverser/mcp_server.py /opt/safe-reverser/mcp_server_v2.py /opt/safe-reverser/mcp_entrypoint.py /opt/safe-reverser/analysis_routing.py /opt/safe-reverser/peg_schema.py /opt/safe-reverser/flutter_analysis.py /opt/safe-reverser/program_understanding.py /opt/safe-reverser/program_understanding_v2.py /opt/safe-reverser/pu_source.py /opt/safe-reverser/pu_index.py /opt/safe-reverser/pu_network.py; \
     chmod -R a-w /opt/jadx /opt/vineflower /opt/python-site /opt/safe-reverser
