@@ -136,14 +136,20 @@ def _iter_apks(artifact: Path) -> Iterator[tuple[str, zipfile.ZipFile]]:
                     temp_path = Path(name)
                     temp_path.unlink()
                     with outer.open(info) as src:
-                        copied, _ = _copy_bounded(src, temp_path, max_bytes=MAX_NESTED_APK_BYTES)
+                        copied, _ = _copy_bounded(
+                            src, temp_path, max_bytes=MAX_NESTED_APK_BYTES
+                        )
                     if copied != info.file_size:
-                        raise FlutterArtifactError("nested APK size does not match ZIP metadata")
+                        raise FlutterArtifactError(
+                            "nested APK size does not match ZIP metadata"
+                        )
                     try:
                         with zipfile.ZipFile(temp_path) as nested:
                             yield info.filename, nested
                     except zipfile.BadZipFile as exc:
-                        raise FlutterArtifactError(f"invalid nested APK: {info.filename}") from exc
+                        raise FlutterArtifactError(
+                            f"invalid nested APK: {info.filename}"
+                        ) from exc
                 finally:
                     if temp_path is not None:
                         temp_path.unlink(missing_ok=True)
@@ -170,12 +176,16 @@ def _extract_candidate(
         with zf.open(info) as src:
             copied, digest = _copy_bounded(src, temp, max_bytes=MAX_LIBRARY_BYTES)
         if copied != info.file_size:
-            raise FlutterArtifactError(f"{logical_name}.so size does not match ZIP metadata")
+            raise FlutterArtifactError(
+                f"{logical_name}.so size does not match ZIP metadata"
+            )
         destination = stage / f"{logical_name}.so"
         if destination.exists():
             existing = state["digests"].get(logical_name) or _hash_file(destination)
             if existing != digest or destination.stat().st_size != copied:
-                raise FlutterArtifactError(f"ambiguous duplicate {logical_name}.so for {SUPPORTED_ABI}")
+                raise FlutterArtifactError(
+                    f"ambiguous duplicate {logical_name}.so for {SUPPORTED_ABI}"
+                )
             return
         os.replace(temp, destination)
         state["digests"][logical_name] = digest
@@ -259,7 +269,6 @@ def prepare_artifact(artifact_value: str, output_value: str) -> dict[str, Any]:
             },
             "runtime": runtime,
             "blutter_commit": adapter.BLUTTER_COMMIT,
-            "recommended_image": runtime.get("recommended_image"),
             "limits": {
                 "max_outer_entries": MAX_OUTER_ENTRIES,
                 "max_apk_entries": MAX_APK_ENTRIES,
