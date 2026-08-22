@@ -25,21 +25,9 @@ class PublicOperationContractTests(unittest.TestCase):
     def setUp(self) -> None:
         self.registry = CapabilityRegistry(PLUGIN_ROOT / "capabilities")
 
-    def test_reserved_control_plane_operations_have_no_capability_owner(self) -> None:
-        self.assertEqual(RESERVED_PUBLIC_OPERATIONS, {"health", "list_capabilities"})
-        for manifest in self.registry.manifests().values():
-            self.assertFalse(RESERVED_PUBLIC_OPERATIONS.intersection(manifest.operations))
-        with self.assertRaises(ContractError):
-            self.registry.owner_for_operation("health")
-        with self.assertRaises(ContractError):
-            self.registry.owner_for_operation("list_capabilities")
-
-    def test_static_worker_health_is_internal_not_public_capability_operation(self) -> None:
-        self.assertNotIn("health", self.registry.get("static-core").operations)
-
-    def test_manifest_requires_explicit_activation_adapter_and_strict_contract_types(self) -> None:
+    def _manifest_dict(self) -> dict:
         manifest = self.registry.get("static-core")
-        base = {
+        return {
             "id": manifest.capability_id,
             "capability_api": manifest.capability_api,
             "worker_abi": manifest.worker_abi,
@@ -65,6 +53,21 @@ class PublicOperationContractTests(unittest.TestCase):
                 "tmpfs_work": manifest.sandbox.tmpfs_work,
             },
         }
+
+    def test_reserved_control_plane_operations_have_no_capability_owner(self) -> None:
+        self.assertEqual(RESERVED_PUBLIC_OPERATIONS, {"health", "list_capabilities"})
+        for manifest in self.registry.manifests().values():
+            self.assertFalse(RESERVED_PUBLIC_OPERATIONS.intersection(manifest.operations))
+        with self.assertRaises(ContractError):
+            self.registry.owner_for_operation("health")
+        with self.assertRaises(ContractError):
+            self.registry.owner_for_operation("list_capabilities")
+
+    def test_static_worker_health_is_internal_not_public_capability_operation(self) -> None:
+        self.assertNotIn("health", self.registry.get("static-core").operations)
+
+    def test_manifest_requires_explicit_activation_adapter_and_strict_contract_types(self) -> None:
+        base = self._manifest_dict()
         missing_activation = copy.deepcopy(base)
         missing_activation.pop("activation")
         with self.assertRaises(ContractError):
@@ -79,6 +82,28 @@ class PublicOperationContractTests(unittest.TestCase):
         bad_boolean_type["sandbox"]["read_only_root"] = "true"
         with self.assertRaises(ContractError):
             CapabilityManifest.from_dict(bad_boolean_type)
+
+        bad_string_type = copy.deepcopy(base)
+        bad_string_type["adapter"] = 123
+        with self.assertRaises(ContractError):
+            CapabilityManifest.from_dict(bad_string_type)
+
+        bad_repository_type = copy.deepcopy(base)
+        bad_repository_type["image"]["repository"] = ["not", "a", "string"]
+        with self.assertRaises(ContractError):
+            CapabilityManifest.from_dict(bad_repository_type)
+
+        bad_list_item = copy.deepcopy(base)
+        bad_list_item["operations"][0] = 42
+        with self.assertRaises(ContractError):
+            CapabilityManifest.from_dict(bad_list_item)
+
+        duplicate_representation = copy.deepcopy(base)
+        duplicate_representation["representations"].append(
+            duplicate_representation["representations"][0]
+        )
+        with self.assertRaises(ContractError):
+            CapabilityManifest.from_dict(duplicate_representation)
 
     def test_dynamic_controlled_network_is_schema_ready_but_static_runtime_rejects_it(self) -> None:
         static = self.registry.get("static-core")
