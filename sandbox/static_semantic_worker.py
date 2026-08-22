@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Extended MCP entrypoint for bounded semantic program-understanding operations."""
+"""Canonical static-core semantic worker composition.
+
+This module extends the low-level static worker core with bounded semantic
+operations. Release version ownership stays in mcp_entrypoint.py; capability
+evolution must not create version-suffixed server modules.
+"""
 from __future__ import annotations
 
 import signal
@@ -12,7 +17,6 @@ import mcp_server as core
 import peg_schema
 import program_understanding_v2 as pu
 
-core.SERVER_VERSION = "0.2.0"
 _baseline_fingerprint = core.fingerprint
 
 
@@ -257,7 +261,7 @@ def extract_network_model(args):
 
 
 # Make the routed fingerprint the canonical function for callers importing the
-# extended server, while keeping the baseline function private above.
+# semantic worker, while keeping the low-level function private above.
 core.fingerprint = fingerprint
 core.TOOL_HANDLERS.update(
     {
@@ -387,7 +391,7 @@ core.TOOLS.extend(
                         "maximum": 500000,
                         "default": 250000,
                     },
-                    "force": {"type": "boolean", "default": False},
+                    "force": {"type": "boolean", "default": false},
                     "timeout_seconds": {
                         "type": "integer",
                         "minimum": 1,
