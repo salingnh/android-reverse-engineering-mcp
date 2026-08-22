@@ -8,12 +8,18 @@ from pathlib import Path
 from typing import Any
 
 from . import CAPABILITY_API_VERSION, EVIDENCE_ENVELOPE_VERSION, WORKER_ABI_VERSION
+from .adapters import (
+    RESERVED_CONTROL_PLANE_OPERATIONS,
+    CapabilityAdapter,
+    build_capability_adapters,
+)
 from .contracts import ContractError
 from .evidence import normalize_capability_result
-from .flutter import FlutterCapability, FlutterCapabilityError
+from .flutter import FlutterCapabilityError
+from .paths import PathPolicyError, secure_directory_root
 from .registry import CapabilityRegistry
 from .runtime import ContainerRuntime, RuntimeErrorSafe
-from .worker import McpContainerWorker, WorkerProtocolError
+from .worker import WorkerProtocolError
 
 SERVER_NAME = "safe-android-reverser"
 MAX_TOOL_TEXT = 300_000
@@ -30,23 +36,24 @@ class ControlPlane:
         if not self.version or len(self.version) > 64:
             raise ControlPlaneError("plugin VERSION is invalid")
 
-        raw_project = Path(os.environ.get("SAFE_REVERSER_PROJECT_DIR", os.getcwd()))
-        self.project_dir = raw_project.resolve()
+        self.project_dir = Path(
+            os.environ.get("SAFE_REVERSER_PROJECT_DIR", os.getcwd())
+        ).resolve()
         if not self.project_dir.is_dir():
             raise ControlPlaneError("project directory does not exist")
 
-        raw_data = Path(
-            os.environ.get(
-                "SAFE_REVERSER_DATA_DIR",
-                str(Path.home() / ".local/share/safe-android-reverser"),
+        try:
+            self.data_dir = secure_directory_root(
+                Path(
+                    os.environ.get(
+                        "SAFE_REVERSER_DATA_DIR",
+                        str(Path.home() / ".local/share/safe-android-reverser"),
+                    )
+                ),
+                create=True,
             )
-        )
-        if raw_data.is_symlink():
-            raise ControlPlaneError("plugin data directory must not be a symlink")
-        raw_data.mkdir(parents=True, exist_ok=True, mode=0o700)
-        if raw_data.is_symlink() or not raw_data.is_dir():
-            raise ControlPlaneError("plugin data directory must be a regular directory")
-        self.data_dir = raw_data.resolve()
+        except PathPolicyError as exc:
+            raise ControlPlaneError(str(exc)) from exc
         if not os.access(self.data_dir, os.W_OK):
             raise ControlPlaneError("plugin data directory is not writable")
 
@@ -64,61 +71,29 @@ class ControlPlane:
             auto_pull=os.environ.get("SAFE_REVERSER_AUTO_PULL", "1") == "1",
         )
         self.registry = CapabilityRegistry(self.plugin_root / "capabilities")
-
-        static_manifest = self.registry.get("static-core")
-        static_image = str(
-            os.environ.get(
-                "SAFE_REVERSER_STATIC_IMAGE",
-                f"{static_manifest.image_repository}:{self.version}",
-            )
-        ).strip()
-        static_data = self.data_dir / "static-core"
-        if static_data.is_symlink():
-            raise ControlPlaneError("static-core data directory must not be a symlink")
-        static_data.mkdir(mode=0o700, exist_ok=True)
-        if static_data.resolve().parent != self.data_dir:
-            raise ControlPlaneError("static-core data directory escapes plugin data root")
-        self.static = McpContainerWorker(
-            self.runtime,
-            static_manifest,
-            image=static_image,
-            project_dir=self.project_dir,
-            data_dir=static_data,
-            version=self.version,
-        )
-
-        flutter_manifest = self.registry.get("framework-flutter")
-        self.flutter = FlutterCapability(
-            self.runtime,
-            flutter_manifest,
+        self.adapters: dict[str, CapabilityAdapter] = build_capability_adapters(
+            runtime=self.runtime,
+            registry=self.registry,
             version=self.version,
             project_dir=self.project_dir,
             data_dir=self.data_dir,
-            output_tmpfs=str(
-                os.environ.get("SAFE_REVERSER_FLUTTER_OUTPUT_TMPFS", "4g")
-            ).strip(),
         )
-        override = os.environ.get("SAFE_REVERSER_FLUTTER_IMAGE")
-        if override:
-            self.flutter.base_image = str(override).strip()
+        if set(self.adapters) != set(self.registry.manifests()):
+            raise ControlPlaneError("capability adapter registry is incomplete")
 
     def _capability_states(self) -> dict[str, Any]:
         states: dict[str, Any] = {}
-        try:
-            labels = self.static.ensure_ready()
-            states["static-core"] = {
-                "state": "ready",
-                "image": self.static.image,
-                "worker_abi": labels.get("io.safe-reverser.worker.abi"),
-                "capability_api": labels.get("io.safe-reverser.capability.api"),
-            }
-        except (RuntimeErrorSafe, WorkerProtocolError) as exc:
-            states["static-core"] = {
-                "state": "unavailable",
-                "image": self.static.image,
-                "detail": str(exc),
-            }
-        states["framework-flutter"] = self.flutter.status()
+        for capability_id, adapter in sorted(self.adapters.items()):
+            try:
+                state = adapter.status()
+            except (RuntimeErrorSafe, WorkerProtocolError, FlutterCapabilityError) as exc:
+                state = {"state": "unavailable", "detail": str(exc)}
+            if not isinstance(state, dict) or not isinstance(state.get("state"), str):
+                state = {
+                    "state": "degraded",
+                    "detail": "capability adapter returned invalid readiness state",
+                }
+            states[capability_id] = state
         return states
 
     def _enrich_route(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -174,14 +149,16 @@ class ControlPlane:
                 },
             },
         ]
-        try:
-            tools.extend(
-                item for item in self.static.tools() if item.get("name") != "health"
-            )
-        except (RuntimeErrorSafe, WorkerProtocolError):
-            # Keep control-plane diagnostics available even when static-core is not installed.
-            pass
-        tools.extend(self.flutter.tools())
+        for _capability_id, adapter in sorted(self.adapters.items()):
+            try:
+                tools.extend(
+                    item
+                    for item in adapter.tools()
+                    if item.get("name") not in RESERVED_CONTROL_PLANE_OPERATIONS
+                )
+            except (RuntimeErrorSafe, WorkerProtocolError, FlutterCapabilityError):
+                # Control-plane diagnostics remain available even when one worker is absent.
+                continue
         names = [str(item.get("name") or "") for item in tools]
         if len(names) != len(set(names)):
             raise ControlPlaneError("public MCP tool names collide across capability modules")
@@ -189,19 +166,16 @@ class ControlPlane:
 
     def health(self) -> dict[str, Any]:
         states = self._capability_states()
-        required_states = [
-            states.get("static-core", {}),
-            states.get("framework-flutter", {}),
-        ]
         overall = (
             "ok"
-            if all(item.get("state") == "ready" for item in required_states)
+            if states and all(item.get("state") == "ready" for item in states.values())
             else "degraded"
         )
         static_health: dict[str, Any] | None = None
-        if states.get("static-core", {}).get("state") == "ready":
+        static_adapter = self.adapters.get("static-core")
+        if static_adapter is not None and states.get("static-core", {}).get("state") == "ready":
             try:
-                static_health = self.static.call("health", {}, timeout=180)
+                static_health = static_adapter.call("health", {})
             except (RuntimeErrorSafe, WorkerProtocolError) as exc:
                 states["static-core"] = {
                     **states["static-core"],
@@ -242,17 +216,16 @@ class ControlPlane:
             return self.health()
         if name == "list_capabilities":
             return self.list_capabilities()
-        flutter_manifest = self.registry.get("framework-flutter")
-        if name in flutter_manifest.operations:
-            payload = self.flutter.call(name, arguments)
-            return self._normalize(flutter_manifest.capability_id, name, payload)
-        static_manifest = self.registry.get("static-core")
-        if name in static_manifest.operations:
-            payload = self.static.call(name, arguments)
-            if name in {"fingerprint", "route_analysis"}:
-                payload = self._enrich_route(payload)
-            return self._normalize(static_manifest.capability_id, name, payload)
-        raise ControlPlaneError(f"unknown tool: {name}")
+        owner = self.registry.owner_for_operation(name)
+        adapter = self.adapters.get(owner.capability_id)
+        if adapter is None:
+            raise ControlPlaneError(
+                f"capability adapter is unavailable: {owner.capability_id}"
+            )
+        payload = adapter.call(name, arguments)
+        if name in {"fingerprint", "route_analysis"}:
+            payload = self._enrich_route(payload)
+        return self._normalize(owner.capability_id, name, payload)
 
 
 def _json_text(value: Any) -> str:
