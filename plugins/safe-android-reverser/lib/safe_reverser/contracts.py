@@ -13,6 +13,8 @@ VALID_TRUST_BOUNDARIES = {
     "dynamic-opt-in",
 }
 VALID_PROTOCOLS = {"mcp-stdio", "cli-json"}
+VALID_ACTIVATIONS = {"required", "optional", "opt-in"}
+VALID_NETWORK_POLICIES = {"none", "controlled"}
 VALID_STATES = {
     "declared",
     "installed",
@@ -76,15 +78,15 @@ class SandboxPolicy:
             tmpfs_tmp=str(raw.get("tmpfs_tmp", "1g")),
             tmpfs_work=str(raw.get("tmpfs_work", "1g")),
         )
-        if policy.network != "none":
-            raise ContractError("static capability network policy must be none")
+        if policy.network not in VALID_NETWORK_POLICIES:
+            raise ContractError("invalid capability network policy")
         if (
             not policy.read_only_root
             or not policy.drop_all_capabilities
             or not policy.no_new_privileges
         ):
             raise ContractError(
-                "static capability must preserve locked sandbox invariants"
+                "capability must preserve locked sandbox invariants"
             )
         if policy.pids_limit < 16 or policy.pids_limit > 4096:
             raise ContractError("invalid capability PID limit")
@@ -98,6 +100,7 @@ class CapabilityManifest:
     worker_abi: int
     representation: tuple[str, ...]
     trust_boundary: str
+    activation: str
     adapter: str
     image_repository: str
     image_role: str
@@ -115,6 +118,7 @@ class CapabilityManifest:
             "worker_abi",
             "representations",
             "trust_boundary",
+            "activation",
             "adapter",
             "protocol",
             "image",
@@ -141,6 +145,11 @@ class CapabilityManifest:
         trust_boundary = str(value.get("trust_boundary") or "").strip()
         if trust_boundary not in VALID_TRUST_BOUNDARIES:
             raise ContractError("invalid capability trust boundary")
+        activation = str(value.get("activation") or "required").strip()
+        if activation not in VALID_ACTIVATIONS:
+            raise ContractError("invalid capability activation")
+        if trust_boundary == "dynamic-opt-in" and activation != "opt-in":
+            raise ContractError("dynamic capability must use opt-in activation")
         adapter = str(value.get("adapter") or "").strip()
         if not ADAPTER_RE.fullmatch(adapter):
             raise ContractError("invalid capability adapter")
@@ -173,18 +182,25 @@ class CapabilityManifest:
         if len(set(operations)) != len(operations):
             raise ContractError("capability operations must be unique")
 
+        sandbox = SandboxPolicy.from_dict(value.get("sandbox"))
+        if trust_boundary != "dynamic-opt-in" and sandbox.network != "none":
+            raise ContractError(
+                "static/framework/native capability network policy must be none"
+            )
+
         return cls(
             capability_id=capability_id,
             capability_api=capability_api,
             worker_abi=worker_abi,
             representation=representation,
             trust_boundary=trust_boundary,
+            activation=activation,
             adapter=adapter,
             image_repository=repository,
             image_role=role,
             protocol=protocol,
             operations=operations,
-            sandbox=SandboxPolicy.from_dict(value.get("sandbox")),
+            sandbox=sandbox,
         )
 
 
