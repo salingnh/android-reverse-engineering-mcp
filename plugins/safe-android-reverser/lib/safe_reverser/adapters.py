@@ -35,7 +35,7 @@ class McpWorkerAdapter:
 
     def status(self) -> dict[str, Any]:
         try:
-            labels = self.worker.ensure_ready()
+            verified = self.worker.ensure_ready()
         except RuntimeErrorSafe as exc:
             return {
                 "state": "unavailable",
@@ -50,14 +50,16 @@ class McpWorkerAdapter:
             return {
                 "state": "degraded",
                 "image": self.worker.image,
+                "image_id": verified.immutable_ref,
                 "detail": str(exc),
             }
         return {
             "state": "ready",
             "image": self.worker.image,
-            "worker_abi": labels.get("io.safe-reverser.worker.abi"),
-            "capability_api": labels.get("io.safe-reverser.capability.api"),
-            "image_version": labels.get("org.opencontainers.image.version"),
+            "image_id": verified.immutable_ref,
+            "worker_abi": verified.get("io.safe-reverser.worker.abi"),
+            "capability_api": verified.get("io.safe-reverser.capability.api"),
+            "image_version": verified.get("org.opencontainers.image.version"),
         }
 
     def diagnostics(self) -> dict[str, Any]:
