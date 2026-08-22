@@ -6,7 +6,7 @@ from typing import Any
 from .contracts import CapabilityManifest
 from .jobs import AnalysisJobStore, JobStoreError
 from .paths import PathPolicyError, remove_direct_child, secure_child
-from .runtime import ContainerRuntime, RuntimeErrorSafe
+from .runtime import ContainerRuntime, RuntimeErrorSafe, VerifiedImage
 
 MAX_QUERY_TEXT = 512
 MAX_SYMBOL_TEXT = 1024
@@ -41,6 +41,16 @@ def _is_hex(value: str, minimum: int, maximum: int) -> bool:
     )
 
 
+def _immutable_ref(verified: Any, fallback: str) -> str:
+    """Use immutable runtime identity when supplied by the shared Runtime Driver.
+
+    The fallback keeps lightweight unit-test fakes compatible; production
+    ContainerRuntime.ensure_image() always returns VerifiedImage.
+    """
+    value = getattr(verified, "immutable_ref", None)
+    return str(value or fallback)
+
+
 class FlutterCapability:
     def __init__(
         self,
@@ -63,6 +73,7 @@ class FlutterCapability:
             f"/output:rw,nosuid,nodev,size={self.output_tmpfs}"
         )
         self.jobs = AnalysisJobStore(self.data_dir, manifest.capability_id)
+        self._verified_base: VerifiedImage | None = None
 
     def required_base_labels(self) -> dict[str, str]:
         return {
@@ -72,15 +83,17 @@ class FlutterCapability:
             "io.safe-reverser.worker.abi": str(self.manifest.worker_abi),
         }
 
-    def ensure_base_ready(self) -> dict[str, str]:
-        return self.runtime.ensure_image(
-            self.base_image,
-            required_labels=self.required_base_labels(),
-        )
+    def ensure_base_ready(self) -> VerifiedImage:
+        if self._verified_base is None:
+            self._verified_base = self.runtime.ensure_image(
+                self.base_image,
+                required_labels=self.required_base_labels(),
+            )
+        return self._verified_base
 
     def status(self) -> dict[str, Any]:
         try:
-            labels = self.ensure_base_ready()
+            verified = self.ensure_base_ready()
         except RuntimeErrorSafe as exc:
             return {
                 "state": "unavailable",
@@ -90,10 +103,11 @@ class FlutterCapability:
         return {
             "state": "ready",
             "image": self.base_image,
-            "image_version": labels.get("org.opencontainers.image.version"),
-            "worker_abi": labels.get("io.safe-reverser.worker.abi"),
-            "capability_api": labels.get("io.safe-reverser.capability.api"),
-            "blutter_commit": labels.get("io.safe-reverser.blutter.commit"),
+            "image_id": _immutable_ref(verified, self.base_image),
+            "image_version": verified.get("org.opencontainers.image.version"),
+            "worker_abi": verified.get("io.safe-reverser.worker.abi"),
+            "capability_api": verified.get("io.safe-reverser.capability.api"),
+            "blutter_commit": verified.get("io.safe-reverser.blutter.commit"),
         }
 
     def _artifact(self, value: Any) -> tuple[Path, str]:
@@ -138,8 +152,9 @@ class FlutterCapability:
         return payload
 
     def _prepare(self, job: Path, artifact_rel: str) -> dict[str, Any]:
+        verified = self.ensure_base_ready()
         return self._run_cli(
-            image=self.base_image,
+            image=_immutable_ref(verified, self.base_image),
             mounts=[
                 (self.project_dir, "/workspace", "ro"),
                 (job, "/output", "rw"),
@@ -187,7 +202,7 @@ class FlutterCapability:
 
     def _ensure_runtime_ready(
         self, image: str, runtime: dict[str, Any], blutter_commit: str
-    ) -> tuple[bool, str]:
+    ) -> tuple[VerifiedImage | None, str]:
         required = {
             "io.safe-reverser.capability.id": self.manifest.capability_id,
             "io.safe-reverser.capability.api": str(self.manifest.capability_api),
@@ -204,10 +219,10 @@ class FlutterCapability:
             ),
         }
         try:
-            self.runtime.ensure_image(image, required_labels=required)
+            verified = self.runtime.ensure_image(image, required_labels=required)
         except RuntimeErrorSafe as exc:
-            return False, str(exc)
-        return True, "ready"
+            return None, str(exc)
+        return verified, "ready"
 
     def _execute(self, job: Path, image: str, timeout: int) -> dict[str, Any]:
         input_dir = job / "input"
@@ -292,10 +307,10 @@ class FlutterCapability:
                     ),
                 }
             image, runtime, blutter_commit = self._runtime_image(prepared)
-            ready, reason = self._ensure_runtime_ready(
+            verified_runtime, reason = self._ensure_runtime_ready(
                 image, runtime, blutter_commit
             )
-            if not ready:
+            if verified_runtime is None:
                 meta["status"] = "runtime_cache_unavailable"
                 meta["runtime_image"] = image
                 meta["runtime_cache_reason"] = reason[-4000:]
@@ -313,12 +328,19 @@ class FlutterCapability:
                         "GitHub workflow; analysis stays offline"
                     ),
                 }
-            result = self._execute(job, image, timeout)
+            runtime_image_id = _immutable_ref(verified_runtime, image)
+            result = self._execute(job, runtime_image_id, timeout)
             meta["runtime_image"] = image
+            meta["runtime_image_id"] = runtime_image_id
             meta["analysis"] = result
             meta["status"] = str(result.get("status") or "unknown")
             self.jobs.write(job, meta)
-            return {"job_id": job_id, **result}
+            return {
+                "job_id": job_id,
+                "runtime_image": image,
+                "runtime_image_id": runtime_image_id,
+                **result,
+            }
         except Exception:
             meta["status"] = "error"
             try:
@@ -346,8 +368,9 @@ class FlutterCapability:
         except JobStoreError as exc:
             raise FlutterCapabilityError(str(exc)) from exc
         analysis = self._analysis_dir(job)
+        verified = self.ensure_base_ready()
         payload = self._run_cli(
-            image=self.base_image,
+            image=_immutable_ref(verified, self.base_image),
             mounts=[(analysis, "/output", "ro")],
             command=[command, ".", *argv],
             timeout=timeout,
@@ -407,6 +430,7 @@ class FlutterCapability:
                         "status": item.get("status"),
                         "created_at_epoch": item.get("created_at_epoch"),
                         "runtime_image": item.get("runtime_image"),
+                        "runtime_image_id": item.get("runtime_image_id"),
                     }
                     for item in jobs
                 ]
