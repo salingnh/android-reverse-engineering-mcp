@@ -1,87 +1,165 @@
 # Releasing Safe Android Reverser
 
-Safe Android Reverser uses immutable semantic-version releases. A release must keep the Claude plugin, wrapper, sandbox image and MCP server on the same version.
+Safe Android Reverser uses immutable semantic-version releases. From 0.3 onward, one plugin release may require multiple capability images plus exact runtime-cache images.
+
+The release must keep plugin metadata, control-plane version, required capability image provenance, Worker ABI/Capability API, and Git tag consistent.
 
 ## Source of truth
 
-The canonical release version is:
+Canonical release version:
 
 ```text
 plugins/safe-android-reverser/VERSION
 ```
 
-For example:
+The following must match it:
+
+- plugin manifest version;
+- marketplace entry version;
+- normal required capability image `org.opencontainers.image.version` labels;
+- public MCP `serverInfo.version`.
+
+## 0.3 release topology
 
 ```text
-0.2.1
+safe-android-reverser plugin VERSION
+      |
+      +-- host control plane
+      +-- static-core image
+      +-- framework-flutter base image
+      +-- exact Flutter runtime-cache images
 ```
 
-The marketplace and plugin manifests must contain the same version. CI checks this automatically.
+Required baseline capability repositories are defined in manifests, not hard-coded into the launcher.
 
-The wrapper does not hard-code a semver image tag. It reads `VERSION` and derives:
+For 0.3:
 
 ```text
 ghcr.io/salingnh/safe-android-reverser:<VERSION>
+ghcr.io/salingnh/safe-android-reverser-flutter:<VERSION>
 ```
 
-The Docker build receives the same version as `SAFE_REVERSER_VERSION`, embeds it as an OCI label and runtime environment variable, and verifies that it matches the copied `VERSION` file.
+Exact Flutter runtime-cache images use deterministic runtime identities rather than the plugin semver tag alone.
+
+## Immutable image rule
+
+Published semver images are immutable.
+
+Do not overwrite a broken release tag. Fix source and publish a new patch release.
+
+Runtime Driver verifies requested image labels, resolves canonical image ID, and executes:
+
+```text
+sha256:<64 hex image id>
+```
+
+rather than re-running the mutable tag after verification.
 
 ## Development builds
 
-Pull requests build and test the image but do not publish it.
+Pull requests may build/load/test images but do not publish release semver tags.
 
-A push to `master` may publish only moving development references:
+Pushes to `master` may publish moving development references such as:
 
 ```text
-ghcr.io/salingnh/safe-android-reverser:master
-ghcr.io/salingnh/safe-android-reverser:sha-<commit>
+<repository>:master
+<repository>:sha-<commit>
 ```
 
-`master` must never publish or overwrite a semver tag.
+`master` must not overwrite/publish a hard-coded semver release tag.
 
-For a local image build:
+Capability-specific workflows may publish their own `master`/`sha-*` development references while preserving the same release/version labels.
+
+## Local development overrides
+
+Use generic capability image overrides:
 
 ```bash
-VERSION="$(tr -d '[:space:]' < plugins/safe-android-reverser/VERSION)"
-
-docker build \
-  --build-arg "SAFE_REVERSER_VERSION=$VERSION" \
-  --build-arg "SAFE_REVERSER_BUILD_COMMIT=$(git rev-parse HEAD)" \
-  -f sandbox/Dockerfile \
-  -t safe-android-reverser:dev \
-  .
+export SAFE_REVERSER_CAPABILITY_IMAGE_STATIC_CORE=safe-android-reverser:ci
+export SAFE_REVERSER_CAPABILITY_IMAGE_FRAMEWORK_FLUTTER=safe-android-reverser-flutter:ci
 ```
 
-If you explicitly test a custom image with the plugin wrapper:
+The generic naming convention is:
 
-```bash
-export SAFE_REVERSER_IMAGE=safe-android-reverser:dev
+```text
+SAFE_REVERSER_CAPABILITY_IMAGE_<CAPABILITY_ID>
 ```
 
-Explicit custom images are treated as development overrides; default release-image version-label enforcement is skipped for that override.
+with `-` converted to `_` and uppercase.
+
+Do not add new release tooling around pre-0.3 single-image variables.
+
+## Milestone acceptance before release work
+
+A milestone release branch is not the place to finish architecture work.
+
+Before preparing 0.3.0 release metadata:
+
+- final platform PR is merged;
+- exact-head CI was green;
+- architecture/security review passed;
+- senior milestone acceptance is recorded;
+- required release docs match implementation;
+- known Blocker/High findings are closed.
 
 ## Release procedure
 
-The release image should exist **before** the new marketplace/plugin version becomes visible on `master`. This avoids a window where users can update the plugin but the matching semver image has not been published yet.
+### 1. Prepare exact release commit
 
-1. Create a release branch/PR and choose the next semver. Never reuse a version that has already been released.
-2. Update `plugins/safe-android-reverser/VERSION`.
-3. Update the safe plugin version in:
-   - `plugins/safe-android-reverser/.claude-plugin/plugin.json`
-   - `.claude-plugin/marketplace.json`
-4. Update user-facing release references if required.
-5. Run locally if available:
+Create a dedicated release branch from accepted `master` and select a new semver.
+
+Update:
+
+```text
+plugins/safe-android-reverser/VERSION
+plugins/safe-android-reverser/.claude-plugin/plugin.json
+.claude-plugin/marketplace.json
+README/docs release references when applicable
+```
+
+Do not reuse an already-published version.
+
+### 2. Run consistency/contract tests
+
+At minimum:
 
 ```bash
 python3 scripts/check_release_consistency.py
+PYTHONPATH=plugins/safe-android-reverser/lib \
+  python3 plugins/safe-android-reverser/tests/test_platform_architecture.py
+PYTHONPATH=plugins/safe-android-reverser/lib \
+  python3 plugins/safe-android-reverser/tests/test_public_operation_contract.py
+PYTHONPATH=plugins/safe-android-reverser/lib \
+  python3 plugins/safe-android-reverser/tests/test_cross_worker_contracts.py
+PYTHONPATH=plugins/safe-android-reverser/lib \
+  python3 plugins/safe-android-reverser/tests/test_runtime_image_pinning.py
 bash sandbox/test_wrapper.sh
-python3 sandbox/tests.py
-python3 sandbox/tests_program_understanding.py
-PYTHONPATH=sandbox python3 sandbox/tests_program_understanding_scopes.py
 ```
 
-6. Push the release branch and wait for the pull-request CI to pass.
-7. Tag the exact tested release commit **before merging the marketplace change to `master`**:
+Run static-core and Flutter capability-specific suites as well.
+
+### 3. Push release branch and require exact-head PR CI
+
+The CI run must correspond to the exact commit intended for release/tagging.
+
+A green run from an earlier branch head is not sufficient.
+
+### 4. Verify controlled exact Flutter runtime-cache build
+
+Before production 0.3.0 release, verify at least one controlled exact-runtime cache build end-to-end:
+
+- deterministic cache tag;
+- Dart version/snapshot/arch/OS/compressed-pointer identity;
+- full Blutter commit;
+- Capability API;
+- Worker ABI;
+- runtime-cache schema;
+- expected OCI provenance labels;
+- immutable image execution readiness.
+
+This does not require building every possible Dart runtime before release; cache misses remain an explicit supported state.
+
+### 5. Tag the exact tested release commit
 
 ```bash
 VERSION="$(tr -d '[:space:]' < plugins/safe-android-reverser/VERSION)"
@@ -89,84 +167,130 @@ git tag -a "safe-v$VERSION" -m "Safe Android Reverser $VERSION"
 git push origin "safe-v$VERSION"
 ```
 
-8. Wait for the tag workflow to pass. It reruns the complete test/image integration gate, verifies `safe-vX.Y.Z == VERSION`, refuses to overwrite an existing semver image, and publishes:
+The tag must resolve to the exact tree that passed release CI.
+
+### 6. Tag workflows publish required semver capability images
+
+The release workflows should rerun required validation and publish semver images only for a matching `safe-vX.Y.Z` tag.
+
+For required baseline capabilities, 0.3 should publish at least:
 
 ```text
 ghcr.io/salingnh/safe-android-reverser:X.Y.Z
 ghcr.io/salingnh/safe-android-reverser:sha-<release-commit>
+
+ghcr.io/salingnh/safe-android-reverser-flutter:X.Y.Z
+ghcr.io/salingnh/safe-android-reverser-flutter:sha-<release-commit>
 ```
 
-9. Verify the semver image exists and exposes the expected OCI version label.
-10. Merge the already-tested release PR to `master`. At that point marketplace clients can discover the new plugin version and the matching image already exists.
-11. The subsequent `master` workflow may publish only:
+Release workflows must refuse to overwrite an existing semver image.
+
+### 7. Verify published images
+
+For each required baseline image verify:
 
 ```text
-ghcr.io/salingnh/safe-android-reverser:master
-ghcr.io/salingnh/safe-android-reverser:sha-<master-commit>
+org.opencontainers.image.version = X.Y.Z
+io.safe-reverser.capability.id    = expected capability
+io.safe-reverser.capability.api   = 1
+io.safe-reverser.worker.abi       = 1
+org.opencontainers.image.revision = expected release commit (where configured)
 ```
 
-The semver image is immutable after publication.
+Also verify the runtime returns a canonical immutable image ID.
 
-If project policy requires tagging only commits reachable from `master`, use a non-squash merge that preserves the tagged release commit, or fast-forward `master` to the tested release commit. Do not create a different source tree under the same semver.
+### 8. Make marketplace-visible release reachable from master
 
-## CI release consistency gate
+After required semver images are available, merge the already-tested release change according to repository merge policy.
 
-`scripts/check_release_consistency.py` verifies:
+Avoid a window where marketplace/plugin metadata advertises a version whose required images do not exist.
+
+If policy requires release tags to be reachable from `master`, use a merge strategy that preserves/reaches the exact tagged release tree. Do not create a materially different tree under the same semver.
+
+## Why images are published before marketplace visibility
+
+If plugin metadata is visible first, users can install a version whose required workers are not yet available.
+
+Correct ordering:
 
 ```text
-VERSION
-  == plugin.json version
-  == marketplace safe-android-reverser version
+exact release commit tested
+        ↓
+safe-vX.Y.Z tag
+        ↓
+required semver images published/verified
+        ↓
+marketplace-visible release merged
 ```
 
-It also verifies that:
+## Release consistency gate
 
-- the wrapper derives its default image from `VERSION`;
-- the wrapper propagates plugin release metadata;
-- the Dockerfile embeds OCI/runtime release metadata;
-- the image entrypoint is release-aware;
-- the workflow does not contain a mutable hard-coded semver image tag;
-- the workflow emits commit-addressable `sha-*` tags;
-- a `safe-vX.Y.Z` Git tag matches `VERSION` exactly.
+`scripts/check_release_consistency.py` is an architecture/release gate, not merely a version-string check.
 
-## Runtime consistency
+It should verify invariants including:
 
-For a normal plugin release the wrapper checks the OCI image label before starting the container:
+- valid canonical VERSION;
+- plugin/marketplace version equality;
+- exactly one public `safe-android-reverser` MCP;
+- legacy dual-MCP/server files do not return;
+- canonical static worker path exists;
+- launcher delegates image lifecycle to Runtime Driver;
+- launcher does not create data root before Path SDK validation;
+- required baseline capability manifests exist and validate;
+- additional compatible capability manifests are not rejected solely for being additional;
+- operation ownership does not collide;
+- Capability API/Worker ABI constants agree across host/workers/cache identity;
+- worker images carry required labels;
+- immutable image-ID execution markers remain present;
+- workflows publish `sha-*` development references and derive semver only from `safe-v*` tags;
+- tag version equals `VERSION`.
+
+## Baseline capability rule
+
+A release may define **required baseline capabilities**, for example 0.3:
 
 ```text
-plugin VERSION
-      ==
-org.opencontainers.image.version
+static-core
+framework-flutter
 ```
 
-The MCP `health` response additionally reports:
+Release gates should require that baseline as a subset, not require that it is the complete forever list of capability manifests.
 
-```json
-{
-  "release": {
-    "server_version": "X.Y.Z",
-    "plugin_version": "X.Y.Z",
-    "image_version": "X.Y.Z",
-    "image_ref": "ghcr.io/salingnh/safe-android-reverser:X.Y.Z",
-    "image_id": "...",
-    "build_commit": "...",
-    "version_consistent": true
-  }
-}
-```
+This allows later compatible optional/native/framework/security capability modules without rewriting central architecture gates merely because the set grew.
 
-This metadata is the first diagnostic to inspect when an installed plugin behaves differently from the expected release.
+## Runtime-cache release rule
+
+Exact runtime caches are not normal plugin semver images.
+
+They use deterministic identities bound to the runtime/analyzer ABI inputs. Never retag an incompatible runtime under an existing cache identity.
+
+If any identity input changes in a compatibility-significant way, increment the relevant cache/ABI contract so a new immutable identity is produced.
 
 ## Rollback
 
-Do not overwrite a broken semver image. Publish a new patch version instead.
+Never mutate a published semver image.
 
-For example, if `0.2.1` is broken:
+Example:
 
 ```text
-Do not replace :0.2.1.
-Fix the source.
-Release 0.2.2.
+0.3.0 contains a release defect
+      ↓
+fix source
+      ↓
+release 0.3.1
 ```
 
-This preserves reproducibility for existing installations and prevents wrapper/image cache drift.
+A plugin rollback can select an older marketplace/plugin release whose immutable images remain available.
+
+## Post-release checks
+
+After release:
+
+1. install/update through the documented plugin path;
+2. run `/mcp`;
+3. call `health` and `list_capabilities`;
+4. verify required capability states and immutable image IDs;
+5. fingerprint a known native Android fixture;
+6. fingerprint/analyze a known Flutter fixture;
+7. verify a runtime cache miss is explicit rather than triggering an in-sandbox build;
+8. update roadmap release status and start the next milestone only after acceptance is complete.
