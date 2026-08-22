@@ -84,10 +84,9 @@ class FlutterAotAdapter:
 
     def diagnostics(self) -> dict[str, Any]:
         return {
-            "domain": "flutter-dart-aot",
             "runtime_cache_schema": RUNTIME_CACHE_SCHEMA,
             "job_store": "analysis-job-store-v1",
-            "registry_selection_owned_by_worker": False,
+            "worker": self.capability.diagnostics(),
         }
 
     def tools(self) -> list[dict[str, Any]]:
