@@ -22,7 +22,7 @@ class FlutterAnalysisTests(unittest.TestCase):
         os.environ["SAFE_REVERSER_IMAGE_VERSION"] = "0.2.1"
         os.environ["SAFE_REVERSER_BUILD_COMMIT"] = "test-build"
         cls.flutter = importlib.import_module("flutter_analysis")
-        cls.server = importlib.import_module("mcp_server_v2")
+        cls.server = importlib.import_module("static_semantic_worker")
 
     @classmethod
     def tearDownClass(cls):
