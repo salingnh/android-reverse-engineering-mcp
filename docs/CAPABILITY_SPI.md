@@ -2,9 +2,7 @@
 
 ## Purpose
 
-Safe Reverser exposes one public MCP control plane and executes analyzers in isolated capability workers. This document defines the platform contract that 0.3.0 establishes and later milestones extend rather than replace.
-
-The stable topology is:
+Safe Android Reverser exposes one public MCP control plane and executes analyzers in isolated capability workers. Capability SPI v1 is the extension contract established by 0.3.0 and extended by later milestones rather than replaced.
 
 ```text
 AI agent
@@ -14,19 +12,18 @@ safe-android-reverser MCP
 host control plane
    |
    +-- Capability Registry
+   +-- Adapter Registry/factory
    +-- Runtime Driver
    +-- Path / Job / Evidence contracts
    |
-   +-- static-core worker
-   +-- framework-flutter worker
-   +-- future native / Hermes / IL2CPP / .NET / dynamic workers
+   +-- isolated capability workers
 ```
 
-The agent never chooses Docker/Podman commands and never receives a raw analyzer console. The host control plane is the only layer allowed to invoke the container runtime.
+The agent never chooses Docker/Podman commands and never receives raw unrestricted analyzer consoles. The host control plane is the only layer allowed to invoke the container runtime.
 
 ## Versioned contracts
 
-0.3.0 defines:
+0.3.0 defines independently versioned contracts:
 
 ```text
 Capability API       1
@@ -36,7 +33,7 @@ PEG schema           2
 Flutter cache schema 2
 ```
 
-These versions are independent. A future breaking change must use an explicit architecture decision, migration path, compatibility tests, and senior review. A milestone must not knowingly ship a mechanism that the next milestone is expected to replace.
+A future breaking change requires an architecture decision, migration path, compatibility tests, documentation, and senior review.
 
 ## Capability manifest
 
@@ -62,11 +59,7 @@ Representative manifest:
     "repository": "ghcr.io/salingnh/safe-android-reverser-flutter",
     "role": "framework-flutter"
   },
-  "operations": [
-    "analyze_flutter_aot",
-    "find_dart_symbols",
-    "find_dart_strings"
-  ],
+  "operations": ["analyze_flutter_aot", "find_dart_symbols"],
   "sandbox": {
     "network": "none",
     "read_only_root": true,
@@ -81,127 +74,31 @@ Representative manifest:
 }
 ```
 
-Unknown or missing manifest fields are rejected. Contract booleans, integers, strings, and string arrays are type-checked strictly instead of being truthiness/coercion parsed. Operation ownership is unique across all declared capabilities.
+Unknown/missing fields are rejected. Booleans, integers, strings, arrays, IDs, operation names, image descriptors, and policy values are strictly validated.
+
+Public operation ownership is unique across all manifests.
 
 ## Activation contract
 
-`activation` is part of Capability SPI v1:
-
 ```text
 required
-  The release depends on this capability. Its failure degrades overall health.
+  The release baseline depends on this capability. Its failure degrades overall health.
 
 optional
-  The capability is active when installed, but its failure does not make the
-  required platform unhealthy.
+  Active when installed/declared by the release, but failure does not make the required platform unhealthy.
 
 opt-in
-  The capability is declared but inactive until its exact id is explicitly
-  enabled through SAFE_REVERSER_ENABLE_CAPABILITIES.
+  Declared but inactive until its exact capability id is explicitly enabled through
+  SAFE_REVERSER_ENABLE_CAPABILITIES.
 ```
 
-A `dynamic-opt-in` trust boundary must use `activation=opt-in`. This rule exists in 0.3.0 so the future dynamic milestone does not need a new orchestration model or public MCP server.
+A `dynamic-opt-in` trust boundary must use `activation=opt-in`.
 
-Disabled opt-in capabilities do not expose analyzer tools. They remain visible in `list_capabilities` as declared/not enabled.
-
-## Adapter vs worker protocol
-
-These are deliberately separate concepts.
-
-### `adapter`
-
-The host adapter owns capability-specific orchestration that cannot be expressed by a generic worker transport.
-
-Current adapter kinds:
-
-```text
-mcp-container
-  Generic MCP-over-stdio worker adapter. Used by static-core.
-
-flutter-aot
-  Flutter-specific host orchestration for exact Dart runtime-cache selection,
-  followed by bounded CLI JSON worker operations.
-```
-
-Adding a new adapter kind extends the adapter factory behind Capability SPI. It must not require changes to public MCP topology, capability dispatch, health aggregation, job ownership, or EvidenceEnvelope semantics.
-
-### `protocol`
-
-The worker protocol describes communication with an analyzer image:
-
-```text
-mcp-stdio
-cli-json
-```
-
-Protocol is not equivalent to framework identity. Multiple capabilities may share a protocol or a generic adapter.
-
-## Public operations vs internal diagnostics
-
-The following names are reserved by the host control plane and must never appear in a capability manifest's public `operations` list:
-
-```text
-health
-list_capabilities
-```
-
-`health` therefore has exactly one agent-facing meaning: platform/control-plane health.
-
-Worker ABI v1 separately requires MCP-over-stdio workers to expose an **internal** `health` tool for diagnostics. The generic MCP adapter validates that this internal tool exists, removes it from the public capability tool surface, and exposes its result through the adapter `diagnostics()` contract.
-
-CLI/domain-specific adapters must provide an equivalent bounded health/protocol probe through the same adapter contract. The Flutter adapter runs the worker's isolated `health` command and verifies the offline/no-build/no-registry-ownership invariants before claiming readiness.
-
-A capability is `ready` only when its image identity is compatible and its worker surface satisfies the declared public operations plus required Worker ABI diagnostics. Image existence alone is not sufficient for `ready`.
-
-Control-plane health aggregates diagnostics generically under:
-
-```text
-capabilities.diagnostics.<capability-id>
-```
-
-Adding a capability must not require another special top-level health field or capability-specific branch in control-plane health aggregation.
-
-## Runtime Driver contract
-
-The Runtime Driver owns:
-
-- Docker/Podman selection;
-- image inspect/pull;
-- OCI label verification;
-- immutable image-ID resolution;
-- UID/GID mapping;
-- network policy enforcement;
-- read-only root;
-- dropped Linux capabilities;
-- `no-new-privileges`;
-- CPU/memory/PID limits;
-- bounded tmpfs;
-- read-only/read-write mount policy;
-- bounded stdout/stderr capture;
-- MCP stdin attachment for stdio workers.
-
-Capability adapters must not reimplement container command construction.
-
-### Network policy
-
-Capability SPI v1 reserves two policy values:
-
-```text
-none
-controlled
-```
-
-Rules:
-
-- `static`, `framework-static`, and `native-static` must use `none`;
-- only `dynamic-opt-in` may declare `controlled`;
-- the 0.3 static Runtime Driver deliberately rejects execution of `controlled` network policy.
-
-A later dynamic Runtime Driver may implement the already-defined `controlled` policy behind the same manifest schema. This is an implementation extension, not a contract replacement.
+Disabled opt-in capabilities do not expose analyzer tools. They remain discoverable through `list_capabilities` as declared/not enabled.
 
 ## Trust boundaries
 
-Current trust-boundary identifiers:
+Current identifiers:
 
 ```text
 static
@@ -210,21 +107,144 @@ native-static
 dynamic-opt-in
 ```
 
-Static-style workers keep:
+Static-style workers preserve:
 
 ```text
 network = none
 read-only root = true
 cap-drop = ALL
 no-new-privileges = true
+non-root UID/GID
 bounded memory / CPU / PIDs / tmpfs
 ```
 
 No worker receives a Docker/Podman socket.
 
+Only `dynamic-opt-in` may declare `sandbox.network=controlled`.
+
+The 0.3 Runtime Driver intentionally refuses execution of `controlled`. A later dynamic Runtime Driver implementation may support that already-defined policy without changing Capability SPI or public MCP topology.
+
+## Adapter vs protocol
+
+These are separate concepts.
+
+### `adapter`
+
+The host adapter owns capability-specific orchestration that cannot be expressed by a generic transport.
+
+Current kinds:
+
+```text
+mcp-container
+  Generic MCP-over-stdio capability worker.
+
+flutter-aot
+  Flutter-specific exact runtime-cache orchestration followed by bounded CLI JSON worker calls.
+```
+
+Prefer existing reusable adapters. A new adapter kind must be registered behind the adapter factory/registry boundary.
+
+It must not add framework/operation branches to generic `ControlPlane.call()`, health aggregation, job ownership, evidence normalization, or public MCP topology.
+
+### `protocol`
+
+The worker communication protocol currently supports:
+
+```text
+mcp-stdio
+cli-json
+```
+
+Protocol is not framework identity. Multiple capabilities can share a protocol/adapter.
+
+## Public operations and ownership
+
+The control plane reserves:
+
+```text
+health
+list_capabilities
+```
+
+A capability manifest must not claim them.
+
+Each other public semantic operation has exactly one manifest owner. Duplicate ownership causes registry startup failure.
+
+The control plane resolves:
+
+```text
+operation name
+   ↓
+manifest owner
+   ↓
+enabled adapter
+   ↓
+worker/domain implementation
+```
+
+Do not implement public dispatch as a framework/operation `if/elif` tree in the control plane.
+
+## Internal diagnostics
+
+Worker ABI v1 requires readiness/diagnostic behavior behind the adapter contract.
+
+For `mcp-stdio`, the worker exposes an internal `health` tool. The generic adapter validates it, removes it from the public capability tool surface, and exposes diagnostics through the host platform health response.
+
+CLI/domain adapters must supply equivalent bounded diagnostics.
+
+A capability is `ready` only when its image/runtime identity is compatible **and** the worker surface satisfies the declared contract. Image existence alone is not readiness.
+
+## Capability boundary rules
+
+### static-core
+
+`static-core` owns generic Android package/DEX/JVM/resource triage and semantics, framework detection/routing preflight, and fast generic native triage.
+
+It must not accumulate deep semantics for external frameworks merely because those frameworks are packaged inside APK files.
+
+### Framework capabilities
+
+A framework capability owns semantic analysis of the representation carrying framework business logic, for example:
+
+```text
+framework-flutter -> Dart AOT semantics
+framework-hermes  -> Hermes/JS semantics
+framework-il2cpp  -> IL2CPP metadata/native correlation
+framework-dotnet  -> managed assemblies/IL semantics
+```
+
+### Native capability
+
+Generic native/JNI analysis is a substrate and escalation path. A higher-level framework analyzer remains primary when it preserves richer semantics.
+
+### Dynamic capability
+
+Dynamic execution/device/network access is a separate explicit opt-in trust boundary and must never be introduced by weakening static workers.
+
+## Runtime Driver contract
+
+The shared Runtime Driver owns:
+
+- Docker/Podman selection;
+- image inspect/pull;
+- OCI provenance verification;
+- immutable image-ID resolution;
+- UID/GID mapping;
+- network policy enforcement;
+- read-only root;
+- dropped Linux capabilities;
+- `no-new-privileges`;
+- CPU/memory/PID limits;
+- bounded tmpfs;
+- mount policy;
+- bounded stdout/stderr capture;
+- MCP stdin attachment where required.
+
+Capability adapters must not reimplement container command construction.
+
 ## Image identity and immutable execution
 
-A normal capability image must publish at least:
+A normal capability image publishes at least:
 
 ```text
 org.opencontainers.image.version
@@ -233,75 +253,77 @@ io.safe-reverser.capability.api
 io.safe-reverser.worker.abi
 ```
 
-The Runtime Driver resolves the requested image reference, verifies the required OCI labels, reads the runtime's canonical image ID, normalizes it to:
+The Runtime Driver:
 
 ```text
-sha256:<64-hex-image-id>
+requested image reference
+        ↓
+inspect / pull as provisioning policy
+        ↓
+verify required OCI labels
+        ↓
+resolve canonical sha256 image ID
+        ↓
+execute the immutable image ID
 ```
 
-and executes **that verified immutable image ID**, not the mutable tag that was inspected. This closes the inspect-tag/run-tag time-of-check/time-of-use gap.
+This closes the mutable-tag inspect/run TOCTOU gap.
 
-The two identities have different roles:
+Readiness exposes both requested `image` and verified `image_id`.
 
-```text
-requested image ref
-  provisioning, pull policy, configuration and audit context
+A long-lived control-plane instance keeps the verified immutable image identity for that worker instance; a tag mutation does not silently switch already-running code.
 
-verified image ID
-  actual container execution identity
-```
-
-Readiness exposes both `image` and `image_id`. Persistent Flutter analysis metadata records both `runtime_image` and `runtime_image_id` for the exact runtime-cache worker.
-
-A long-lived control-plane process keeps the verified image ID for its worker instance. Updating a tag does not silently switch an already-running control plane to new code; normal upgrade/restart re-resolves and re-verifies the image.
-
-Image repository policy belongs to the host control plane. Workers return analyzer/runtime identity, not deployment repository choices.
-
-Generic test/development override:
+Generic development/test override:
 
 ```text
 SAFE_REVERSER_CAPABILITY_IMAGE_<CAPABILITY_ID>
 ```
 
-with `-` normalized to `_` and uppercase. Pre-0.3 static/Flutter aliases may remain as compatibility input aliases, but they do not own image lifecycle.
+with `-` normalized to `_` and uppercase.
+
+Legacy pre-0.3 image aliases may exist as configuration compatibility aliases only; image lifecycle remains Runtime Driver-owned.
 
 ## Exact runtime-cache identity
 
-Frameworks that require compiler/runtime-specific analyzers may return a registry-independent cache key. For Flutter, the immutable cache tag is derived from:
+Frameworks that require compiler/runtime-specific analyzers may derive a registry-independent cache identity.
+
+Flutter binds:
 
 ```text
 cache schema
 Capability API
 Worker ABI
 Dart version
-Dart snapshot hash
+snapshot hash
 architecture
 OS
 compressed-pointers mode
 Blutter commit
 ```
 
-The host maps the cache tag to the configured repository, verifies all relevant OCI provenance labels, resolves its immutable image ID, and executes the image ID rather than the tag.
+The host maps the cache tag to a configured repository, verifies all required labels, resolves an immutable image ID, and executes that ID.
 
-The analyzer sandbox never clones/builds/downloads a missing Dart runtime.
+The analyzer worker never clones/builds/downloads a missing Dart runtime during normal analysis.
 
-## Shared host path contract
+## Path contract
 
-Host filesystem operations use the shared path SDK. It rejects:
+Host filesystem operations use the shared Path SDK and reject:
 
-- absolute user artifact paths where only project-relative paths are allowed;
-- lexical path escape;
-- resolved path escape;
+- absolute user artifact paths where project-relative paths are required;
+- lexical escape;
+- resolved escape;
 - symlinked path components;
 - symlinked data roots;
 - unsafe deletion targets;
 - oversized metadata.
 
-Directory roots are checked for existing symlink components before `mkdir`/`resolve`, so path validation does not first traverse an attacker-controlled symlink and reject it only afterward.
+Directory roots are checked before creation/canonicalization so a symlinked parent is not intentionally traversed first and rejected afterward.
+
+Current path policy addresses untrusted-artifact and ordinary symlink substitution. If hostile same-UID filesystem races enter the threat model, critical operations should move toward dirfd/openat/openat2-style primitives without changing Capability SPI.
 
 ## Analysis jobs
 
-Capability-specific jobs use `AnalysisJobStore`:
+Capability-specific jobs use the shared `AnalysisJobStore`:
 
 ```text
 <data-root>/<capability-id>/jobs/<12-hex-job-id>/
@@ -309,29 +331,36 @@ Capability-specific jobs use `AnalysisJobStore`:
 
 The store provides:
 
-- non-predictable bounded job ids;
+- non-predictable bounded IDs;
 - private directories;
-- atomic bounded `job.json` writes;
+- atomic bounded metadata writes;
 - metadata/directory identity checks;
-- bounded job listing and a hard directory scan budget.
+- bounded returned job count;
+- hard filesystem entry scan budget.
 
-Analyzer-specific persistent data may live inside the job directory, subject to capability-specific export limits.
+Capability-private artifacts/indexes may live in the job directory subject to capability-specific bounds.
 
 ## Private indexes and shared evidence
 
-Capability implementations may keep optimized private storage:
+Optimized analyzer storage remains private:
 
 ```text
 DEX SQLite
 Flutter SQLite
-Ghidra project/cache
-Hermes index
-future data-flow IR
+future native/IR/Hermes/IL2CPP caches
 ```
 
-These are implementation details, not competing platform models.
+The public compatibility descriptor includes:
 
-The control plane adds a shared compatibility descriptor to capability results. When a result contains valid provenance, it emits an `EvidenceEnvelope` containing:
+```text
+capability id
+Capability API
+Worker ABI
+operation
+EvidenceEnvelope version
+```
+
+When valid material provenance is available, the control plane emits an `EvidenceEnvelope` with:
 
 ```text
 schema version
@@ -344,7 +373,7 @@ operation/provenance payload
 limitations
 ```
 
-Evidence states are strictly:
+Evidence state is strictly:
 
 ```text
 observed
@@ -352,64 +381,99 @@ derived
 hypothesized
 ```
 
-The control plane does not invent numeric confidence or fabricate an evidence state when the producer did not provide one.
+No numeric confidence is fabricated by the platform.
 
-PEG remains the long-lived semantic model. Later data-flow/security/dynamic capabilities add new evidence and relations; they do not replace private indexes or the EvidenceEnvelope contract.
+PEG remains the long-lived semantic model. New data-flow/security/dynamic/native capabilities add evidence/relations rather than replacing the shared evidence architecture.
 
 ## Routing and readiness
 
 Framework routing and deployment readiness are separate facts.
 
-A fingerprint route returns topology such as:
+A route declares topology such as:
 
 ```text
 primary_capability_id = framework-flutter
-primary_profile_status = declared
 ```
 
-The host control plane then enriches any result containing the shared `analysis_route` shape with current runtime state. Enrichment is result-driven rather than hard-coded to specific operation names.
+The host control plane enriches the shared `analysis_route` shape with runtime state:
 
 ```text
-primary_capability_state = ready | degraded | unavailable | declared | unsupported
+declared
+installed
+ready
+degraded
+unavailable
+unsupported
 ```
 
-A static worker must never claim a framework image is ready merely because the framework was detected.
+A fingerprint worker must not claim an external analyzer image/runtime is ready merely because the framework is detected.
 
-## Adding another capability
+## Adding a capability
 
-A new capability should normally require only:
+A normal new capability should require only:
 
-1. a validated capability manifest;
-2. an existing adapter kind, or a new adapter implementation behind the adapter factory;
-3. its isolated worker image and analyzer code;
+1. a validated manifest;
+2. an existing adapter kind, or a new narrowly scoped adapter registered behind the adapter factory;
+3. an isolated worker image/analyzer implementation;
 4. deterministic tests and capability-specific CI;
-5. evidence/provenance normalization through the shared contracts;
-6. Worker ABI-compatible internal diagnostics through the adapter contract.
+5. shared provenance/evidence normalization;
+6. Worker ABI-compatible diagnostics.
 
 It must not require:
 
-- another public MCP server;
-- another Docker/Podman implementation;
+- another public MCP;
+- another generic Runtime Driver;
 - another generic job store;
-- another host path security implementation;
+- another host path implementation;
 - another evidence-state model;
-- another public `health` implementation;
-- operation-name-specific dispatch branches for shared route enrichment;
-- changes to agent-facing orchestration topology.
+- another top-level public health implementation;
+- operation-name-specific dispatch branches;
+- privilege expansion of unrelated capabilities.
+
+## CI extension rule
+
+Central platform CI validates **invariants and release baseline requirements**, not an exact forever set of all capability IDs.
+
+For example, 0.3 may require at least:
+
+```text
+static-core
+framework-flutter
+```
+
+but a compatible future optional manifest must not fail solely because it is an additional capability.
+
+Capability-specific build/integration checks may still explicitly name the capability they test.
+
+## Public operation schema compatibility
+
+Worker ABI v1 currently validates declared public operation ownership/tool names and diagnostics behavior.
+
+That is sufficient for the 0.3 foundation but is not the final 1.0 compatibility policy.
+
+Before 1.0, public semantic operations must gain a stable compatibility rule for:
+
+- input schema changes;
+- required/optional arguments;
+- externally meaningful output fields;
+- error/partial/unsupported semantics.
+
+A future implementation may use per-operation contract versions, normalized schema hashes, or another deterministic compatibility mechanism. Operation-name equality alone must not be treated as a permanent 1.0 ABI guarantee.
 
 ## Compatibility rules
 
-The following are platform-level changes and require explicit review:
+The following require explicit platform review:
 
-- Capability API version change;
-- Worker ABI version change;
+- Capability API change;
+- Worker ABI change;
 - EvidenceEnvelope breaking change;
-- trust-boundary or activation semantic change;
+- trust-boundary/activation semantic change;
 - Runtime Driver privilege expansion;
 - path/job security invariant change;
 - operation ownership conflict;
 - internal diagnostics ABI change;
-- verified-image execution identity change;
-- runtime-cache identity change that could reuse an incompatible image.
+- verified immutable-image execution change;
+- runtime-cache identity change that could reuse incompatible code;
+- externally breaking public operation schema change.
 
-A private analyzer parser/index may evolve without changing Capability API when its externally observable contract remains compatible.
+A capability-private parser/index may evolve without changing Capability API when externally observable semantics remain compatible.
