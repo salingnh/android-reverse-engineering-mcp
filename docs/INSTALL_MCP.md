@@ -1,20 +1,30 @@
 # Install, update and use Safe Android Reverser MCP
 
-This is the supported installation and update path for `safe-android-reverser` 0.2.1 and later.
+This is the supported installation/update path for Safe Android Reverser.
 
-The distribution model is intentionally simple:
+Current published release is **0.2.1**. The 0.3 branch documented here introduces the long-term single-control-plane capability architecture and becomes the normal runtime model when 0.3.0 is released.
+
+## Distribution model from 0.3
+
+The plugin is one user-facing release, but it may require multiple capability images:
 
 ```text
-Claude plugin version
-        =
-bundled wrapper version
-        =
-GHCR sandbox image version
-        =
-MCP server version
+Claude plugin VERSION
+        |
+        +-- host MCP control plane version
+        |
+        +-- static-core capability image version
+        |
+        +-- framework-flutter base image version
+        |
+        +-- exact immutable Flutter runtime-cache images
 ```
 
-Normal users should not clone this repository, manually pull container images, or register the MCP separately.
+A normal user still installs **one plugin** and sees **one public MCP server**.
+
+The host control plane owns image discovery/pull/verification and starts isolated capability workers as needed.
+
+Normal users should not clone the repository, manually run worker containers, or register framework-specific MCP servers.
 
 ## 1. Prerequisites
 
@@ -31,14 +41,14 @@ podman --version
 podman info
 ```
 
-Docker is also supported:
+Docker is supported:
 
 ```bash
 docker --version
 docker info
 ```
 
-Do not run Claude Code or the plugin with `sudo`.
+Do not run Claude Code/plugin with `sudo`.
 
 ## 2. Install once
 
@@ -50,25 +60,74 @@ Inside Claude Code:
 /reload-plugins
 ```
 
-Then verify:
+Then inspect:
 
 ```text
 /mcp
 ```
 
-The plugin bundles `.mcp.json`; no `claude mcp add` command is required.
+The plugin bundles its MCP registration. Do not run a separate `claude mcp add` for Flutter or static workers.
 
-On first use, the wrapper reads its bundled `VERSION` file and automatically starts the matching immutable sandbox image. For release 0.2.1 that image is:
+The only public server is:
 
 ```text
-ghcr.io/salingnh/safe-android-reverser:0.2.1
+safe-android-reverser
 ```
 
-The wrapper prefers rootless Podman, falls back to Docker, creates writable plugin data, maps the host UID/GID, and runs the MCP over stdio in an ephemeral locked-down container.
+## 3. What starts in 0.3+
 
-## 3. Update the plugin
+The plugin launcher starts a **host-side Python MCP control plane**. It does not parse untrusted APK contents itself.
 
-When a new release is available, update the marketplace and plugin inside Claude Code:
+```text
+Claude / AI agent
+      ↓ stdio
+safe-reverser-mcp launcher
+      ↓
+host control plane
+      ↓
+Capability Registry + Runtime Driver
+      ↓
+isolated worker containers
+```
+
+The launcher:
+
+- reads bundled `VERSION`;
+- selects rootless Podman first or Docker;
+- resolves the project directory;
+- passes the data-root path to the shared Path SDK;
+- does **not** create/canonicalize the data root before Python path-policy validation;
+- starts the host control plane.
+
+The Runtime Driver then owns worker image inspect/pull/verification/execution.
+
+## 4. Capability images
+
+0.3 requires the release baseline capabilities:
+
+```text
+static-core
+framework-flutter
+```
+
+Default repositories are declared by capability manifests:
+
+```text
+ghcr.io/salingnh/safe-android-reverser:<VERSION>
+ghcr.io/salingnh/safe-android-reverser-flutter:<VERSION>
+```
+
+Flutter AOT may additionally require an exact runtime-cache image derived from the analyzed Dart runtime identity.
+
+The host verifies required OCI labels and executes the immutable `sha256:<image-id>` it inspected, not the mutable tag.
+
+A missing normal capability image is pulled automatically when `SAFE_REVERSER_AUTO_PULL=1` (default).
+
+A missing exact Flutter runtime cache is reported as an explicit cache miss. Normal analysis does **not** build/download that runtime inside the sandbox.
+
+## 5. Update the plugin
+
+Inside Claude Code:
 
 ```text
 /plugin marketplace update salingnh-reverse-tools
@@ -76,55 +135,41 @@ When a new release is available, update the marketplace and plugin inside Claude
 /reload-plugins
 ```
 
-If your Claude Code build manages updates through the `/plugin` UI, use the equivalent **Marketplace refresh** and **Update** actions there.
+You normally do not need to manually `podman pull`, delete old images, or edit MCP configuration.
 
-You do not need to run `podman pull` or remove the old image. A new plugin release references a new semver image tag, so the wrapper pulls it automatically when it is missing.
+A new plugin release reads its new `VERSION`; capability manifests select matching repositories/tags; Runtime Driver pulls missing release images and verifies their labels.
 
-Example:
+Old plugin cache directories and old immutable container images may remain on disk. They are not selected by the active release unless explicitly configured.
 
-```text
-installed plugin 0.2.0
-        ↓ update
-installed plugin 0.2.1
-        ↓ wrapper reads VERSION=0.2.1
-checks image :0.2.1
-        ↓ missing
-pulls image :0.2.1
-        ↓
-starts MCP 0.2.1
-```
+## 6. Verify with `health`
 
-Old Claude plugin cache directories and old container images may remain on disk. That is expected; they are not selected by the active plugin release.
-
-## 4. Verify release consistency with `health`
-
-After install or update, run:
+After install/update:
 
 ```text
-Use only the safe-android-reverser MCP server.
-Call health and report the release metadata and analyzer availability.
+Use only safe-android-reverser MCP.
+Call health and list_capabilities.
 Do not analyze an artifact yet.
+Report architecture, version, capability states and image identities.
 ```
 
-A healthy release returns a `release` block similar to:
+Healthy 0.3 architecture should include:
 
-```json
-{
-  "server_version": "0.2.1",
-  "plugin_version": "0.2.1",
-  "image_version": "0.2.1",
-  "image_ref": "ghcr.io/salingnh/safe-android-reverser:0.2.1",
-  "image_id": "...",
-  "build_commit": "...",
-  "version_consistent": true
-}
+```text
+architecture = single-host-control-plane
+control_plane.capability_api = 1
+control_plane.worker_abi = 1
+control_plane.runtime_socket_mounted_into_workers = false
 ```
 
-If the default image label does not match the bundled plugin version, the wrapper fails before starting MCP instead of silently running a mismatched image.
+Required baseline capability states should be `ready` for an overall `status=ok`.
 
-## 5. Put an artifact under the project root
+Readiness is separate from framework detection. A Flutter artifact may route to `framework-flutter` even when an exact Dart runtime cache is unavailable; the capability/job response should report that boundary explicitly.
 
-The Claude project is mounted read-only at `/workspace`. Keep artifacts under the project root and pass relative paths only:
+## 7. Put artifacts under the project root
+
+The project is mounted read-only into workers at `/workspace`.
+
+Keep input artifacts under the active project and pass project-relative paths:
 
 ```bash
 mkdir -p artifacts
@@ -133,104 +178,124 @@ cp /path/to/app.xapk artifacts/app.xapk
 
 Do not pass arbitrary absolute host paths.
 
-## 6. Cheap first smoke test
+## 8. First smoke test
 
 ```text
-Use only the safe-android-reverser MCP server.
-1. Call health and require release.version_consistent=true.
-2. Fingerprint artifacts/app.xapk.
-3. Report framework, APK members, HTTP stack, obfuscation level, native libraries, notable SDKs and the recommended analyzer route.
-Do not decompile yet.
+Use only safe-android-reverser MCP.
+
+1. Call health.
+2. Call list_capabilities.
+3. Fingerprint artifacts/app.xapk.
+4. Report framework, package members, native libraries, SDK/network clues and analysis_route.
+5. Do not decompile until the primary capability/representation is known.
 ```
 
-## 7. Full semantic analysis prompt
-
-For native Android/Java/Kotlin applications:
+## 9. Full framework-aware analysis prompt
 
 ```text
-Analyze artifacts/app.xapk using only the safe-android-reverser MCP server.
+Analyze artifacts/app.xapk using only safe-android-reverser MCP.
 
 Required workflow:
-1. Call health. Stop if MCP/sandbox is unavailable or release.version_consistent is false.
-2. Fingerprint the artifact and identify its APK members/framework.
-3. If protector detection is available, call identify_protector and use the result to adjust the analysis route.
-4. If native Android/Java/Kotlin analysis is appropriate, decompile with JADX and keep the returned job_id.
-5. Call build_program_index(job_id).
-6. Call extract_network_model(job_id).
-7. Use find_symbols and find_xrefs to trace important features/endpoints through their callers and callees.
-8. Use get_cfg only when branch/control-flow detail is required.
-9. Use search_source/read_source_file only for high-signal evidence that verifies the graph-based conclusion.
-10. Report application/framework summary, first-party hosts/endpoints, declaring methods, caller/callee evidence, model hints, auth/signature signals, strongest evidence with confidence, and unresolved questions.
-
-Do not use host JADX/Java/Androguard, host shell commands, sudo, install-dep.sh, or non-MCP reverse-engineering paths.
-Do not describe XREF adjacency as proven data-flow.
+1. Call health and inspect required capability readiness.
+2. Call fingerprint and follow analysis_route.primary_capability_id.
+3. Do not silently substitute Java/Kotlin analysis for a framework whose business logic uses another representation.
+4. If primary capability is static-core, use decompile/build_program_index and semantic XREF/CFG/network queries as needed.
+5. If primary capability is framework-flutter, call analyze_flutter_aot and retain job_id, then query Dart symbols/strings/XREF/native mappings/network model.
+6. Preserve analyzer provenance and evidence_state.
+7. Treat CALLS/XREFS as adjacency, not proven data flow.
+8. Read only bounded high-signal source/analyzer evidence required to verify conclusions.
+9. Report unavailable, cache-miss, degraded or unsupported boundaries explicitly.
+10. Never use host shell/JADX/Androguard/Blutter as a fallback around MCP policy.
 ```
 
-Key semantic operations are:
+## 10. Runtime configuration
+
+Most users should not set runtime variables manually.
+
+Useful supported variables include:
 
 ```text
-build_program_index
-find_symbols
-find_xrefs
-get_cfg
-identify_protector
-extract_network_model
+SAFE_REVERSER_RUNTIME=auto|podman|docker
+SAFE_REVERSER_AUTO_PULL=1|0
+SAFE_REVERSER_PROJECT_DIR=<project root>
+SAFE_REVERSER_DATA_DIR=<plugin data root>
+SAFE_REVERSER_ENABLE_CAPABILITIES=<comma-separated opt-in capability ids>
 ```
 
-`extract_api` remains useful for a cheap endpoint inventory; prefer `extract_network_model` when you need usage context.
+The launcher resolves `auto` to Podman first, then Docker.
 
-## Runtime defaults
-
-Normal users should not set these manually:
+Advanced development image overrides are generic:
 
 ```text
-SAFE_REVERSER_RUNTIME=auto
-SAFE_REVERSER_AUTO_PULL=1
-SAFE_REVERSER_MEMORY=4g
-SAFE_REVERSER_CPUS=2
-SAFE_REVERSER_PIDS_LIMIT=256
+SAFE_REVERSER_CAPABILITY_IMAGE_STATIC_CORE=<repository:tag>
+SAFE_REVERSER_CAPABILITY_IMAGE_FRAMEWORK_FLUTTER=<repository:tag>
 ```
 
-The default image is derived from the bundled plugin `VERSION`; it is not independently hard-coded in the installation instructions.
+The naming rule is:
 
-Advanced users may force a runtime before launching Claude Code:
-
-```bash
-export SAFE_REVERSER_RUNTIME=podman
-# or
-export SAFE_REVERSER_RUNTIME=docker
+```text
+SAFE_REVERSER_CAPABILITY_IMAGE_<CAPABILITY_ID>
 ```
 
-A custom development image can be supplied with `SAFE_REVERSER_IMAGE`. Version-label enforcement is skipped only for this explicit override; release metadata still exposes the plugin version and selected image reference.
+with capability ID uppercased and `-` converted to `_`.
 
-## What the wrapper starts
+Pre-0.3 static/Flutter aliases may remain temporarily as compatibility aliases, but new tooling/documentation should use the generic override names.
 
-For Podman the effective security profile is equivalent to:
+## 11. Opt-in capabilities
+
+0.3 defines activation semantics even though the release baseline contains required static capabilities.
+
+A future opt-in capability remains disabled unless explicitly enabled:
 
 ```bash
-podman run \
-  --rm -i \
+export SAFE_REVERSER_ENABLE_CAPABILITIES=dynamic-runtime
+```
+
+Unknown IDs are rejected.
+
+`dynamic-opt-in` capabilities are required by contract to use explicit opt-in activation. Enabling a future dynamic capability does not grant privileges to static workers.
+
+## 12. Worker security profile
+
+For a static MCP worker, Runtime Driver constructs an effective profile equivalent to:
+
+```bash
+podman run --rm -i \
   --network=none \
   --read-only \
   --cap-drop=ALL \
   --security-opt=no-new-privileges \
-  --pids-limit=256 \
-  --memory=4g \
-  --cpus=2 \
-  --tmpfs=/tmp:rw,nosuid,nodev,size=1g \
-  --tmpfs=/work:rw,nosuid,nodev,size=2g \
+  --pids-limit=<manifest limit> \
+  --memory=<manifest limit> \
+  --cpus=<manifest limit> \
+  --tmpfs=/tmp:rw,nosuid,nodev,size=<manifest limit> \
+  --tmpfs=/work:rw,nosuid,nodev,size=<manifest limit> \
   --userns=keep-id \
   --user="$(id -u):$(id -g)" \
   --volume="<project>:/workspace:ro,z" \
-  --volume="<plugin-data>:/data:rw,z" \
-  ghcr.io/salingnh/safe-android-reverser:<plugin-version>
+  --volume="<capability-data>:/data:rw,z" \
+  sha256:<verified-image-id>
 ```
 
-Before launching the container, the wrapper also verifies that the data directory and `jobs` directory are writable by the current host UID/GID.
+Docker uses equivalent restrictions without Podman's `:z`/`--userns=keep-id` behavior where not applicable.
 
-## Troubleshooting
+No worker receives `docker.sock` or `podman.sock`.
 
-### MCP is not listed or not connected
+## 13. Data-root/path safety
+
+The shared Path SDK validates the configured data root before creating missing directories. Existing symlink components are rejected.
+
+Do not work around path failures with `chmod 777` or by pointing the data root through symlinked directories.
+
+Default data root:
+
+```text
+~/.local/share/safe-android-reverser
+```
+
+Capability jobs live below capability-specific private directories.
+
+## 14. Troubleshooting MCP connection
 
 Run:
 
@@ -239,61 +304,38 @@ Run:
 /mcp
 ```
 
-If the plugin was just updated, restart Claude Code if your client does not reload the MCP process cleanly.
+If a plugin update left a stale MCP process in your client, restart Claude Code and inspect the active plugin version.
 
-### `/data/jobs` permission error
+## 15. Test the exact active wrapper with MCP Inspector
 
-Release 0.2.1 performs a host-side writability check before container startup. If you still see a permission error, verify the exact active wrapper and data directory rather than changing permissions globally.
+Claude may keep historical plugin versions in its plugin cache. Do not choose an arbitrary wrapper returned by `find ... | head -n1`.
 
-For Podman, a direct mount check is:
+List candidates:
 
 ```bash
-DATA_DIR="$HOME/.local/share/safe-android-reverser-test"
-mkdir -p "$DATA_DIR"
-
-podman run --rm \
-  --userns=keep-id \
-  --user="$(id -u):$(id -g)" \
-  --volume="$DATA_DIR:/data:rw,z" \
-  --entrypoint /bin/sh \
-  ghcr.io/salingnh/safe-android-reverser:0.2.1 \
-  -lc 'id; mkdir -p /data/jobs; touch /data/jobs/write-test; ls -lnZ /data/jobs/write-test'
+find ~/.claude/plugins/cache -type f -name safe-reverser-mcp -print
 ```
 
-Do not use `chmod 777` as a workaround.
-
-### Test with MCP Inspector
-
-Claude can keep historical plugin versions in `~/.claude/plugins/cache`. Do not choose an arbitrary result with `find ... | head -n1`; that can launch an old wrapper.
-
-List all cached wrapper versions first:
+Select the wrapper belonging to the active version shown by `/plugin`/`/mcp`:
 
 ```bash
-find ~/.claude/plugins/cache \
-  -type f \
-  -name safe-reverser-mcp \
-  -print
-```
-
-Select the path belonging to the active plugin version shown by `/plugin` or `/mcp`, then launch Inspector with that exact path:
-
-```bash
-MCP_WRAPPER="/exact/path/to/the/active/0.2.1/bin/safe-reverser-mcp"
+MCP_WRAPPER="/exact/path/to/active/plugin/bin/safe-reverser-mcp"
 
 SAFE_REVERSER_PROJECT_DIR="$PWD" \
 SAFE_REVERSER_DATA_DIR="$HOME/.local/share/safe-android-reverser-inspector" \
 npx @modelcontextprotocol/inspector "$MCP_WRAPPER"
 ```
 
-In Inspector, connect and call:
+Then call:
 
 ```text
 Tools -> health -> Run Tool
+Tools -> list_capabilities -> Run Tool
 ```
 
-A successful `initialize`, `tools/list`, and `health` call proves the MCP transport and sandbox work independently of the agent's tool-safety/classification layer.
+Successful `initialize`, `tools/list`, `health`, and `list_capabilities` prove the public MCP/control-plane path independently of agent behavior.
 
-### Diagnose the exact wrapper command
+## 16. Trace launcher startup
 
 For troubleshooting only:
 
@@ -306,20 +348,36 @@ timeout 5 bash -x "$MCP_WRAPPER" </dev/null 2>/tmp/safe-reverser-wrapper.trace
 cat /tmp/safe-reverser-wrapper.trace
 ```
 
-Confirm the trace uses the expected semver image and includes `--user=<host uid>:<host gid>`.
+In 0.3 the launcher trace should end by executing `mcp-control-plane.py`. It should **not** contain `mkdir -p` for the data root or direct worker `image inspect/pull/run` lifecycle. Those responsibilities belong to shared Python services.
+
+## 17. Diagnose capability readiness
+
+Use `health`/`list_capabilities` before manually inspecting images.
+
+Typical states:
+
+```text
+declared     manifest exists but capability is not enabled
+ready        image/runtime verified and worker protocol is compatible
+degraded     worker exists but diagnostics/protocol are not healthy
+unavailable  image/runtime/provisioning is unavailable
+unsupported  route/capability cannot support the requested artifact/runtime
+```
+
+For exact Flutter runtime analysis, a cache miss is expected for previously unseen Dart runtime identities until the controlled runtime-cache workflow has produced the required immutable image.
 
 ## Security boundary
 
-Automatic startup does not expose Podman, Docker, a generic shell, or arbitrary command execution as MCP tools.
+Automatic startup does not expose Podman, Docker, generic shell, or arbitrary analyzer commands as MCP tools.
 
 ```text
 Agent
-  -> allow-listed semantic MCP tools
-      -> version-checked wrapper
-          -> ephemeral non-root container
+  -> allow-listed semantic public MCP
+      -> host control plane
+          -> verified immutable isolated workers
               -> read-only project input
-              -> isolated writable analysis data
-              -> no normal runtime network
+              -> private bounded analysis data
+              -> no network for static capabilities
 ```
 
-If this path fails, the plugin reports the setup error instead of falling back to legacy host-executed reverse-engineering scripts.
+If this path fails, fix the capability/runtime/setup problem. Do not bypass the control plane with host-executed reverse-engineering tools.
