@@ -57,18 +57,19 @@ class SafeBlutterAdapterTests(unittest.TestCase):
 
         return FakeInput, FakeInfo, snapshot, engine
 
-    def test_health_declares_no_runtime_build_or_network(self):
+    def test_health_declares_no_runtime_build_network_or_registry_selection(self):
         result = self.adapter.health()
         self.assertEqual(result["status"], "ok")
         self.assertFalse(result["network_required_at_runtime"])
         self.assertFalse(result["network_capable_upstream_path_used"])
         self.assertFalse(result["build_on_demand_allowed"])
+        self.assertFalse(result["registry_selection_owned_by_worker"])
         constraints = result["required_runtime_constraints"]
         self.assertEqual(constraints["network"], "none")
         self.assertEqual(constraints["output_mount"], "writable-bounded")
         self.assertGreater(constraints["max_generated_file_bytes"], 0)
 
-    def test_inspect_returns_exact_cache_miss_without_executing_builder(self):
+    def test_inspect_returns_registry_independent_cache_identity(self):
         with mock.patch.object(
             self.adapter, "_import_runtime_helpers", return_value=self.helpers()
         ):
@@ -81,11 +82,8 @@ class SafeBlutterAdapterTests(unittest.TestCase):
             result["runtime"]["cache_tag"],
             r"^dart-3\.5\.4-arm64-cp-[0-9a-f]{64}$",
         )
-        self.assertTrue(
-            result["runtime"]["recommended_image"].endswith(
-                ":" + result["runtime"]["cache_tag"]
-            )
-        )
+        self.assertNotIn("recommended_image", result["runtime"])
+        self.assertIn(result["runtime"]["cache_tag"], result["next_action"])
 
     def test_cached_binary_makes_runtime_ready(self):
         binary = self.blutter_root / "bin" / "blutter_dartvm3.5.4_android_arm64"
@@ -135,6 +133,8 @@ class SafeBlutterAdapterTests(unittest.TestCase):
             result = self.adapter.analyze("libs", "job-1", 10)
         self.assertEqual(result["status"], "runtime_cache_miss")
         self.assertFalse(result["executed"])
+        self.assertIn("cache_tag", result)
+        self.assertNotIn("recommended_image", result)
 
     def test_analyze_keeps_only_bounded_process_log_tail(self):
         binary = self.blutter_root / "bin" / "blutter_dartvm3.5.4_android_arm64"
