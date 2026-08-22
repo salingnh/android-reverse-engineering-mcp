@@ -23,6 +23,7 @@ VALID_STATES = {
 }
 VALID_EVIDENCE_STATES = {"observed", "derived", "hypothesized"}
 CAPABILITY_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,127}$")
+ADAPTER_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 OPERATION_RE = re.compile(r"^[a-z][a-z0-9_]{0,127}$")
 IMAGE_REPOSITORY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{1,255}$")
 IMAGE_ROLE_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
@@ -97,6 +98,7 @@ class CapabilityManifest:
     worker_abi: int
     representation: tuple[str, ...]
     trust_boundary: str
+    adapter: str
     image_repository: str
     image_role: str
     protocol: str
@@ -113,6 +115,7 @@ class CapabilityManifest:
             "worker_abi",
             "representations",
             "trust_boundary",
+            "adapter",
             "protocol",
             "image",
             "operations",
@@ -138,6 +141,9 @@ class CapabilityManifest:
         trust_boundary = str(value.get("trust_boundary") or "").strip()
         if trust_boundary not in VALID_TRUST_BOUNDARIES:
             raise ContractError("invalid capability trust boundary")
+        adapter = str(value.get("adapter") or "").strip()
+        if not ADAPTER_RE.fullmatch(adapter):
+            raise ContractError("invalid capability adapter")
         protocol = str(value.get("protocol") or "").strip()
         if protocol not in VALID_PROTOCOLS:
             raise ContractError("invalid capability worker protocol")
@@ -173,6 +179,7 @@ class CapabilityManifest:
             worker_abi=worker_abi,
             representation=representation,
             trust_boundary=trust_boundary,
+            adapter=adapter,
             image_repository=repository,
             image_role=role,
             protocol=protocol,
