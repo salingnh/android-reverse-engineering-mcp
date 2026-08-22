@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 import archive_safety
-import mcp_server_v2 as server
+import static_semantic_worker as server
 
 SEMVER_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
 
