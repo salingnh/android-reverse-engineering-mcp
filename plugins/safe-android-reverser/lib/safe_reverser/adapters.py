@@ -12,6 +12,7 @@ from .runtime import ContainerRuntime, RuntimeErrorSafe
 from .worker import McpContainerWorker, WorkerProtocolError
 
 RESERVED_CONTROL_PLANE_OPERATIONS = {"health", "list_capabilities"}
+MAX_ENABLED_CAPABILITIES = 64
 
 
 class CapabilityAdapter(Protocol):
@@ -59,6 +60,16 @@ def _env_suffix(capability_id: str) -> str:
     return capability_id.upper().replace("-", "_")
 
 
+def _enabled_opt_in_capabilities() -> set[str]:
+    value = str(os.environ.get("SAFE_REVERSER_ENABLE_CAPABILITIES", "")).strip()
+    if not value:
+        return set()
+    items = [item.strip() for item in value.split(",") if item.strip()]
+    if len(items) > MAX_ENABLED_CAPABILITIES:
+        raise ContractError("too many explicitly enabled capabilities")
+    return set(items)
+
+
 def _image_override(manifest: CapabilityManifest) -> str | None:
     generic = os.environ.get(
         f"SAFE_REVERSER_CAPABILITY_IMAGE_{_env_suffix(manifest.capability_id)}"
@@ -85,15 +96,26 @@ def build_capability_adapters(
     project_dir: Path,
     data_dir: Path,
 ) -> dict[str, CapabilityAdapter]:
-    """Instantiate adapters from trusted capability manifests.
+    """Instantiate enabled adapters from trusted capability manifests.
 
-    The control plane depends on this registry rather than capability-specific
-    attributes. Adding another backend registers an adapter kind here without
-    changing dispatch, health aggregation, tool ownership, or evidence handling.
+    Required/optional capabilities are active when installed in the registry.
+    `opt-in` capabilities are inactive until their exact capability id appears in
+    SAFE_REVERSER_ENABLE_CAPABILITIES. This preserves an explicit privilege gate
+    for future dynamic backends without changing the public MCP topology.
     """
+
+    enabled_opt_in = _enabled_opt_in_capabilities()
+    known_ids = set(registry.manifests())
+    unknown_enabled = enabled_opt_in - known_ids
+    if unknown_enabled:
+        raise ContractError(
+            f"unknown explicitly enabled capabilities: {sorted(unknown_enabled)}"
+        )
 
     adapters: dict[str, CapabilityAdapter] = {}
     for capability_id, manifest in registry.manifests().items():
+        if manifest.activation == "opt-in" and capability_id not in enabled_opt_in:
+            continue
         override = _image_override(manifest)
         if manifest.adapter == "mcp-container":
             try:
