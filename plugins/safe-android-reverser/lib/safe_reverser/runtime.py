@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 import re
 import subprocess
 import tempfile
@@ -53,7 +52,9 @@ class ContainerRuntime:
             raise RuntimeErrorSafe("invalid sandbox memory limit")
         if not CPU_RE.fullmatch(policy.cpus):
             raise RuntimeErrorSafe("invalid sandbox CPU limit")
-        if not MEMORY_RE.fullmatch(policy.tmpfs_tmp) or not MEMORY_RE.fullmatch(policy.tmpfs_work):
+        if not MEMORY_RE.fullmatch(policy.tmpfs_tmp) or not MEMORY_RE.fullmatch(
+            policy.tmpfs_work
+        ):
             raise RuntimeErrorSafe("invalid sandbox tmpfs limit")
         if policy.network != "none":
             raise RuntimeErrorSafe("static capability runtime network must be disabled")
@@ -65,7 +66,9 @@ class ContainerRuntime:
         return handle.read(limit).decode("utf-8", "replace")
 
     def run_host(self, argv: list[str], *, timeout: int) -> RunResult:
-        if not argv or any(not isinstance(item, str) or "\x00" in item for item in argv):
+        if not argv or any(
+            not isinstance(item, str) or "\x00" in item for item in argv
+        ):
             raise RuntimeErrorSafe("invalid container-runtime argv")
         with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
             try:
@@ -82,7 +85,9 @@ class ContainerRuntime:
             except subprocess.TimeoutExpired:
                 code = 124
                 timed_out = True
-            return RunResult(code, timed_out, self._tail(stdout), self._tail(stderr))
+            return RunResult(
+                code, timed_out, self._tail(stdout), self._tail(stderr)
+            )
 
     def image_info(self, image: str) -> dict[str, Any] | None:
         self._validate_image(image)
@@ -93,19 +98,31 @@ class ContainerRuntime:
             payload = json.loads(run.stdout)
         except json.JSONDecodeError as exc:
             raise RuntimeErrorSafe(f"cannot parse image metadata for {image}") from exc
-        if not isinstance(payload, list) or not payload or not isinstance(payload[0], dict):
+        if (
+            not isinstance(payload, list)
+            or not payload
+            or not isinstance(payload[0], dict)
+        ):
             raise RuntimeErrorSafe(f"invalid image metadata for {image}")
         return payload[0]
 
     @staticmethod
     def labels(image_info: dict[str, Any]) -> dict[str, str]:
-        config = image_info.get("Config") if isinstance(image_info.get("Config"), dict) else {}
-        labels = config.get("Labels") if isinstance(config.get("Labels"), dict) else None
+        config = (
+            image_info.get("Config")
+            if isinstance(image_info.get("Config"), dict)
+            else {}
+        )
+        labels = (
+            config.get("Labels") if isinstance(config.get("Labels"), dict) else None
+        )
         if labels is None and isinstance(image_info.get("Labels"), dict):
             labels = image_info.get("Labels")
         return {str(k): str(v) for k, v in (labels or {}).items()}
 
-    def ensure_image(self, image: str, *, required_labels: dict[str, str]) -> dict[str, str]:
+    def ensure_image(
+        self, image: str, *, required_labels: dict[str, str]
+    ) -> dict[str, str]:
         self._validate_image(image)
         info = self.image_info(image)
         if info is None:
@@ -114,15 +131,20 @@ class ContainerRuntime:
             pull = self.run_host(["pull", image], timeout=1800)
             if pull.exit_code != 0:
                 detail = (pull.stderr or pull.stdout or "pull failed")[-4000:]
-                raise RuntimeErrorSafe(f"failed to pull capability image {image}: {detail}")
+                raise RuntimeErrorSafe(
+                    f"failed to pull capability image {image}: {detail}"
+                )
             info = self.image_info(image)
         if info is None:
-            raise RuntimeErrorSafe(f"capability image unavailable after pull: {image}")
+            raise RuntimeErrorSafe(
+                f"capability image unavailable after pull: {image}"
+            )
         labels = self.labels(info)
         for key, expected in required_labels.items():
             if labels.get(key) != expected:
                 raise RuntimeErrorSafe(
-                    f"capability image provenance mismatch for {key}: expected={expected!r} actual={labels.get(key)!r}"
+                    f"capability image provenance mismatch for {key}: "
+                    f"expected={expected!r} actual={labels.get(key)!r}"
                 )
         return labels
 
@@ -166,6 +188,10 @@ class ContainerRuntime:
     ) -> RunResult:
         self._validate_image(image)
         args = self.locked_args(policy)
+        if stdin_lines is not None:
+            # Docker/Podman only keep container STDIN attached with -i/--interactive.
+            # This is required by capability workers using MCP-over-stdio.
+            args.append("--interactive")
         for spec in tmpfs or []:
             if "\x00" in spec or not spec.startswith("/"):
                 raise RuntimeErrorSafe("invalid extra tmpfs specification")
@@ -186,7 +212,16 @@ class ContainerRuntime:
 
         with tempfile.TemporaryFile() as stdin, tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
             for item in stdin_lines:
-                stdin.write((json.dumps(item, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8"))
+                stdin.write(
+                    (
+                        json.dumps(
+                            item,
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                        )
+                        + "\n"
+                    ).encode("utf-8")
+                )
             stdin.seek(0)
             try:
                 proc = subprocess.run(
@@ -202,7 +237,9 @@ class ContainerRuntime:
             except subprocess.TimeoutExpired:
                 code = 124
                 timed_out = True
-            return RunResult(code, timed_out, self._tail(stdout), self._tail(stderr))
+            return RunResult(
+                code, timed_out, self._tail(stdout), self._tail(stderr)
+            )
 
     @staticmethod
     def parse_json_tail(run: RunResult) -> dict[str, Any]:
