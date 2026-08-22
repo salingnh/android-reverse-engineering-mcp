@@ -18,7 +18,7 @@ class AnalysisRoutingTests(unittest.TestCase):
         os.environ["SAFE_REVERSER_WORKSPACE"] = str(cls.workspace)
         os.environ["SAFE_REVERSER_DATA_ROOT"] = str(cls.data)
         cls.routing = importlib.import_module("analysis_routing")
-        cls.server = importlib.import_module("mcp_server_v2")
+        cls.server = importlib.import_module("static_semantic_worker")
 
     @classmethod
     def tearDownClass(cls):
