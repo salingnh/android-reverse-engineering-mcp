@@ -93,6 +93,7 @@ class CapabilityRegistry:
                 "worker_abi": manifest.worker_abi,
                 "representations": list(manifest.representation),
                 "trust_boundary": manifest.trust_boundary,
+                "activation": manifest.activation,
                 "adapter": manifest.adapter,
                 "protocol": manifest.protocol,
                 "operations": list(manifest.operations),
