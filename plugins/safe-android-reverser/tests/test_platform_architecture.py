@@ -18,10 +18,11 @@ if str(LIB_ROOT) not in sys.path:
 from safe_reverser import CAPABILITY_API_VERSION, WORKER_ABI_VERSION
 from safe_reverser.contracts import ContractError, EvidenceEnvelope
 from safe_reverser.control_plane import ControlPlane
+from safe_reverser.evidence import normalize_capability_result
 from safe_reverser.flutter import FlutterCapability
 from safe_reverser.paths import PathPolicyError, secure_child
 from safe_reverser.registry import CapabilityRegistry
-from safe_reverser.runtime import ContainerRuntime, RunResult
+from safe_reverser.runtime import ContainerRuntime, RuntimeErrorSafe
 
 
 class FakeRuntime:
@@ -50,9 +51,11 @@ class PlatformArchitectureTests(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def test_single_public_mcp_server(self):
+    def test_single_public_mcp_server_and_legacy_dual_controller_is_gone(self):
         manifest = json.loads((PLUGIN_ROOT / ".mcp.json").read_text(encoding="utf-8"))
         self.assertEqual(set(manifest["mcpServers"]), {"safe-android-reverser"})
+        self.assertFalse((PLUGIN_ROOT / "bin" / "safe-flutter-mcp").exists())
+        self.assertFalse((PLUGIN_ROOT / "bin" / "flutter-mcp-host.py").exists())
 
     def test_capability_spi_is_manifest_driven_and_operations_do_not_collide(self):
         static = self.registry.get("static-core")
@@ -69,7 +72,9 @@ class PlatformArchitectureTests(unittest.TestCase):
         )
 
     def test_locked_runtime_policy_never_mounts_a_runtime_socket(self):
-        runtime = ContainerRuntime("docker", host_uid=os.getuid(), host_gid=os.getgid(), auto_pull=False)
+        runtime = ContainerRuntime(
+            "docker", host_uid=os.getuid(), host_gid=os.getgid(), auto_pull=False
+        )
         args = runtime.locked_args(self.registry.get("framework-flutter").sandbox)
         joined = " ".join(args)
         self.assertIn("--network=none", args)
@@ -78,6 +83,35 @@ class PlatformArchitectureTests(unittest.TestCase):
         self.assertIn("--security-opt=no-new-privileges", args)
         self.assertNotIn("docker.sock", joined)
         self.assertNotIn("podman.sock", joined)
+
+    def test_runtime_driver_requires_interactive_for_stdio_workers(self):
+        runtime = ContainerRuntime(
+            "docker", host_uid=os.getuid(), host_gid=os.getgid(), auto_pull=False
+        )
+        with mock.patch.object(runtime, "_validate_image"), mock.patch(
+            "safe_reverser.runtime.subprocess.run"
+        ) as run:
+            run.return_value.returncode = 0
+            runtime.run_container(
+                image="fixture:ci",
+                policy=self.registry.get("static-core").sandbox,
+                mounts=[(self.project, "/workspace", "ro")],
+                command=[],
+                timeout=10,
+                stdin_lines=[{"jsonrpc": "2.0", "id": 1, "method": "ping"}],
+            )
+        argv = run.call_args.args[0]
+        self.assertIn("--interactive", argv)
+
+    def test_runtime_driver_rejects_untyped_tmpfs_options(self):
+        runtime = ContainerRuntime(
+            "docker", host_uid=os.getuid(), host_gid=os.getgid(), auto_pull=False
+        )
+        runtime.validate_tmpfs_spec("/output:rw,nosuid,nodev,size=4g")
+        with self.assertRaises(RuntimeErrorSafe):
+            runtime.validate_tmpfs_spec("/output:rw,exec,size=4g")
+        with self.assertRaises(RuntimeErrorSafe):
+            runtime.validate_tmpfs_spec("/output:rw,nosuid,nodev,size=4g,exec")
 
     def test_shared_path_policy_rejects_escape_and_symlink(self):
         with self.assertRaises(PathPolicyError):
@@ -111,22 +145,66 @@ class PlatformArchitectureTests(unittest.TestCase):
                 payload={},
             ).to_dict()
 
+    def test_result_normalization_preserves_private_schema_and_adds_shared_evidence(self):
+        native = {
+            "status": "ok",
+            "provenance": {
+                "analysis_id": "flutter-aot:" + "b" * 64,
+                "artifact_sha256": "b" * 64,
+                "evidence_state": "derived",
+                "analyzer": "safe-flutter-semantic",
+            },
+            "results": [{"name": "ApiClient.request"}],
+        }
+        result = normalize_capability_result(
+            capability_id="framework-flutter",
+            operation="find_dart_symbols",
+            producer_version="0.3.0",
+            payload=native,
+        )
+        self.assertEqual(result["results"], native["results"])
+        contract = result["safe_reverser_contract"]
+        self.assertEqual(contract["capability_api"], 1)
+        self.assertEqual(contract["worker_abi"], 1)
+        evidence = result["evidence_envelope"]
+        self.assertEqual(evidence["producer"], "framework-flutter")
+        self.assertEqual(evidence["evidence_state"], "derived")
+        self.assertEqual(evidence["artifact_sha256"], "b" * 64)
+
+    def test_result_normalizer_does_not_invent_evidence_state(self):
+        result = normalize_capability_result(
+            capability_id="static-core",
+            operation="fingerprint",
+            producer_version="0.3.0",
+            payload={"status": "ok", "provenance": {"analysis_id": "x", "artifact_sha256": "a" * 64}},
+        )
+        self.assertIn("safe_reverser_contract", result)
+        self.assertNotIn("evidence_envelope", result)
+
     def test_worker_images_publish_capability_api_and_worker_abi_labels(self):
         static = (REPO_ROOT / "sandbox" / "Dockerfile").read_text(encoding="utf-8")
-        flutter = (REPO_ROOT / "frameworks" / "flutter" / "Dockerfile").read_text(encoding="utf-8")
-        runtime = (REPO_ROOT / "frameworks" / "flutter" / "Dockerfile.runtime").read_text(encoding="utf-8")
+        flutter = (REPO_ROOT / "frameworks" / "flutter" / "Dockerfile").read_text(
+            encoding="utf-8"
+        )
+        runtime = (
+            REPO_ROOT / "frameworks" / "flutter" / "Dockerfile.runtime"
+        ).read_text(encoding="utf-8")
         for text, capability_id in (
             (static, "static-core"),
             (flutter, "framework-flutter"),
             (runtime, "framework-flutter"),
         ):
-            self.assertIn(f'io.safe-reverser.capability.id="{capability_id}"', text)
+            self.assertIn(
+                f'io.safe-reverser.capability.id="{capability_id}"', text
+            )
             self.assertIn('io.safe-reverser.capability.api="1"', text)
             self.assertIn('io.safe-reverser.worker.abi="1"', text)
         self.assertIn('io.safe-reverser.runtime-cache.schema="2"', runtime)
 
     def test_flutter_worker_does_not_own_registry_selection(self):
-        adapter = (REPO_ROOT / "frameworks" / "flutter" / "safe_blutter_adapter.py").read_text(encoding="utf-8")
+        adapter = (
+            REPO_ROOT / "frameworks" / "flutter" / "safe_blutter_adapter.py"
+        ).read_text(encoding="utf-8")
         self.assertNotIn("SAFE_FLUTTER_IMAGE_REPOSITORY", adapter)
         self.assertNotIn("ghcr.io/salingnh/safe-android-reverser-flutter", adapter)
         self.assertNotIn('"recommended_image"', adapter)
@@ -153,12 +231,16 @@ class PlatformArchitectureTests(unittest.TestCase):
             },
         }
         image, dart_runtime, commit = capability._runtime_image(prepared)
-        self.assertTrue(image.startswith("ghcr.io/salingnh/safe-android-reverser-flutter:"))
+        self.assertTrue(
+            image.startswith("ghcr.io/salingnh/safe-android-reverser-flutter:")
+        )
         self.assertEqual(commit, "c" * 40)
         ready, _ = capability._ensure_runtime_ready(image, dart_runtime, commit)
         self.assertTrue(ready)
         self.assertEqual(runtime.required_labels["io.safe-reverser.worker.abi"], "1")
-        self.assertEqual(runtime.required_labels["io.safe-reverser.runtime-cache.schema"], "2")
+        self.assertEqual(
+            runtime.required_labels["io.safe-reverser.runtime-cache.schema"], "2"
+        )
 
     def test_flutter_analysis_uses_shared_job_store_and_cleans_prepared_input(self):
         runtime = FakeRuntime()
@@ -189,14 +271,20 @@ class PlatformArchitectureTests(unittest.TestCase):
             (job / "input" / "libapp.so").write_bytes(b"app")
             return prepared
 
-        with mock.patch.object(capability, "ensure_base_ready", return_value={}), mock.patch.object(
+        with mock.patch.object(
+            capability, "ensure_base_ready", return_value={}
+        ), mock.patch.object(
             capability, "_prepare", side_effect=fake_prepare
         ), mock.patch.object(
             capability, "_ensure_runtime_ready", return_value=(True, "ready")
         ), mock.patch.object(
-            capability, "_execute", return_value={"status": "ok", "analysis_id": "flutter-aot:" + "e" * 64}
+            capability,
+            "_execute",
+            return_value={"status": "ok", "analysis_id": "flutter-aot:" + "e" * 64},
         ):
-            result = capability.analyze({"artifact": "app.apk", "timeout_seconds": 60})
+            result = capability.analyze(
+                {"artifact": "app.apk", "timeout_seconds": 60}
+            )
         self.assertEqual(result["status"], "ok")
         job = capability.jobs.get(result["job_id"])
         self.assertFalse((job / "input").exists())
