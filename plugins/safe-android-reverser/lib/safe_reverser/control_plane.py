@@ -5,7 +5,7 @@ import os
 import shutil
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from . import CAPABILITY_API_VERSION, EVIDENCE_ENVELOPE_VERSION, WORKER_ABI_VERSION
 from .adapters import CapabilityAdapter, build_capability_adapters
@@ -18,7 +18,9 @@ from .runtime import ContainerRuntime, RuntimeErrorSafe
 from .worker import WorkerProtocolError
 
 SERVER_NAME = "safe-android-reverser"
-MAX_TOOL_TEXT = 300_000
+MAX_TOOL_TEXT_BYTES = 300_000
+MAX_REQUEST_CHARS = 1_000_000
+MAX_REQUEST_BYTES = 2 * 1024 * 1024
 
 
 class ControlPlaneError(RuntimeError):
@@ -114,12 +116,6 @@ class ControlPlane:
         return states
 
     def _enrich_route(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """Attach deployment readiness to any capability result carrying a route.
-
-        Enrichment is result-shape driven rather than tied to specific operation
-        names. Future routers can emit the same `analysis_route` contract without
-        adding another dispatch branch to the control plane.
-        """
         route = payload.get("analysis_route")
         if not isinstance(route, dict):
             return payload
@@ -176,7 +172,6 @@ class ControlPlane:
             try:
                 tools.extend(adapter.tools())
             except (RuntimeErrorSafe, WorkerProtocolError, FlutterCapabilityError):
-                # Control-plane diagnostics remain available even when one worker is absent.
                 continue
         names = [str(item.get("name") or "") for item in tools]
         if len(names) != len(set(names)):
@@ -266,18 +261,45 @@ class ControlPlane:
         return self._normalize(owner.capability_id, name, payload)
 
 
-def _json_text(value: Any) -> str:
-    text = json.dumps(value, ensure_ascii=False, sort_keys=True, indent=2)
-    if len(text) > MAX_TOOL_TEXT:
-        return text[:MAX_TOOL_TEXT] + "\n... [truncated]"
-    return text
-
-
 def _tool_result(value: Any, *, is_error: bool = False) -> dict[str, Any]:
+    text = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    size = len(text.encode("utf-8"))
+    if size > MAX_TOOL_TEXT_BYTES:
+        text = json.dumps(
+            {
+                "error": "control-plane result exceeds bounded response size",
+                "result_bytes": size,
+                "max_result_bytes": MAX_TOOL_TEXT_BYTES,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        is_error = True
     return {
-        "content": [{"type": "text", "text": _json_text(value)}],
+        "content": [{"type": "text", "text": text}],
         "isError": is_error,
     }
+
+
+def _bounded_request_lines() -> Iterator[str]:
+    while True:
+        line = sys.stdin.readline(MAX_REQUEST_CHARS + 1)
+        if not line:
+            return
+        char_oversized = len(line) > MAX_REQUEST_CHARS
+        if char_oversized and not line.endswith("\n"):
+            while True:
+                remainder = sys.stdin.readline(MAX_REQUEST_CHARS + 1)
+                if not remainder or remainder.endswith("\n"):
+                    break
+        byte_oversized = len(line.encode("utf-8", "replace")) > MAX_REQUEST_BYTES
+        if char_oversized or byte_oversized:
+            sys.stderr.write(
+                "safe-android-reverser: discarded oversized MCP request line\n"
+            )
+            sys.stderr.flush()
+            continue
+        yield line
 
 
 def serve(plugin_root: Path) -> int:
@@ -293,7 +315,7 @@ def serve(plugin_root: Path) -> int:
         )
         sys.stdout.flush()
 
-    for line in sys.stdin:
+    for line in _bounded_request_lines():
         if not line.strip():
             continue
         request_id: Any = None
