@@ -1,0 +1,32 @@
+{
+  "id": "framework-flutter",
+  "capability_api": 1,
+  "worker_abi": 1,
+  "representations": ["dart-aot", "libapp.so", "flutter-assets"],
+  "trust_boundary": "framework-static",
+  "protocol": "cli-json",
+  "image": {
+    "repository": "ghcr.io/salingnh/safe-android-reverser-flutter",
+    "role": "framework-flutter"
+  },
+  "operations": [
+    "analyze_flutter_aot",
+    "find_dart_symbols",
+    "find_dart_strings",
+    "find_dart_xrefs",
+    "map_dart_to_native",
+    "extract_flutter_network_model",
+    "list_flutter_jobs"
+  ],
+  "sandbox": {
+    "network": "none",
+    "read_only_root": true,
+    "drop_all_capabilities": true,
+    "no_new_privileges": true,
+    "memory": "6g",
+    "cpus": "2",
+    "pids_limit": 256,
+    "tmpfs_tmp": "1g",
+    "tmpfs_work": "512m"
+  }
+}
