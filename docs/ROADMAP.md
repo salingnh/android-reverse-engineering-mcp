@@ -1,16 +1,16 @@
-# Reverse Engineering Roadmap
+# Safe Android Reverser Roadmap
 
 ## Vision
 
-Safe Android Reverser is an **AI-native Android security and program-understanding platform**. It is built around semantic questions, deterministic evidence, framework-aware routing, isolated capability workers, and a shared evidence model—not around exposing a growing list of CLI tools.
+Safe Android Reverser is an **AI-native Android security and program-understanding platform**. The agent asks semantic questions; one host MCP control plane routes work to isolated capability workers; workers return bounded, provenance-carrying evidence.
 
-Core principles:
+Core invariants:
 
 > **The agent reasons. The MCP control plane controls. Capability workers execute.**
 
 > **Detect the framework first, then analyze the representation that actually contains the business logic.**
 
-The canonical long-term architecture is documented in [`PROJECT_DIRECTION.md`](PROJECT_DIRECTION.md). The stable extension contract is defined in [`CAPABILITY_SPI.md`](CAPABILITY_SPI.md).
+The long-term architecture is defined in [`PROJECT_DIRECTION.md`](PROJECT_DIRECTION.md), Capability SPI in [`CAPABILITY_SPI.md`](CAPABILITY_SPI.md), and engineering process in [`DEVELOPMENT.md`](DEVELOPMENT.md).
 
 ---
 
@@ -23,59 +23,76 @@ The canonical long-term architecture is documented in [`PROJECT_DIRECTION.md`](P
 0.6.0  Dynamic Correlation
 0.7.0  Native/JNI Intelligence
 0.8.0  Framework Coverage
-0.9.0  Pattern Discovery + Verification
+0.9.0  Pattern Discovery + Independent Verification
 1.0.0  Stable Platform Contracts
 ```
 
-From 0.3.0 onward, later milestones extend the same control-plane, capability, job, runtime, and evidence contracts. No roadmap milestone is intentionally designed as a temporary orchestration mechanism to be replaced by the next version.
+From 0.3 onward, milestones extend the same control-plane/capability/runtime/job/evidence architecture. A milestone must not intentionally ship a mechanism already expected to be replaced in the next milestone.
 
-Breaking Capability SPI / Worker ABI / Runtime Driver / Analysis Job / Evidence contract changes require an explicit architecture decision, migration path, compatibility tests, and senior review.
+Breaking platform contract changes require an explicit architecture decision, migration path, compatibility tests, documentation, and senior review.
 
 ---
 
 # 0.3.0 — Platform Foundation + Flutter AOT
 
-**Priority: P0 / active**
+**Priority:** P0 / active integration and acceptance
 
-0.3.0 is the architecture-foundation release. Flutter is the first external framework capability proving that the platform can add analyzers without creating a new orchestration architecture.
+0.3 is the architecture-foundation release. Flutter is the first external framework capability proving that new analyzers can be added without creating another public MCP or duplicating generic orchestration.
 
-## Already merged into master
+## Already merged into `master`
 
 - [x] framework-aware routing foundation;
 - [x] PEG schema v2 foundation;
-- [x] bounded Flutter artifact/runtime inspector;
+- [x] bounded Flutter artifact/runtime inspection;
 - [x] pinned offline-safe Blutter profile;
 - [x] Flutter Dart AOT semantic index;
 - [x] `find_dart_symbols`;
 - [x] `find_dart_strings`;
 - [x] `find_dart_xrefs`;
 - [x] `map_dart_to_native`;
-- [x] Flutter network/auth/signing/crypto evidence reconstruction.
+- [x] bounded Flutter network/auth/signing/crypto reconstruction.
 
-## Final architecture slice — in progress
+## Final 0.3 platform branch
 
-- [x] single host-side public MCP control plane;
-- [x] Capability SPI v1 contract;
-- [x] Worker ABI v1 contract;
-- [x] manifest-driven capability registry;
+The 0.3 integration branch now contains:
+
+- [x] exactly one public host-side MCP control plane;
+- [x] Capability API v1;
+- [x] Worker ABI v1;
+- [x] EvidenceEnvelope v1 compatibility layer;
+- [x] manifest-driven operation ownership;
+- [x] generic control-plane dispatch through capability adapters;
+- [x] `required` / `optional` / `opt-in` activation semantics;
+- [x] `dynamic-opt-in` trust contract reserved for future dynamic analysis;
+- [x] explicit `SAFE_REVERSER_ENABLE_CAPABILITIES` opt-in gate;
 - [x] shared Docker/Podman Runtime Driver;
-- [x] shared host path/metadata safety primitives;
-- [x] shared AnalysisJobStore;
-- [x] static-core converted to an isolated worker behind the control plane;
-- [x] framework-flutter converted to a capability module behind the same control plane;
-- [x] worker-owned registry selection removed;
-- [x] exact Flutter runtime cache bound to capability/worker/cache ABI;
-- [x] shared result/EvidenceEnvelope compatibility contract;
-- [x] modular CI split into static-worker, Flutter-worker, and control-plane integration gates;
-- [ ] all pre-PR CI green on exact branch head;
-- [ ] final architecture/security code review PASS;
-- [ ] senior milestone acceptance;
-- [ ] merge final 0.3.0 architecture PR;
-- [ ] release-version/documentation commit;
-- [ ] release CI;
-- [ ] `safe-v0.3.0` tag.
+- [x] immutable image-ID execution after OCI provenance verification;
+- [x] shared Path SDK and metadata safety primitives;
+- [x] shared bounded `AnalysisJobStore`;
+- [x] static-core converted to an isolated capability worker;
+- [x] framework-flutter behind the same public control plane;
+- [x] Flutter worker removed from deployment/registry ownership;
+- [x] exact Flutter runtime cache bound to cache schema + Capability API + Worker ABI + Dart/snapshot/arch/OS/compressed-pointers + Blutter commit;
+- [x] cross-worker ABI/cache regression tests;
+- [x] shared route-readiness enrichment;
+- [x] modular static/Flutter/control-plane CI;
+- [x] architecture release consistency gate;
+- [x] durable project/development rules in repository docs.
 
-## Public architecture
+## Remaining acceptance gate
+
+- [ ] final dead-reference/code sweep on exact branch head;
+- [ ] exact-head GitHub Actions green;
+- [ ] inspect exact-head Action logs for any failure, not an older green commit;
+- [ ] final architecture/security review `PASS`;
+- [ ] senior milestone acceptance;
+- [ ] merge 0.3 platform PR;
+- [ ] release-version/documentation commit;
+- [ ] verify at least one controlled exact Flutter runtime-cache build for production release;
+- [ ] release CI;
+- [ ] publish `safe-v0.3.0` only from the exact tested release commit.
+
+## 0.3 architecture
 
 ```text
 AI agent
@@ -85,8 +102,9 @@ safe-android-reverser MCP
 host control plane
    |
    +-- Capability Registry
+   +-- Adapter Registry/factory
    +-- Runtime Driver
-   +-- Artifact/Path SDK
+   +-- Path SDK
    +-- AnalysisJobStore
    +-- Evidence / PEG contracts
    |
@@ -94,94 +112,117 @@ host control plane
    +-- framework-flutter worker
 ```
 
-There is **one public MCP server**. Adding another framework must not create another public MCP control plane.
+There is one public MCP. Frameworks are capability modules, not public orchestration servers.
 
-## Capability readiness model
+## 0.3 capability boundary
 
-Framework routing declares topology:
+### static-core
+
+Owns generic Android package/DEX/JVM/resource analysis, generic routing preflight, and fast native triage.
+
+It must not become the deep semantic implementation for Dart, Hermes, IL2CPP, .NET, or other external frameworks.
+
+### framework-flutter
+
+Owns Dart AOT/Flutter-specific analysis:
 
 ```text
-primary_capability_id
-primary representation
-secondary capability routes
+analyze_flutter_aot
+find_dart_symbols
+find_dart_strings
+find_dart_xrefs
+map_dart_to_native
+extract_flutter_network_model
+list_flutter_jobs
 ```
 
-The host control plane independently discovers runtime state:
+### Future capabilities
 
-```text
-declared
-installed
-ready
-degraded
-unavailable
-unsupported
-```
+New framework/native/security/dynamic modules extend Capability SPI. Central architecture CI validates invariants and required release baselines, not a forever-exact set of capability IDs.
 
-This prevents fingerprint logic from falsely claiming that an image/runtime is installed.
-
-## 0.3.0 acceptance criteria
+## 0.3 acceptance criteria
 
 ### Architecture
 
 - one public MCP control plane;
-- no worker has Docker/Podman socket access;
-- Docker/Podman lifecycle exists only in the shared Runtime Driver;
-- capability manifests define operation ownership and sandbox policy;
-- duplicate public operation ownership is rejected;
-- static-core and Flutter workers carry compatible Capability API / Worker ABI labels;
-- later framework adapters can be added without duplicating generic runtime/job/path/evidence infrastructure.
+- no framework-specific public MCP;
+- Docker/Podman lifecycle only in shared Runtime Driver;
+- no runtime socket mounted into workers;
+- capability manifests define operation ownership, activation, adapter, protocol, trust boundary, image role, and sandbox policy;
+- duplicate public operations rejected;
+- generic dispatch does not branch on framework/operation names;
+- static-core and Flutter workers publish compatible Capability API/Worker ABI labels;
+- adding a compatible optional capability does not require weakening/replacing generic runtime/job/path/evidence architecture;
+- central gates validate invariants/baseline requirements rather than exact forever capability membership.
 
 ### Security
 
-- default static/framework workers use `network=none`;
-- read-only root filesystem;
-- dropped Linux capabilities;
+- static/framework workers use `network=none`;
+- root filesystem read-only;
+- Linux capabilities dropped;
 - `no-new-privileges`;
 - non-root execution;
-- bounded CPU, memory, PIDs, tmpfs, generated files, archive entries, and output sizes;
-- no arbitrary shell/exec MCP tool;
-- no analyzer build/download during normal offline analysis;
-- path traversal/symlink/archive-bomb defenses have regression tests;
-- exact runtime images are provenance-checked before execution.
+- bounded CPU, memory, PIDs, tmpfs, archive entries, filesystem scans, generated files, and returned output;
+- no arbitrary shell/exec MCP;
+- no analyzer/runtime build/download during normal offline analysis;
+- path traversal/symlink/archive-bomb/job-scan defenses have regression tests;
+- worker/runtime images are provenance checked and executed by immutable image ID;
+- `network=controlled` is not executable by the 0.3 static Runtime Driver;
+- future dynamic privileges require explicit opt-in.
 
-### Flutter capability
+### Flutter
 
-- APK/XAPK/APKS/APKM artifact preparation is bounded;
-- `arm64-v8a` `libapp.so` + `libflutter.so` pair is extracted in worker isolation;
-- exact Dart version/snapshot/cache identity is local and deterministic;
-- runtime cache miss is explicit and never invokes an in-sandbox builder;
-- semantic index is persistent and bounded;
-- Dart symbols, strings, XREFs, native offsets, and network/auth/crypto evidence are queryable;
-- XREF evidence is never represented as true data flow;
-- worker returns cache identity, not registry/image policy;
-- host chooses and verifies the exact immutable runtime image.
+- bounded APK/XAPK/APKS/APKM preparation;
+- exact `arm64-v8a` `libapp.so` + `libflutter.so` handling;
+- deterministic local Dart/runtime/snapshot identity;
+- runtime cache miss explicit and never invokes in-sandbox builder;
+- semantic index persistent and bounded;
+- Dart symbols/strings/XREF/native mappings and network/auth/crypto evidence queryable;
+- XREF evidence never represented as true data flow;
+- worker returns runtime/cache identity, not registry policy;
+- host selects/verifies immutable runtime image.
 
 ### Evidence
 
 - optimized analyzer indexes remain private implementation details;
-- all public capability results carry `safe_reverser_contract` metadata;
-- material results with valid provenance receive a common EvidenceEnvelope;
-- evidence states remain `observed`, `derived`, or `hypothesized`;
+- public capability outputs receive stable `safe_reverser_contract` metadata;
+- valid material provenance receives common EvidenceEnvelope;
+- evidence state remains `observed`, `derived`, or `hypothesized`;
 - no invented numeric confidence.
 
 ### CI/release
 
-- static-worker CI green;
-- Flutter-worker CI green;
+- static worker CI green;
+- Flutter worker CI green;
 - control-plane contract/integration CI green;
-- exact release consistency gate green;
-- at least one controlled exact-runtime cache build is verified before production 0.3.0 release;
-- senior architecture/security milestone review PASS.
+- exact release-consistency gate green;
+- exact-head means the exact reviewed/merged commit;
+- senior architecture/security milestone review passes;
+- required release images are published immutably from the exact tested release commit.
 
 ---
 
 # 0.4.0 — Data-flow Intelligence
 
-**Priority: P0/P1 after 0.3.0 acceptance**
+**Priority:** P0 immediately after 0.3 acceptance
 
-0.4.0 adds true value/data-flow semantics **without replacing the 0.3 architecture**.
+0.4 adds true value/data-flow semantics **without changing the 0.3 orchestration model**.
 
-Planned operations:
+## Objectives
+
+Move from:
+
+```text
+symbol / XREF / call adjacency
+```
+
+toward:
+
+```text
+source -> transformation -> field/argument/return -> sanitizer -> sink
+```
+
+Planned semantic operations:
 
 ```text
 trace_value
@@ -197,33 +238,35 @@ find_signing_logic
 trace_crypto
 ```
 
-Candidate backends may include:
+Candidate backends:
 
-```text
-SootUp / Jimple
-FlowDroid-family analysis
-bounded custom DEX tracing
-framework-specific IR/data-flow producers
-```
+- SootUp / Jimple;
+- FlowDroid-family analysis;
+- bounded custom DEX slicing/tracing;
+- framework-specific IR/data-flow producers;
+- later native/framework cross-boundary flow producers.
 
-Expensive whole-app taint analysis should not run by default. Existing symbol/XREF/network indexes localize the relevant subgraph first.
+## Design rule
 
-### 0.4 acceptance
+Do not run expensive whole-app taint analysis by default. Existing symbol/XREF/network models should localize a small subgraph first, then data-flow analysis escalates only where needed.
 
-- CALLS/XREFS remain distinct from FLOWS_TO;
-- sources, sinks, transformations, and sanitizers are explicit;
-- auth/token/header/signature paths can cross methods where supported;
-- unsupported reflection/native/framework boundaries are reported rather than guessed;
-- data-flow evidence uses the same EvidenceEnvelope/PEG contracts defined in 0.3;
-- no new public MCP or parallel job/runtime architecture.
+## 0.4 acceptance
+
+- CALLS/XREFS remain distinct from `FLOWS_TO`;
+- sources, sinks, transformations, sanitizers, reads, writes, parameters, returns are explicit;
+- auth/token/header/signature paths can cross methods when supported;
+- reflection/native/framework gaps are reported rather than guessed;
+- evidence uses existing EvidenceEnvelope/PEG contracts;
+- no new public MCP, job store, runtime wrapper, or evidence architecture;
+- resource budgets and partial/unsupported states are explicit.
 
 ---
 
 # 0.5.0 — Security Intelligence
 
-**Priority: P1**
+**Priority:** P1
 
-Add a machine-readable security knowledge layer over shared PEG/data-flow evidence.
+Build a machine-readable security knowledge/verification layer over 0.3/0.4 evidence.
 
 Candidate sources/backends:
 
@@ -255,27 +298,39 @@ probable
 verified / refuted / unknown
 ```
 
-A rule match is review evidence, not automatically a verified vulnerability.
+A rule hit is evidence for review, not automatically a verified vulnerability.
 
-### 0.5 acceptance
+## 0.5 acceptance
 
-- each finding retains rule/version, weakness mapping, locations, analyzer provenance, evidence state, limitations, and flow evidence when applicable;
-- Investigator and Verifier paths are logically independent;
-- security engines consume the 0.3/0.4 evidence contracts rather than introducing a new result architecture.
+- findings retain rule/version, weakness mapping, source locations, analyzer provenance, evidence state, limitations, and flow evidence when available;
+- Investigator and Verifier are logically independent;
+- security capabilities consume shared PEG/evidence instead of introducing new result architecture;
+- false-positive regression corpus exists for promoted rules.
 
 ---
 
 # 0.6.0 — Dynamic Correlation
 
-**Priority: P2**
+**Priority:** P2
 
-Dynamic analysis is an explicit opt-in capability behind the same host control plane.
+Dynamic analysis is an explicit **opt-in capability** behind the same host control plane.
+
+The contract already exists in 0.3:
+
+```text
+trust_boundary = dynamic-opt-in
+activation = opt-in
+sandbox.network = controlled
+SAFE_REVERSER_ENABLE_CAPABILITIES=<explicit id>
+```
+
+The 0.3 static Runtime Driver intentionally refuses `controlled`; 0.6 supplies the privileged implementation without changing Capability SPI.
 
 Candidate components:
 
 ```text
 ADB
-Android emulator / approved device
+approved emulator/device
 Frida
 Objection where useful
 mitmproxy / controlled TLS observation
@@ -313,23 +368,24 @@ CONFIRMS / CONTRADICTS
 shared PEG
 ```
 
-### 0.6 acceptance
+## 0.6 acceptance
 
 - explicit user opt-in;
-- separate dynamic trust boundary;
-- device/network privileges never leak into static workers;
+- separate dynamic trust/runtime boundary;
+- static workers remain offline and unprivileged;
+- device/network scope is constrained and auditable;
 - secret/value redaction controls;
-- runtime observations use the same analysis/evidence IDs and PEG contracts.
+- runtime observations reuse shared analysis/evidence IDs and PEG contracts.
 
 ---
 
 # 0.7.0 — Native/JNI Intelligence
 
-**Priority: P1/P2**
+**Priority:** P1/P2
 
-Add native analysis as capability modules behind the existing Runtime Driver.
+Add generic native/JNI analysis as capability modules behind the existing Runtime Driver.
 
-Current baseline already includes fast ELF triage tools:
+Current fast triage substrate:
 
 ```text
 file
@@ -360,25 +416,32 @@ inspect_jni
 Candidate backends:
 
 - Rizin for scriptable/headless CFG/XREF/disassembly;
-- Ghidra headless as escalation for difficult ARM/ARM64, P-code/IR, JNI and crypto.
+- Ghidra headless for difficult ARM/ARM64, P-code/IR, JNI, crypto, or escalation.
 
 No generic Rizin/Ghidra console is exposed to the agent.
 
-Target PEG mapping:
+Target PEG bridge:
 
 ```text
 Java/Kotlin method
       ↓ JNI_BINDS
 native function
       ↓
-native CFG / data flow
+native CFG/data flow
 ```
+
+## 0.7 acceptance
+
+- generic native capability reuses 0.3 runtime/job/path/evidence contracts;
+- JNI mappings carry provenance in both managed/native representations;
+- framework-aware analyzers remain primary when they preserve higher-level semantics;
+- native escalation can consume localized offsets/symbols from Flutter/other framework capabilities.
 
 ---
 
 # 0.8.0 — Framework Coverage
 
-**Priority: P2**
+**Priority:** P2
 
 New frameworks are capability modules using the 0.3 SPI.
 
@@ -392,7 +455,7 @@ find_js_symbols
 extract_js_endpoints
 ```
 
-Do not infer Hermes from React Native alone.
+Hermes must not be inferred from React Native alone.
 
 ## Unity / IL2CPP
 
@@ -405,11 +468,11 @@ search_unity_symbols
 
 ## Xamarin / .NET MAUI
 
-Add managed-assembly detection and IL-aware analysis rather than relying on JADX host code.
+Use managed assembly/IL-aware analysis rather than relying on Android host-shell JADX output.
 
 ## Protocol adapters
 
-Specialized evidence producers for:
+Specialized evidence producers may cover:
 
 ```text
 protobuf / gRPC
@@ -421,24 +484,24 @@ MQTT
 custom DNS / DoH
 ```
 
-### 0.8 acceptance
+## 0.8 acceptance
 
-Adding any one of these modules must not require:
+Adding a module must not require:
 
-- another public MCP server;
-- another generic container-runtime wrapper;
-- duplicated generic job/path/image lifecycle code;
-- a new evidence architecture.
+- another public MCP;
+- another generic Docker/Podman wrapper;
+- duplicated job/path/evidence lifecycle;
+- a new evidence-state model;
+- operation-name-specific dispatch branches in the control plane;
+- weakening static sandbox policy.
 
 ---
 
-# 0.9.0 — Pattern Discovery + Verification
+# 0.9.0 — Pattern Discovery + Independent Verification
 
-**Priority: P3**
+**Priority:** P3
 
-Use graph/data-flow motifs and anomaly ranking to propose candidate weaknesses, then verify them deterministically.
-
-Pipeline:
+Use graph/data-flow motifs and anomaly ranking to propose candidate weaknesses, then verify deterministically.
 
 ```text
 known security knowledge
@@ -467,43 +530,46 @@ validate_rule
 regression_test_rule
 ```
 
-AI may propose rules; production promotion requires deterministic positive/negative regression gates.
+AI may propose rules. Production promotion requires deterministic positive/negative regression gates.
 
 ---
 
-# 1.0.0 — Stable Platform
+# 1.0.0 — Stable Platform Contracts
 
-1.0 focuses on compatibility, supported-capability matrices, operational hardening, reproducibility, and evidence quality rather than another orchestration rewrite.
+1.0 focuses on compatibility, operational hardening, reproducibility, and evidence quality rather than another orchestration rewrite.
 
 Target guarantees:
 
 - one public MCP control plane;
-- documented Capability SPI / Worker ABI compatibility policy;
-- clear worker support matrix by artifact/framework/runtime;
-- reproducible image provenance/SBOM;
+- documented Capability API/Worker ABI compatibility policy;
+- public semantic-operation input/output schema compatibility policy;
+- supported capability/artifact/framework/runtime matrix;
+- reproducible image provenance and SBOM;
 - bounded resource behavior;
 - durable analysis/evidence identifiers;
 - regression suites across framework/runtime versions;
 - architecture/security release gate;
-- migration policy for any future contract change.
+- migration policy for future contract changes.
+
+Operation-name equality alone is not sufficient for 1.0 compatibility. Before 1.0, externally meaningful operation schemas must be versioned or otherwise compatibility-checked.
 
 ---
 
-# Cross-cutting strong Android static core
+# Cross-cutting static Android improvements
 
 Static Android fidelity evolves continuously behind `static-core` without changing the control-plane architecture.
 
-Planned additions:
+Candidate additions:
 
 ```text
 Apktool
 aapt2
 apksigner / apksig
 smali / baksmali
-APKiD packaging/license decision
+APKiD subject to packaging/license review
 ```
 
-Planned operations:
+Candidate semantic operations:
 
 ```text
 inspect_manifest
@@ -518,142 +584,26 @@ list_dex
 inspect_dex
 search_smali
 read_smali
-map_java_to_smali
 ```
 
-Mutation/rebuild functionality, if later added, belongs in an explicit `patch-lab` capability rather than default static analysis.
+These remain generic Android/package/DEX semantics. Framework-specific business logic remains in dedicated capabilities.
 
 ---
 
-# Program Evidence Graph
+# Development sequencing after 0.3
 
-PEG is the cross-analyzer semantic layer.
-
-Representative nodes:
+Once 0.3 receives milestone acceptance:
 
 ```text
-Artifact
-APK
-DexFile
-NativeLibrary
-AndroidComponent
-Class
-Method
-Field
-BasicBlock
-Value
-String
-DartLibrary
-DartFunction
-NativeFunction
-JNIBinding
-Host
-Endpoint
-HttpHeader
-CryptoOperation
-StorageKey
-ProtocolMessage
-RuntimeEvent
-Trace
-Finding
-Evidence
+freeze orchestration unless a demonstrated platform defect requires change
+        ↓
+start 0.4 data-flow spike behind existing Capability SPI
+        ↓
+small feature slices
+        ↓
+review + deterministic tests after each slice
+        ↓
+merge only exact-head green work
 ```
 
-Representative edges:
-
-```text
-CONTAINS
-DECLARES
-CALLS
-XREFS
-READS
-WRITES
-FLOWS_TO
-DERIVED_FROM
-RETURNS
-IMPLEMENTS
-JNI_BINDS
-BUILDS_REQUEST
-SENDS_TO
-AUTHENTICATES_WITH
-ENCODES_WITH
-ENCRYPTS_WITH
-OBSERVED_CALL
-OBSERVED_VALUE
-CONFIRMS
-CONTRADICTS
-```
-
-Every material fact should preserve, when available:
-
-```text
-analysis_id
-artifact/input SHA-256
-capability id/API/worker ABI
-analyzer name + version
-image/build identity
-configuration/schema version
-source location or native offset
-evidence state
-limitations
-```
-
----
-
-# Tool integration policy
-
-Before adding an analyzer or capability:
-
-1. fit it behind an existing Capability SPI or explicitly review a contract extension;
-2. pin the tool version or exact source revision;
-3. verify provenance/hashes where redistribution permits;
-4. review license compatibility;
-5. prefer headless/scriptable operation;
-6. expose bounded semantic operations, never arbitrary commands;
-7. keep normal static/framework worker networking disabled;
-8. add deterministic fixtures, unit tests, worker integration tests, and control-plane contract tests;
-9. document resource limits and unsupported versions/architectures;
-10. do not silently fall back to host-installed analyzers or build/download dependencies during analysis;
-11. normalize material facts through the shared evidence contract;
-12. update durable architecture/roadmap documentation.
-
----
-
-# Testing and success metrics
-
-Every capability needs:
-
-```text
-unit tests
-worker contract tests
-resource/security boundary tests
-image provenance tests
-end-to-end control-plane tests
-regression fixtures across supported runtime/compiler versions
-unsupported-version tests
-```
-
-Critical metrics:
-
-```text
-framework routing accuracy
-capability readiness accuracy
-first-party endpoint recall / precision
-auth/signature reconstruction rate
-call-edge precision
-data-flow precision
-security finding precision
-runtime confirmation rate
-native/framework mapping coverage
-evidence completeness
-analysis p50 / p95
-peak memory / disk / process count
-context/token cost per verified finding
-regression rate across protected/obfuscated apps
-```
-
----
-
-# Current gate
-
-Do **not** begin 0.4.0 until all 0.3.0 acceptance items are satisfied and the senior milestone review returns PASS.
+The main measure of progress from 0.4 onward should be **analysis intelligence and evidence quality**, not additional control-plane refactoring.
