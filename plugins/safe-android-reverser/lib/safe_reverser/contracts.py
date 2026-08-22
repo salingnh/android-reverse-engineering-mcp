@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -12,8 +13,20 @@ VALID_TRUST_BOUNDARIES = {
     "dynamic-opt-in",
 }
 VALID_PROTOCOLS = {"mcp-stdio", "cli-json"}
-VALID_STATES = {"declared", "installed", "ready", "degraded", "unavailable", "unsupported"}
+VALID_STATES = {
+    "declared",
+    "installed",
+    "ready",
+    "degraded",
+    "unavailable",
+    "unsupported",
+}
 VALID_EVIDENCE_STATES = {"observed", "derived", "hypothesized"}
+CAPABILITY_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,127}$")
+OPERATION_RE = re.compile(r"^[a-z][a-z0-9_]{0,127}$")
+IMAGE_REPOSITORY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{1,255}$")
+IMAGE_ROLE_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
+REPRESENTATION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/+ -]{0,127}$")
 
 
 class ContractError(ValueError):
@@ -34,7 +47,23 @@ class SandboxPolicy:
 
     @classmethod
     def from_dict(cls, value: dict[str, Any] | None) -> "SandboxPolicy":
+        if value is not None and not isinstance(value, dict):
+            raise ContractError("sandbox policy must be an object")
         raw = dict(value or {})
+        allowed = {
+            "network",
+            "read_only_root",
+            "drop_all_capabilities",
+            "no_new_privileges",
+            "memory",
+            "cpus",
+            "pids_limit",
+            "tmpfs_tmp",
+            "tmpfs_work",
+        }
+        unknown = set(raw) - allowed
+        if unknown:
+            raise ContractError(f"unknown sandbox policy fields: {sorted(unknown)}")
         policy = cls(
             network=str(raw.get("network", "none")),
             read_only_root=bool(raw.get("read_only_root", True)),
@@ -46,10 +75,16 @@ class SandboxPolicy:
             tmpfs_tmp=str(raw.get("tmpfs_tmp", "1g")),
             tmpfs_work=str(raw.get("tmpfs_work", "1g")),
         )
-        if policy.network not in {"none"}:
+        if policy.network != "none":
             raise ContractError("static capability network policy must be none")
-        if not policy.read_only_root or not policy.drop_all_capabilities or not policy.no_new_privileges:
-            raise ContractError("static capability must preserve locked sandbox invariants")
+        if (
+            not policy.read_only_root
+            or not policy.drop_all_capabilities
+            or not policy.no_new_privileges
+        ):
+            raise ContractError(
+                "static capability must preserve locked sandbox invariants"
+            )
         if policy.pids_limit < 16 or policy.pids_limit > 4096:
             raise ContractError("invalid capability PID limit")
         return policy
@@ -72,8 +107,23 @@ class CapabilityManifest:
     def from_dict(cls, value: dict[str, Any]) -> "CapabilityManifest":
         if not isinstance(value, dict):
             raise ContractError("capability manifest must be an object")
+        allowed = {
+            "id",
+            "capability_api",
+            "worker_abi",
+            "representations",
+            "trust_boundary",
+            "protocol",
+            "image",
+            "operations",
+            "sandbox",
+        }
+        unknown = set(value) - allowed
+        if unknown:
+            raise ContractError(f"unknown capability manifest fields: {sorted(unknown)}")
+
         capability_id = str(value.get("id") or "").strip()
-        if not capability_id or len(capability_id) > 128:
+        if not CAPABILITY_ID_RE.fullmatch(capability_id):
             raise ContractError("invalid capability id")
         capability_api = int(value.get("capability_api", 0))
         worker_abi = int(value.get("worker_abi", 0))
@@ -91,21 +141,32 @@ class CapabilityManifest:
         protocol = str(value.get("protocol") or "").strip()
         if protocol not in VALID_PROTOCOLS:
             raise ContractError("invalid capability worker protocol")
+
         image = value.get("image")
-        if not isinstance(image, dict):
-            raise ContractError("capability image descriptor is required")
+        if not isinstance(image, dict) or set(image) - {"repository", "role"}:
+            raise ContractError("invalid capability image descriptor")
         repository = str(image.get("repository") or "").strip()
         role = str(image.get("role") or "").strip()
-        if not repository or len(repository) > 256 or not role or len(role) > 64:
-            raise ContractError("invalid capability image descriptor")
-        representation = tuple(str(item).strip() for item in value.get("representations", []))
-        operations = tuple(str(item).strip() for item in value.get("operations", []))
-        if not representation or any(not item for item in representation):
+        if not IMAGE_REPOSITORY_RE.fullmatch(repository):
+            raise ContractError("invalid capability image repository")
+        if not IMAGE_ROLE_RE.fullmatch(role):
+            raise ContractError("invalid capability image role")
+
+        representations = value.get("representations")
+        operations_value = value.get("operations")
+        if not isinstance(representations, list) or not representations:
             raise ContractError("capability representations are required")
-        if not operations or any(not item for item in operations):
+        if not isinstance(operations_value, list) or not operations_value:
             raise ContractError("capability operations are required")
+        representation = tuple(str(item).strip() for item in representations)
+        operations = tuple(str(item).strip() for item in operations_value)
+        if any(not REPRESENTATION_RE.fullmatch(item) for item in representation):
+            raise ContractError("invalid capability representation")
+        if any(not OPERATION_RE.fullmatch(item) for item in operations):
+            raise ContractError("invalid capability operation name")
         if len(set(operations)) != len(operations):
             raise ContractError("capability operations must be unique")
+
         return cls(
             capability_id=capability_id,
             capability_api=capability_api,
@@ -136,12 +197,20 @@ class EvidenceEnvelope:
             raise ContractError("unsupported evidence envelope version")
         if not self.analysis_id or len(self.analysis_id) > 256:
             raise ContractError("invalid evidence analysis_id")
-        if len(self.artifact_sha256) != 64 or any(ch not in "0123456789abcdef" for ch in self.artifact_sha256):
+        if len(self.artifact_sha256) != 64 or any(
+            ch not in "0123456789abcdef" for ch in self.artifact_sha256
+        ):
             raise ContractError("invalid evidence artifact_sha256")
+        if not CAPABILITY_ID_RE.fullmatch(self.producer):
+            raise ContractError("invalid evidence producer")
+        if not self.producer_version or len(self.producer_version) > 128:
+            raise ContractError("invalid evidence producer_version")
         if self.evidence_state not in VALID_EVIDENCE_STATES:
             raise ContractError("invalid evidence state")
         if not isinstance(self.payload, dict):
             raise ContractError("evidence payload must be an object")
+        if len(self.limitations) > 100 or any(len(item) > 4096 for item in self.limitations):
+            raise ContractError("evidence limitations exceed contract bounds")
         return {
             "schema_version": self.schema_version,
             "analysis_id": self.analysis_id,
