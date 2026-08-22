@@ -42,6 +42,9 @@ jobs:
       - name: Test cross-worker ABI contracts
         run: PYTHONPATH=plugins/safe-android-reverser/lib python3 plugins/safe-android-reverser/tests/test_cross_worker_contracts.py
 
+      - name: Test immutable worker image pinning
+        run: PYTHONPATH=plugins/safe-android-reverser/lib python3 plugins/safe-android-reverser/tests/test_runtime_image_pinning.py
+
       - name: Test host launcher
         run: bash sandbox/test_wrapper.sh
 
@@ -62,7 +65,8 @@ jobs:
             plugins/safe-android-reverser/lib/safe_reverser/control_plane.py \
             plugins/safe-android-reverser/tests/test_platform_architecture.py \
             plugins/safe-android-reverser/tests/test_public_operation_contract.py \
-            plugins/safe-android-reverser/tests/test_cross_worker_contracts.py
+            plugins/safe-android-reverser/tests/test_cross_worker_contracts.py \
+            plugins/safe-android-reverser/tests/test_runtime_image_pinning.py
 
       - name: Validate single public MCP manifest
         run: |
@@ -198,10 +202,16 @@ jobs:
           assert health['status'] == 'ok', health
           assert health['architecture'] == 'single-host-control-plane', health
           assert health['control_plane']['runtime_socket_mounted_into_workers'] is False
-          assert health['capabilities']['states']['static-core']['state'] == 'ready', health
-          assert health['capabilities']['states']['framework-flutter']['state'] == 'ready', health
-          assert health['capabilities']['states']['static-core']['activation'] == 'required', health
-          assert health['capabilities']['states']['framework-flutter']['activation'] == 'required', health
+          static_state = health['capabilities']['states']['static-core']
+          flutter_state = health['capabilities']['states']['framework-flutter']
+          assert static_state['state'] == 'ready', health
+          assert flutter_state['state'] == 'ready', health
+          assert static_state['activation'] == 'required', health
+          assert flutter_state['activation'] == 'required', health
+          assert static_state['image_id'].startswith('sha256:'), static_state
+          assert flutter_state['image_id'].startswith('sha256:'), flutter_state
+          assert len(static_state['image_id']) == 71, static_state
+          assert len(flutter_state['image_id']) == 71, flutter_state
           diagnostics = health['capabilities']['diagnostics']
           assert set(diagnostics) == {'static-core', 'framework-flutter'}, diagnostics
           assert diagnostics['static-core']['capability_worker']['id'] == 'static-core', diagnostics
