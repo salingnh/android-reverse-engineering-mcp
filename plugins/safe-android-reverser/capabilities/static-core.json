@@ -12,7 +12,6 @@
     "role": "static-core"
   },
   "operations": [
-    "health",
     "fingerprint",
     "route_analysis",
     "inspect_flutter",
