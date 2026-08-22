@@ -8,11 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from . import CAPABILITY_API_VERSION, EVIDENCE_ENVELOPE_VERSION, WORKER_ABI_VERSION
-from .adapters import (
-    RESERVED_CONTROL_PLANE_OPERATIONS,
-    CapabilityAdapter,
-    build_capability_adapters,
-)
+from .adapters import CapabilityAdapter, build_capability_adapters
 from .contracts import ContractError
 from .evidence import normalize_capability_result
 from .flutter import FlutterCapabilityError
@@ -172,11 +168,7 @@ class ControlPlane:
         ]
         for _capability_id, adapter in sorted(self.adapters.items()):
             try:
-                tools.extend(
-                    item
-                    for item in adapter.tools()
-                    if item.get("name") not in RESERVED_CONTROL_PLANE_OPERATIONS
-                )
+                tools.extend(adapter.tools())
             except (RuntimeErrorSafe, WorkerProtocolError, FlutterCapabilityError):
                 # Control-plane diagnostics remain available even when one worker is absent.
                 continue
@@ -187,9 +179,10 @@ class ControlPlane:
 
     def health(self) -> dict[str, Any]:
         states = self._capability_states()
+        manifests = self.registry.manifests()
         required_ids = {
             capability_id
-            for capability_id, manifest in self.registry.manifests().items()
+            for capability_id, manifest in manifests.items()
             if manifest.activation == "required"
         }
         overall = (
@@ -198,18 +191,33 @@ class ControlPlane:
             and all(states.get(item, {}).get("state") == "ready" for item in required_ids)
             else "degraded"
         )
-        static_health: dict[str, Any] | None = None
-        static_adapter = self.adapters.get("static-core")
-        if static_adapter is not None and states.get("static-core", {}).get("state") == "ready":
+        diagnostics: dict[str, Any] = {}
+        for capability_id, adapter in sorted(self.adapters.items()):
+            if states.get(capability_id, {}).get("state") != "ready":
+                continue
             try:
-                static_health = static_adapter.call("health", {})
-            except (RuntimeErrorSafe, WorkerProtocolError) as exc:
-                states["static-core"] = {
-                    **states["static-core"],
+                detail = adapter.diagnostics()
+                if not isinstance(detail, dict):
+                    raise ControlPlaneError(
+                        "capability adapter returned invalid diagnostics payload"
+                    )
+                diagnostics[capability_id] = detail
+            except (
+                ControlPlaneError,
+                RuntimeErrorSafe,
+                WorkerProtocolError,
+                FlutterCapabilityError,
+                ValueError,
+                OSError,
+            ) as exc:
+                states[capability_id] = {
+                    **states[capability_id],
                     "state": "degraded",
                     "detail": str(exc),
                 }
-                overall = "degraded"
+                diagnostics[capability_id] = {"error": str(exc)}
+                if capability_id in required_ids:
+                    overall = "degraded"
         return {
             "status": overall,
             "server": SERVER_NAME,
@@ -226,8 +234,8 @@ class ControlPlane:
             "capabilities": {
                 "registry": self.registry.descriptor(),
                 "states": states,
+                "diagnostics": diagnostics,
             },
-            "static_core": static_health,
         }
 
     def list_capabilities(self) -> dict[str, Any]:
@@ -246,9 +254,7 @@ class ControlPlane:
         owner = self.registry.owner_for_operation(name)
         adapter = self.adapters.get(owner.capability_id)
         if adapter is None:
-            raise ControlPlaneError(
-                f"capability is not enabled: {owner.capability_id}"
-            )
+            raise ControlPlaneError(f"capability is not enabled: {owner.capability_id}")
         payload = adapter.call(name, arguments)
         if name in {"fingerprint", "route_analysis"}:
             payload = self._enrich_route(payload)
@@ -273,9 +279,7 @@ def serve(plugin_root: Path) -> int:
     try:
         plane = ControlPlane(plugin_root)
     except (ControlPlaneError, ContractError, RuntimeErrorSafe, OSError) as exc:
-        sys.stderr.write(
-            f"safe-android-reverser: control-plane startup failed: {exc}\n"
-        )
+        sys.stderr.write(f"safe-android-reverser: control-plane startup failed: {exc}\n")
         return 2
 
     def send(payload: dict[str, Any]) -> None:
