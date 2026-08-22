@@ -9,6 +9,7 @@ from typing import Any
 
 from . import CAPABILITY_API_VERSION, EVIDENCE_ENVELOPE_VERSION, WORKER_ABI_VERSION
 from .contracts import ContractError
+from .evidence import normalize_capability_result
 from .flutter import FlutterCapability, FlutterCapabilityError
 from .registry import CapabilityRegistry
 from .runtime import ContainerRuntime, RuntimeErrorSafe
@@ -142,6 +143,16 @@ class ControlPlane:
                     item["capability_state"] = runtime_state.get("state")
         return payload
 
+    def _normalize(
+        self, capability_id: str, operation: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        return normalize_capability_result(
+            capability_id=capability_id,
+            operation=operation,
+            producer_version=self.version,
+            payload=payload,
+        )
+
     def tools(self) -> list[dict[str, Any]]:
         tools: list[dict[str, Any]] = [
             {
@@ -178,8 +189,15 @@ class ControlPlane:
 
     def health(self) -> dict[str, Any]:
         states = self._capability_states()
-        required_states = [states.get("static-core", {}), states.get("framework-flutter", {})]
-        overall = "ok" if all(item.get("state") == "ready" for item in required_states) else "degraded"
+        required_states = [
+            states.get("static-core", {}),
+            states.get("framework-flutter", {}),
+        ]
+        overall = (
+            "ok"
+            if all(item.get("state") == "ready" for item in required_states)
+            else "degraded"
+        )
         static_health: dict[str, Any] | None = None
         if states.get("static-core", {}).get("state") == "ready":
             try:
@@ -224,13 +242,16 @@ class ControlPlane:
             return self.health()
         if name == "list_capabilities":
             return self.list_capabilities()
-        if name in self.registry.get("framework-flutter").operations:
-            return self.flutter.call(name, arguments)
-        if name in self.registry.get("static-core").operations:
+        flutter_manifest = self.registry.get("framework-flutter")
+        if name in flutter_manifest.operations:
+            payload = self.flutter.call(name, arguments)
+            return self._normalize(flutter_manifest.capability_id, name, payload)
+        static_manifest = self.registry.get("static-core")
+        if name in static_manifest.operations:
             payload = self.static.call(name, arguments)
             if name in {"fingerprint", "route_analysis"}:
-                return self._enrich_route(payload)
-            return payload
+                payload = self._enrich_route(payload)
+            return self._normalize(static_manifest.capability_id, name, payload)
         raise ControlPlaneError(f"unknown tool: {name}")
 
 
