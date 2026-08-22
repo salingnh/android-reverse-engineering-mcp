@@ -52,6 +52,7 @@ jobs:
             plugins/safe-android-reverser/lib/safe_reverser/jobs.py \
             plugins/safe-android-reverser/lib/safe_reverser/worker.py \
             plugins/safe-android-reverser/lib/safe_reverser/flutter.py \
+            plugins/safe-android-reverser/lib/safe_reverser/adapters.py \
             plugins/safe-android-reverser/lib/safe_reverser/control_plane.py \
             plugins/safe-android-reverser/tests/test_platform_architecture.py
 
@@ -71,8 +72,14 @@ jobs:
           from safe_reverser.registry import CapabilityRegistry
           registry = CapabilityRegistry(Path('plugins/safe-android-reverser/capabilities'))
           assert set(registry.manifests()) == {'static-core', 'framework-flutter'}
-          assert registry.get('static-core').protocol == 'mcp-stdio'
-          assert registry.get('framework-flutter').protocol == 'cli-json'
+          static = registry.get('static-core')
+          flutter = registry.get('framework-flutter')
+          assert static.protocol == 'mcp-stdio'
+          assert static.adapter == 'mcp-container'
+          assert static.activation == 'required'
+          assert flutter.protocol == 'cli-json'
+          assert flutter.adapter == 'flutter-aot'
+          assert flutter.activation == 'required'
           PY
 
   integration:
@@ -150,8 +157,8 @@ jobs:
         env:
           SAFE_REVERSER_RUNTIME: docker
           SAFE_REVERSER_AUTO_PULL: '0'
-          SAFE_REVERSER_STATIC_IMAGE: safe-android-reverser:ci
-          SAFE_REVERSER_FLUTTER_IMAGE: safe-android-reverser-flutter:ci
+          SAFE_REVERSER_CAPABILITY_IMAGE_STATIC_CORE: safe-android-reverser:ci
+          SAFE_REVERSER_CAPABILITY_IMAGE_FRAMEWORK_FLUTTER: safe-android-reverser-flutter:ci
         run: |
           export SAFE_REVERSER_PROJECT_DIR="$PWD"
           export SAFE_REVERSER_DATA_DIR="$RUNNER_TEMP/safe-reverser-control-plane"
@@ -183,9 +190,13 @@ jobs:
           assert health['control_plane']['runtime_socket_mounted_into_workers'] is False
           assert health['capabilities']['states']['static-core']['state'] == 'ready', health
           assert health['capabilities']['states']['framework-flutter']['state'] == 'ready', health
+          assert health['capabilities']['states']['static-core']['activation'] == 'required', health
+          assert health['capabilities']['states']['framework-flutter']['activation'] == 'required', health
           caps_response = next(item for item in rows if item.get('id') == 4)
           caps = json.loads(caps_response['result']['content'][0]['text'])
           assert caps['capability_api'] == 1, caps
           assert caps['worker_abi'] == 1, caps
           assert set(caps['registry']) == {'static-core', 'framework-flutter'}, caps
+          assert caps['registry']['static-core']['adapter'] == 'mcp-container', caps
+          assert caps['registry']['framework-flutter']['adapter'] == 'flutter-aot', caps
           PY
