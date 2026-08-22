@@ -79,12 +79,40 @@ jobs:
           cache-from: type=gha,scope=flutter-runtime-${{ steps.identity.outputs.cache_tag }}
           cache-to: type=gha,mode=max,scope=flutter-runtime-${{ steps.identity.outputs.cache_tag }}
 
+      - name: Verify exact worker ABI and runtime provenance
+        env:
+          VERSION: ${{ steps.identity.outputs.version }}
+          EXPECTED_COMMIT: ${{ steps.identity.outputs.blutter_commit }}
+          EXPECTED_SNAPSHOT: ${{ steps.identity.outputs.snapshot_hash }}
+          EXPECTED_DART: ${{ inputs.dart_version }}
+          EXPECTED_COMPRESSED: ${{ inputs.compressed_pointers }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import subprocess
+          info = json.loads(subprocess.check_output(['docker', 'image', 'inspect', 'safe-android-reverser-flutter-runtime:ci']))[0]
+          labels = info['Config']['Labels']
+          expected = {
+              'org.opencontainers.image.version': os.environ['VERSION'],
+              'io.safe-reverser.capability.id': 'framework-flutter',
+              'io.safe-reverser.capability.api': '1',
+              'io.safe-reverser.worker.abi': '1',
+              'io.safe-reverser.runtime-cache.schema': '2',
+              'io.safe-reverser.blutter.commit': os.environ['EXPECTED_COMMIT'],
+              'io.safe-reverser.dart.version': os.environ['EXPECTED_DART'],
+              'io.safe-reverser.dart.snapshot': os.environ['EXPECTED_SNAPSHOT'],
+              'io.safe-reverser.dart.arch': 'arm64',
+              'io.safe-reverser.dart.compressed-pointers': os.environ['EXPECTED_COMPRESSED'].lower(),
+          }
+          for key, value in expected.items():
+              assert labels.get(key) == value, (key, labels.get(key), value)
+          PY
+
       - name: Verify cached analyzer without network
         env:
           EXPECTED_COMMIT: ${{ steps.identity.outputs.blutter_commit }}
         run: |
-          test "$(docker image inspect safe-android-reverser-flutter-runtime:ci \
-            --format '{{ index .Config.Labels "io.safe-reverser.runtime-cache.schema" }}')" = "2"
           output="$(docker run --rm \
             --network=none \
             --read-only \
@@ -97,22 +125,21 @@ jobs:
           import json
           import sys
           payload = json.loads(sys.argv[1])
-          assert payload["status"] == "ok", payload
-          assert payload["blutter_commit"] == sys.argv[2], payload
-          assert payload["cached_binary_count"] >= 1, payload
-          assert payload["network_required_at_runtime"] is False, payload
-          assert payload["network_capable_upstream_path_used"] is False, payload
-          assert payload["build_on_demand_allowed"] is False, payload
-          assert payload["required_runtime_constraints"]["output_mount"] == "writable-bounded", payload
-          assert payload["orchestration"]["analyze_export"] is True, payload
+          assert payload['status'] == 'ok', payload
+          assert payload['blutter_commit'] == sys.argv[2], payload
+          assert payload['cached_binary_count'] >= 1, payload
+          assert payload['network_required_at_runtime'] is False, payload
+          assert payload['network_capable_upstream_path_used'] is False, payload
+          assert payload['build_on_demand_allowed'] is False, payload
+          assert payload['registry_selection_owned_by_worker'] is False, payload
+          assert payload['required_runtime_constraints']['output_mount'] == 'writable-bounded', payload
+          assert payload['orchestration']['analyze_export'] is True, payload
           PY
 
       - name: Verify runtime binary and redistribution licenses
         run: |
           docker run --rm \
-            --network=none \
-            --read-only \
-            --cap-drop=ALL \
+            --network=none --read-only --cap-drop=ALL \
             --security-opt=no-new-privileges \
             --tmpfs=/tmp:rw,nosuid,nodev,size=256m \
             --tmpfs=/work:rw,nosuid,nodev,size=256m \
