@@ -2,6 +2,7 @@
 """Fail CI when plugin, capability contracts, worker images, workflows or release tags drift."""
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import re
@@ -13,10 +14,21 @@ CAPABILITY_ROOT = PLUGIN_ROOT / "capabilities"
 SEMVER_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
 CAPABILITY_API = 1
 WORKER_ABI = 1
+EVIDENCE_ENVELOPE = 1
+FLUTTER_CACHE_SCHEMA = 2
 
 
 def fail(message: str) -> None:
     raise SystemExit(f"release consistency error: {message}")
+
+
+def load_module(name: str, path: Path):
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        fail(f"cannot load contract module: {path.relative_to(ROOT)}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 version = (PLUGIN_ROOT / "VERSION").read_text(encoding="utf-8").strip()
@@ -52,6 +64,16 @@ server = servers["safe-android-reverser"]
 if server.get("command") != "${CLAUDE_PLUGIN_ROOT}/bin/safe-reverser-mcp":
     fail("public MCP server must use the host control-plane launcher")
 
+for legacy in (
+    PLUGIN_ROOT / "bin" / "safe-flutter-mcp",
+    PLUGIN_ROOT / "bin" / "flutter-mcp-host.py",
+    ROOT / "sandbox" / "mcp_server_v2.py",
+):
+    if legacy.exists():
+        fail(f"legacy orchestration/server file must not return: {legacy.relative_to(ROOT)}")
+if not (ROOT / "sandbox" / "static_semantic_worker.py").is_file():
+    fail("canonical static semantic worker is missing")
+
 wrapper = (PLUGIN_ROOT / "bin" / "safe-reverser-mcp").read_text(encoding="utf-8")
 required_wrapper_fragments = [
     'VERSION_FILE="$PLUGIN_ROOT/VERSION"',
@@ -63,22 +85,32 @@ for fragment in required_wrapper_fragments:
         fail(f"control-plane launcher is missing release binding: {fragment}")
 if " image inspect " in wrapper or '"$RUNTIME" pull' in wrapper:
     fail("launcher must not own capability image lifecycle; Runtime Driver owns it")
+if "mkdir -p \"$DATA_DIR\"" in wrapper:
+    fail("launcher must not create data root before shared path-policy validation")
 
 expected_capabilities = {
     "static-core": {
+        "activation": "required",
+        "adapter": "mcp-container",
         "protocol": "mcp-stdio",
         "repository": "ghcr.io/salingnh/safe-android-reverser",
     },
     "framework-flutter": {
+        "activation": "required",
+        "adapter": "flutter-aot",
         "protocol": "cli-json",
         "repository": "ghcr.io/salingnh/safe-android-reverser-flutter",
     },
 }
+manifest_ids = {path.stem for path in CAPABILITY_ROOT.glob("*.json")}
+if manifest_ids != set(expected_capabilities):
+    fail(
+        f"0.3 capability manifest set drift: actual={sorted(manifest_ids)} expected={sorted(expected_capabilities)}"
+    )
+
 seen_operations: set[str] = set()
 for capability_id, expected in expected_capabilities.items():
     path = CAPABILITY_ROOT / f"{capability_id}.json"
-    if not path.is_file():
-        fail(f"missing capability manifest: {path.relative_to(ROOT)}")
     manifest = json.loads(path.read_text(encoding="utf-8"))
     if manifest.get("id") != capability_id:
         fail(f"capability manifest id drift: {path.name}")
@@ -86,8 +118,9 @@ for capability_id, expected in expected_capabilities.items():
         fail(f"capability_api drift in {path.name}")
     if manifest.get("worker_abi") != WORKER_ABI:
         fail(f"worker_abi drift in {path.name}")
-    if manifest.get("protocol") != expected["protocol"]:
-        fail(f"worker protocol drift in {path.name}")
+    for field in ("activation", "adapter", "protocol"):
+        if manifest.get(field) != expected[field]:
+            fail(f"{field} drift in {path.name}")
     image = manifest.get("image") or {}
     if image.get("repository") != expected["repository"]:
         fail(f"worker image repository drift in {path.name}")
@@ -98,6 +131,27 @@ for capability_id, expected in expected_capabilities.items():
     if overlap:
         fail(f"public operation ownership collides: {sorted(overlap)}")
     seen_operations.update(operations)
+
+init_text = (PLUGIN_ROOT / "lib" / "safe_reverser" / "__init__.py").read_text(
+    encoding="utf-8"
+)
+for fragment in (
+    f"CAPABILITY_API_VERSION = {CAPABILITY_API}",
+    f"WORKER_ABI_VERSION = {WORKER_ABI}",
+    f"EVIDENCE_ENVELOPE_VERSION = {EVIDENCE_ENVELOPE}",
+):
+    if fragment not in init_text:
+        fail(f"host platform contract constant drift: {fragment}")
+
+flutter_cache = load_module(
+    "release_flutter_cache_identity", ROOT / "frameworks" / "flutter" / "cache_identity.py"
+)
+if flutter_cache.CAPABILITY_API_VERSION != CAPABILITY_API:
+    fail("Flutter cache identity capability API drift")
+if flutter_cache.WORKER_ABI_VERSION != WORKER_ABI:
+    fail("Flutter cache identity Worker ABI drift")
+if flutter_cache.CACHE_SCHEMA_VERSION != FLUTTER_CACHE_SCHEMA:
+    fail("Flutter runtime-cache schema drift")
 
 image_checks = {
     ROOT / "sandbox" / "Dockerfile": [
@@ -119,13 +173,21 @@ image_checks = {
 }
 for path, fragments in image_checks.items():
     text = path.read_text(encoding="utf-8")
-    if "ARG SAFE_REVERSER_VERSION" not in text or "org.opencontainers.image.version" not in text:
+    if (
+        "ARG SAFE_REVERSER_VERSION" not in text
+        or "org.opencontainers.image.version" not in text
+    ):
         fail(f"worker image lacks release version binding: {path.relative_to(ROOT)}")
     for fragment in fragments:
         if fragment not in text:
-            fail(f"worker image lacks contract label {fragment}: {path.relative_to(ROOT)}")
+            fail(
+                f"worker image lacks contract label {fragment}: {path.relative_to(ROOT)}"
+            )
 
-for workflow_name in ("build-safe-sandbox.yml", "build-flutter-profile.yml"):
+for workflow_name in (
+    "build-safe-sandbox.yml",
+    "build-flutter-profile.yml",
+):
     workflow = (ROOT / ".github" / "workflows" / workflow_name).read_text(
         encoding="utf-8"
     )
@@ -134,7 +196,21 @@ for workflow_name in ("build-safe-sandbox.yml", "build-flutter-profile.yml"):
     if "type=sha,prefix=sha-" not in workflow:
         fail(f"{workflow_name} must publish a commit-addressable sha-* tag")
     if "type=match,pattern=safe-v(.*),group=1" not in workflow:
-        fail(f"{workflow_name} must derive release image tags from safe-vX.Y.Z git tags")
+        fail(
+            f"{workflow_name} must derive release image tags from safe-vX.Y.Z git tags"
+        )
+
+control_workflow = (
+    ROOT / ".github" / "workflows" / "test-control-plane.yml"
+).read_text(encoding="utf-8")
+for fragment in (
+    "test_platform_architecture.py",
+    "test_cross_worker_contracts.py",
+    "SAFE_REVERSER_CAPABILITY_IMAGE_STATIC_CORE",
+    "SAFE_REVERSER_CAPABILITY_IMAGE_FRAMEWORK_FLUTTER",
+):
+    if fragment not in control_workflow:
+        fail(f"control-plane CI is missing contract gate: {fragment}")
 
 ref_type = os.environ.get("GITHUB_REF_TYPE", "")
 ref_name = os.environ.get("GITHUB_REF_NAME", "")
@@ -146,5 +222,8 @@ if ref_type == "tag":
         fail(f"git tag version={tag_version!r}, VERSION={version!r}")
 
 print(
-    f"release consistency OK: version={version} capability_api={CAPABILITY_API} worker_abi={WORKER_ABI}"
+    "release consistency OK: "
+    f"version={version} capability_api={CAPABILITY_API} "
+    f"worker_abi={WORKER_ABI} evidence={EVIDENCE_ENVELOPE} "
+    f"flutter_cache_schema={FLUTTER_CACHE_SCHEMA}"
 )
