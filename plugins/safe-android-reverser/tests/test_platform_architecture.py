@@ -16,11 +16,14 @@ if str(LIB_ROOT) not in sys.path:
     sys.path.insert(0, str(LIB_ROOT))
 
 from safe_reverser import CAPABILITY_API_VERSION, WORKER_ABI_VERSION
-from safe_reverser.contracts import ContractError, EvidenceEnvelope
+from safe_reverser.adapters import _image_override
+from safe_reverser.contracts import CapabilityManifest, ContractError, EvidenceEnvelope
 from safe_reverser.control_plane import ControlPlane
 from safe_reverser.evidence import normalize_capability_result
 from safe_reverser.flutter import FlutterCapability
-from safe_reverser.paths import PathPolicyError, secure_child
+from safe_reverser.jobs import AnalysisJobStore, JobStoreError
+import safe_reverser.jobs as jobs_module
+from safe_reverser.paths import PathPolicyError, secure_child, secure_directory_root
 from safe_reverser.registry import CapabilityRegistry
 from safe_reverser.runtime import ContainerRuntime, RuntimeErrorSafe
 
@@ -34,6 +37,9 @@ class FakeRuntime:
         self.image = image
         self.required_labels = dict(required_labels)
         return dict(required_labels)
+
+    def validate_tmpfs_spec(self, spec):
+        ContainerRuntime.validate_tmpfs_spec(spec)
 
 
 class PlatformArchitectureTests(unittest.TestCase):
@@ -62,14 +68,63 @@ class PlatformArchitectureTests(unittest.TestCase):
         flutter = self.registry.get("framework-flutter")
         self.assertEqual(static.capability_api, CAPABILITY_API_VERSION)
         self.assertEqual(static.worker_abi, WORKER_ABI_VERSION)
+        self.assertEqual(static.activation, "required")
+        self.assertEqual(static.adapter, "mcp-container")
         self.assertEqual(flutter.capability_api, CAPABILITY_API_VERSION)
         self.assertEqual(flutter.worker_abi, WORKER_ABI_VERSION)
+        self.assertEqual(flutter.activation, "required")
+        self.assertEqual(flutter.adapter, "flutter-aot")
         self.assertEqual(flutter.protocol, "cli-json")
         self.assertNotIn("health", flutter.operations)
         self.assertEqual(
             self.registry.owner_for_operation("find_dart_symbols").capability_id,
             "framework-flutter",
         )
+
+    def test_dynamic_contract_is_predeclared_but_static_driver_stays_offline(self):
+        dynamic = CapabilityManifest.from_dict(
+            {
+                "id": "dynamic",
+                "capability_api": 1,
+                "worker_abi": 1,
+                "representations": ["runtime-observation"],
+                "trust_boundary": "dynamic-opt-in",
+                "activation": "opt-in",
+                "adapter": "mcp-container",
+                "protocol": "mcp-stdio",
+                "image": {"repository": "example.invalid/dynamic", "role": "dynamic"},
+                "operations": ["observe_runtime"],
+                "sandbox": {
+                    "network": "controlled",
+                    "read_only_root": True,
+                    "drop_all_capabilities": True,
+                    "no_new_privileges": True,
+                },
+            }
+        )
+        self.assertEqual(dynamic.activation, "opt-in")
+        self.assertEqual(dynamic.sandbox.network, "controlled")
+        runtime = ContainerRuntime(
+            "docker", host_uid=os.getuid(), host_gid=os.getgid(), auto_pull=False
+        )
+        with self.assertRaises(RuntimeErrorSafe):
+            runtime.locked_args(dynamic.sandbox)
+
+        invalid_static = {
+            "id": "native-test",
+            "capability_api": 1,
+            "worker_abi": 1,
+            "representations": ["elf"],
+            "trust_boundary": "native-static",
+            "activation": "optional",
+            "adapter": "mcp-container",
+            "protocol": "mcp-stdio",
+            "image": {"repository": "example.invalid/native", "role": "native-test"},
+            "operations": ["inspect_elf"],
+            "sandbox": {"network": "controlled"},
+        }
+        with self.assertRaises(ContractError):
+            CapabilityManifest.from_dict(invalid_static)
 
     def test_locked_runtime_policy_never_mounts_a_runtime_socket(self):
         runtime = ContainerRuntime(
@@ -124,6 +179,30 @@ class PlatformArchitectureTests(unittest.TestCase):
         with self.assertRaises(PathPolicyError):
             secure_child(self.project, "linked.apk")
 
+    def test_data_root_rejects_symlinked_parent_component(self):
+        real = self.root / "real-data"
+        real.mkdir()
+        link = self.root / "data-link"
+        try:
+            link.symlink_to(real, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            self.skipTest("symlinks unavailable")
+        with self.assertRaises(PathPolicyError):
+            secure_directory_root(link / "nested", create=True)
+        self.assertFalse((real / "nested").exists())
+
+    def test_job_store_has_hard_directory_scan_budget(self):
+        store = AnalysisJobStore(self.data, "scan-test")
+        old = jobs_module.MAX_JOB_SCAN
+        jobs_module.MAX_JOB_SCAN = 2
+        try:
+            for name in ("a", "b", "c"):
+                (store.root / name).mkdir()
+            with self.assertRaises(JobStoreError):
+                store.list()
+        finally:
+            jobs_module.MAX_JOB_SCAN = old
+
     def test_evidence_envelope_has_stable_common_contract(self):
         envelope = EvidenceEnvelope(
             analysis_id="analysis:fixture",
@@ -176,7 +255,13 @@ class PlatformArchitectureTests(unittest.TestCase):
             capability_id="static-core",
             operation="fingerprint",
             producer_version="0.3.0",
-            payload={"status": "ok", "provenance": {"analysis_id": "x", "artifact_sha256": "a" * 64}},
+            payload={
+                "status": "ok",
+                "provenance": {
+                    "analysis_id": "x",
+                    "artifact_sha256": "a" * 64,
+                },
+            },
         )
         self.assertIn("safe_reverser_contract", result)
         self.assertNotIn("evidence_envelope", result)
@@ -205,9 +290,27 @@ class PlatformArchitectureTests(unittest.TestCase):
         adapter = (
             REPO_ROOT / "frameworks" / "flutter" / "safe_blutter_adapter.py"
         ).read_text(encoding="utf-8")
+        host_adapter = (
+            PLUGIN_ROOT / "lib" / "safe_reverser" / "flutter.py"
+        ).read_text(encoding="utf-8")
         self.assertNotIn("SAFE_FLUTTER_IMAGE_REPOSITORY", adapter)
         self.assertNotIn("ghcr.io/salingnh/safe-android-reverser-flutter", adapter)
         self.assertNotIn('"recommended_image"', adapter)
+        self.assertNotIn("SAFE_FLUTTER_IMAGE_REPOSITORY", host_adapter)
+
+    def test_generic_capability_image_override_precedes_compat_alias(self):
+        manifest = self.registry.get("framework-flutter")
+        with mock.patch.dict(
+            os.environ,
+            {
+                "SAFE_REVERSER_CAPABILITY_IMAGE_FRAMEWORK_FLUTTER": "example.invalid/flutter:generic",
+                "SAFE_REVERSER_FLUTTER_IMAGE": "example.invalid/flutter:legacy",
+            },
+            clear=False,
+        ):
+            self.assertEqual(
+                _image_override(manifest), "example.invalid/flutter:generic"
+            )
 
     def test_flutter_runtime_image_is_selected_by_control_plane(self):
         runtime = FakeRuntime()
@@ -280,7 +383,10 @@ class PlatformArchitectureTests(unittest.TestCase):
         ), mock.patch.object(
             capability,
             "_execute",
-            return_value={"status": "ok", "analysis_id": "flutter-aot:" + "e" * 64},
+            return_value={
+                "status": "ok",
+                "analysis_id": "flutter-aot:" + "e" * 64,
+            },
         ):
             result = capability.analyze(
                 {"artifact": "app.apk", "timeout_seconds": 60}
@@ -290,7 +396,7 @@ class PlatformArchitectureTests(unittest.TestCase):
         self.assertFalse((job / "input").exists())
         self.assertEqual(capability.jobs.read(job)["status"], "ok")
 
-    def test_control_plane_enriches_static_route_with_discovered_state(self):
+    def test_control_plane_is_adapter_registry_driven(self):
         env = {
             "SAFE_REVERSER_PROJECT_DIR": str(self.project),
             "SAFE_REVERSER_DATA_DIR": str(self.data),
@@ -301,6 +407,9 @@ class PlatformArchitectureTests(unittest.TestCase):
             "safe_reverser.control_plane.shutil.which", return_value="/usr/bin/docker"
         ):
             plane = ControlPlane(PLUGIN_ROOT)
+        self.assertEqual(set(plane.adapters), {"static-core", "framework-flutter"})
+        self.assertFalse(hasattr(plane, "static"))
+        self.assertFalse(hasattr(plane, "flutter"))
         with mock.patch.object(
             plane,
             "_capability_states",
