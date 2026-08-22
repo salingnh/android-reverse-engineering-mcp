@@ -11,7 +11,6 @@ from .registry import CapabilityRegistry
 from .runtime import ContainerRuntime, RuntimeErrorSafe
 from .worker import McpContainerWorker, WorkerProtocolError
 
-RESERVED_CONTROL_PLANE_OPERATIONS = {"health", "list_capabilities"}
 MAX_ENABLED_CAPABILITIES = 64
 
 
@@ -19,6 +18,8 @@ class CapabilityAdapter(Protocol):
     manifest: CapabilityManifest
 
     def status(self) -> dict[str, Any]: ...
+
+    def diagnostics(self) -> dict[str, Any]: ...
 
     def tools(self) -> list[dict[str, Any]]: ...
 
@@ -48,6 +49,9 @@ class McpWorkerAdapter:
             "capability_api": labels.get("io.safe-reverser.capability.api"),
             "image_version": labels.get("org.opencontainers.image.version"),
         }
+
+    def diagnostics(self) -> dict[str, Any]:
+        return self.worker.call_internal("health", {})
 
     def tools(self) -> list[dict[str, Any]]:
         return self.worker.tools()
