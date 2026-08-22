@@ -114,6 +114,12 @@ class ControlPlane:
         return states
 
     def _enrich_route(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Attach deployment readiness to any capability result carrying a route.
+
+        Enrichment is result-shape driven rather than tied to specific operation
+        names. Future routers can emit the same `analysis_route` contract without
+        adding another dispatch branch to the control plane.
+        """
         route = payload.get("analysis_route")
         if not isinstance(route, dict):
             return payload
@@ -256,8 +262,7 @@ class ControlPlane:
         if adapter is None:
             raise ControlPlaneError(f"capability is not enabled: {owner.capability_id}")
         payload = adapter.call(name, arguments)
-        if name in {"fingerprint", "route_analysis"}:
-            payload = self._enrich_route(payload)
+        payload = self._enrich_route(payload)
         return self._normalize(owner.capability_id, name, payload)
 
 
