@@ -4,6 +4,7 @@
   "worker_abi": 1,
   "representations": ["dart-aot", "libapp.so", "flutter-assets"],
   "trust_boundary": "framework-static",
+  "adapter": "flutter-aot",
   "protocol": "cli-json",
   "image": {
     "repository": "ghcr.io/salingnh/safe-android-reverser-flutter",
