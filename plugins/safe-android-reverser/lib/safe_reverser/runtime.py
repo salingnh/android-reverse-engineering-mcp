@@ -13,6 +13,9 @@ from .contracts import SandboxPolicy
 IMAGE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{1,255}:[A-Za-z0-9_.-]{1,128}$")
 MEMORY_RE = re.compile(r"^[1-9][0-9]*[kKmMgG]?$|^0\.[0-9]*[1-9][0-9]*[kKmMgG]$")
 CPU_RE = re.compile(r"^(?:[1-9][0-9]*(?:\.[0-9]+)?|0\.[0-9]*[1-9][0-9]*)$")
+TMPFS_SPEC_RE = re.compile(
+    r"^/[A-Za-z0-9._/-]{1,255}:rw,nosuid,nodev,size=([1-9][0-9]*[kKmMgG]?|0\.[0-9]*[1-9][0-9]*[kKmMgG])$"
+)
 MAX_LOG_BYTES = 512 * 1024
 
 
@@ -58,6 +61,11 @@ class ContainerRuntime:
             raise RuntimeErrorSafe("invalid sandbox tmpfs limit")
         if policy.network != "none":
             raise RuntimeErrorSafe("static capability runtime network must be disabled")
+
+    @staticmethod
+    def validate_tmpfs_spec(spec: str) -> None:
+        if not isinstance(spec, str) or not TMPFS_SPEC_RE.fullmatch(spec):
+            raise RuntimeErrorSafe("invalid extra tmpfs specification")
 
     def _tail(self, handle, limit: int = MAX_LOG_BYTES) -> str:
         handle.flush()
@@ -189,12 +197,10 @@ class ContainerRuntime:
         self._validate_image(image)
         args = self.locked_args(policy)
         if stdin_lines is not None:
-            # Docker/Podman only keep container STDIN attached with -i/--interactive.
-            # This is required by capability workers using MCP-over-stdio.
+            # MCP-over-stdio workers need container STDIN kept open.
             args.append("--interactive")
         for spec in tmpfs or []:
-            if "\x00" in spec or not spec.startswith("/"):
-                raise RuntimeErrorSafe("invalid extra tmpfs specification")
+            self.validate_tmpfs_spec(spec)
             args.append(f"--tmpfs={spec}")
         for host, target, mode in mounts:
             if not Path(host).is_absolute() or not target.startswith("/"):
