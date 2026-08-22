@@ -36,9 +36,19 @@ class McpWorkerAdapter:
     def status(self) -> dict[str, Any]:
         try:
             labels = self.worker.ensure_ready()
-        except (RuntimeErrorSafe, WorkerProtocolError) as exc:
+        except RuntimeErrorSafe as exc:
             return {
                 "state": "unavailable",
+                "image": self.worker.image,
+                "detail": str(exc),
+            }
+        try:
+            # `ready` means the worker image is compatible and its public/internal
+            # MCP surface conforms to the Worker ABI, not merely that the image exists.
+            self.worker.tools()
+        except WorkerProtocolError as exc:
+            return {
+                "state": "degraded",
                 "image": self.worker.image,
                 "detail": str(exc),
             }
