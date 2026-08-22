@@ -47,6 +47,9 @@ jobs:
       - name: Test framework-aware routing topology
         run: PYTHONPATH=sandbox python3 sandbox/tests_analysis_routing.py
 
+      - name: Test archive safety budgets
+        run: PYTHONPATH=sandbox python3 sandbox/tests_archive_safety.py
+
       - name: Test Program Evidence Graph schema
         run: PYTHONPATH=sandbox python3 sandbox/tests_peg_schema.py
 
@@ -107,6 +110,7 @@ jobs:
             sandbox/mcp_server_v2.py \
             sandbox/mcp_entrypoint.py \
             sandbox/analysis_routing.py \
+            sandbox/archive_safety.py \
             sandbox/peg_schema.py \
             sandbox/flutter_analysis.py \
             sandbox/program_understanding.py \
@@ -115,6 +119,7 @@ jobs:
             sandbox/pu_index.py \
             sandbox/pu_network.py \
             sandbox/tests_analysis_routing.py \
+            sandbox/tests_archive_safety.py \
             sandbox/tests_peg_schema.py \
             sandbox/tests_flutter_analysis.py \
             sandbox/tests_program_understanding.py \
@@ -184,7 +189,7 @@ jobs:
       - name: Run semantic integration tests inside worker
         run: |
           mkdir -p "$RUNNER_TEMP/semantic-data"
-          for test in tests_flutter_analysis.py tests_program_understanding.py tests_program_understanding_scopes.py; do
+          for test in tests_archive_safety.py tests_flutter_analysis.py tests_program_understanding.py tests_program_understanding_scopes.py; do
             docker run --rm \
               --network=none --read-only --cap-drop=ALL \
               --security-opt=no-new-privileges \
