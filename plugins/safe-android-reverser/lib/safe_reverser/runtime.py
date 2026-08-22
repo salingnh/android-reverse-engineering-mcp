@@ -17,7 +17,17 @@ CPU_RE = re.compile(r"^(?:[1-9][0-9]*(?:\.[0-9]+)?|0\.[0-9]*[1-9][0-9]*)$")
 TMPFS_SPEC_RE = re.compile(
     r"^/[A-Za-z0-9._/-]{1,255}:rw,nosuid,nodev,size=([1-9][0-9]*[kKmMgG]?|0\.[0-9]*[1-9][0-9]*[kKmMgG])$"
 )
+MOUNT_TARGET_RE = re.compile(r"^/[A-Za-z0-9._/-]{0,255}$")
+ENV_KEY_RE = re.compile(r"^[A-Z0-9_]{1,128}$")
 MAX_LOG_BYTES = 512 * 1024
+MAX_RUNTIME_ARGV = 256
+MAX_RUNTIME_ARG_LENGTH = 8192
+MAX_MOUNTS = 16
+MAX_ENV_VARS = 64
+MAX_ENV_VALUE = 8192
+MAX_COMMAND_ARGS = 64
+MAX_STDIN_LINES = 16
+MAX_STDIN_BYTES = 4 * 1024 * 1024
 
 
 class RuntimeErrorSafe(RuntimeError):
@@ -38,7 +48,6 @@ class VerifiedImage:
     immutable_ref: str
     labels: dict[str, str]
 
-    # Keep read-only mapping-style access for callers that only need OCI labels.
     def get(self, key: str, default: Any = None) -> Any:
         return self.labels.get(key, default)
 
@@ -79,6 +88,39 @@ class ContainerRuntime:
         if not isinstance(spec, str) or not TMPFS_SPEC_RE.fullmatch(spec):
             raise RuntimeErrorSafe("invalid extra tmpfs specification")
 
+    @staticmethod
+    def _validate_arg_list(
+        values: list[str], *, field: str, max_items: int
+    ) -> None:
+        if not isinstance(values, list) or len(values) > max_items:
+            raise RuntimeErrorSafe(f"{field} exceeds bounded argument count")
+        for item in values:
+            if (
+                not isinstance(item, str)
+                or "\x00" in item
+                or len(item.encode("utf-8", "replace")) > MAX_RUNTIME_ARG_LENGTH
+            ):
+                raise RuntimeErrorSafe(f"invalid {field} argument")
+
+    @staticmethod
+    def _validate_mount(host: Path, target: str, mode: str) -> Path:
+        if mode not in {"ro", "rw"}:
+            raise RuntimeErrorSafe("volume mode must be ro or rw")
+        source = Path(host)
+        if not source.is_absolute() or not source.exists() or source.is_symlink():
+            raise RuntimeErrorSafe("container mount source must be an existing absolute non-symlink path")
+        resolved = source.resolve()
+        if resolved != source:
+            raise RuntimeErrorSafe("container mount source must already be canonical")
+        source_text = str(source)
+        if any(ch in source_text for ch in (":", "\x00", "\n", "\r")):
+            raise RuntimeErrorSafe("container mount source contains unsupported delimiter characters")
+        if not isinstance(target, str) or not MOUNT_TARGET_RE.fullmatch(target):
+            raise RuntimeErrorSafe("invalid container mount target")
+        if "//" in target or any(part in {".", ".."} for part in Path(target).parts):
+            raise RuntimeErrorSafe("container mount target must be canonical")
+        return resolved
+
     def _tail(self, handle, limit: int = MAX_LOG_BYTES) -> str:
         handle.flush()
         size = handle.tell()
@@ -86,10 +128,9 @@ class ContainerRuntime:
         return handle.read(limit).decode("utf-8", "replace")
 
     def run_host(self, argv: list[str], *, timeout: int) -> RunResult:
-        if not argv or any(
-            not isinstance(item, str) or "\x00" in item for item in argv
-        ):
-            raise RuntimeErrorSafe("invalid container-runtime argv")
+        self._validate_arg_list(argv, field="container-runtime argv", max_items=MAX_RUNTIME_ARGV)
+        if not argv:
+            raise RuntimeErrorSafe("container-runtime argv must not be empty")
         with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
             try:
                 proc = subprocess.run(
@@ -181,10 +222,9 @@ class ContainerRuntime:
         )
 
     def volume(self, host: Path, target: str, mode: str) -> str:
-        if mode not in {"ro", "rw"}:
-            raise RuntimeErrorSafe("volume mode must be ro or rw")
+        source = self._validate_mount(host, target, mode)
         suffix = f"{mode},z" if self.runtime == "podman" else mode
-        return f"--volume={host}:{target}:{suffix}"
+        return f"--volume={source}:{target}:{suffix}"
 
     def locked_args(self, policy: SandboxPolicy) -> list[str]:
         self.validate_policy(policy)
@@ -219,19 +259,35 @@ class ContainerRuntime:
         stdin_lines: list[dict[str, Any]] | None = None,
     ) -> RunResult:
         self._validate_image(image)
+        self._validate_arg_list(command, field="worker command", max_items=MAX_COMMAND_ARGS)
+        if not isinstance(mounts, list) or len(mounts) > MAX_MOUNTS:
+            raise RuntimeErrorSafe("container mounts exceed bounded count")
+        if env is not None and (not isinstance(env, dict) or len(env) > MAX_ENV_VARS):
+            raise RuntimeErrorSafe("container environment exceeds bounded count")
+        if stdin_lines is not None and (
+            not isinstance(stdin_lines, list) or len(stdin_lines) > MAX_STDIN_LINES
+        ):
+            raise RuntimeErrorSafe("container stdin messages exceed bounded count")
+
         args = self.locked_args(policy)
         if stdin_lines is not None:
-            # MCP-over-stdio workers need container STDIN kept open.
             args.append("--interactive")
         for spec in tmpfs or []:
             self.validate_tmpfs_spec(spec)
             args.append(f"--tmpfs={spec}")
-        for host, target, mode in mounts:
-            if not Path(host).is_absolute() or not target.startswith("/"):
-                raise RuntimeErrorSafe("container mounts require absolute paths")
+        for item in mounts:
+            if not isinstance(item, tuple) or len(item) != 3:
+                raise RuntimeErrorSafe("invalid container mount descriptor")
+            host, target, mode = item
             args.append(self.volume(Path(host), target, mode))
         for key, value in (env or {}).items():
-            if not re.fullmatch(r"[A-Z0-9_]{1,128}", key) or "\x00" in value:
+            if (
+                not isinstance(key, str)
+                or not ENV_KEY_RE.fullmatch(key)
+                or not isinstance(value, str)
+                or "\x00" in value
+                or len(value.encode("utf-8", "replace")) > MAX_ENV_VALUE
+            ):
                 raise RuntimeErrorSafe("invalid container environment")
             args.append(f"--env={key}={value}")
         args.append(image)
@@ -240,18 +296,25 @@ class ContainerRuntime:
         if stdin_lines is None:
             return self.run_host(args, timeout=timeout)
 
+        encoded_lines: list[bytes] = []
+        total_stdin = 0
+        for item in stdin_lines:
+            if not isinstance(item, dict):
+                raise RuntimeErrorSafe("container stdin messages must be JSON objects")
+            try:
+                encoded = (
+                    json.dumps(item, ensure_ascii=False, separators=(",", ":")) + "\n"
+                ).encode("utf-8")
+            except (TypeError, ValueError) as exc:
+                raise RuntimeErrorSafe("container stdin message is not JSON serializable") from exc
+            total_stdin += len(encoded)
+            if total_stdin > MAX_STDIN_BYTES:
+                raise RuntimeErrorSafe("container stdin exceeds bounded byte budget")
+            encoded_lines.append(encoded)
+
         with tempfile.TemporaryFile() as stdin, tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
-            for item in stdin_lines:
-                stdin.write(
-                    (
-                        json.dumps(
-                            item,
-                            ensure_ascii=False,
-                            separators=(",", ":"),
-                        )
-                        + "\n"
-                    ).encode("utf-8")
-                )
+            for encoded in encoded_lines:
+                stdin.write(encoded)
             stdin.seek(0)
             try:
                 proc = subprocess.run(
