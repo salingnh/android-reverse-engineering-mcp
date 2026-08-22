@@ -11,6 +11,7 @@ from typing import Any
 from .contracts import SandboxPolicy
 
 IMAGE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{1,255}:[A-Za-z0-9_.-]{1,128}$")
+IMAGE_ID_RE = re.compile(r"^(?:sha256:)?([0-9a-f]{64})$")
 MEMORY_RE = re.compile(r"^[1-9][0-9]*[kKmMgG]?$|^0\.[0-9]*[1-9][0-9]*[kKmMgG]$")
 CPU_RE = re.compile(r"^(?:[1-9][0-9]*(?:\.[0-9]+)?|0\.[0-9]*[1-9][0-9]*)$")
 TMPFS_SPEC_RE = re.compile(
@@ -29,6 +30,17 @@ class RunResult:
     timed_out: bool
     stdout: str
     stderr: str
+
+
+@dataclass(frozen=True)
+class VerifiedImage:
+    requested_ref: str
+    immutable_ref: str
+    labels: dict[str, str]
+
+    # Keep read-only mapping-style access for callers that only need OCI labels.
+    def get(self, key: str, default: Any = None) -> Any:
+        return self.labels.get(key, default)
 
 
 class ContainerRuntime:
@@ -128,9 +140,17 @@ class ContainerRuntime:
             labels = image_info.get("Labels")
         return {str(k): str(v) for k, v in (labels or {}).items()}
 
+    @staticmethod
+    def immutable_image_ref(image_info: dict[str, Any]) -> str:
+        raw = str(image_info.get("Id") or image_info.get("ID") or "").strip().lower()
+        match = IMAGE_ID_RE.fullmatch(raw)
+        if match is None:
+            raise RuntimeErrorSafe("container runtime did not return a canonical image ID")
+        return f"sha256:{match.group(1)}"
+
     def ensure_image(
         self, image: str, *, required_labels: dict[str, str]
-    ) -> dict[str, str]:
+    ) -> VerifiedImage:
         self._validate_image(image)
         info = self.image_info(image)
         if info is None:
@@ -154,7 +174,11 @@ class ContainerRuntime:
                     f"capability image provenance mismatch for {key}: "
                     f"expected={expected!r} actual={labels.get(key)!r}"
                 )
-        return labels
+        return VerifiedImage(
+            requested_ref=image,
+            immutable_ref=self.immutable_image_ref(info),
+            labels=labels,
+        )
 
     def volume(self, host: Path, target: str, mode: str) -> str:
         if mode not in {"ro", "rw"}:
