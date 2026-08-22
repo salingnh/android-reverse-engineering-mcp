@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from .contracts import CapabilityManifest
-from .runtime import ContainerRuntime
+from .runtime import ContainerRuntime, VerifiedImage
 
 PROTOCOL_VERSION = "2025-06-18"
 MAX_MCP_RESPONSE_BYTES = 2 * 1024 * 1024
@@ -42,6 +42,7 @@ class McpContainerWorker:
         self.data_dir = data_dir.resolve()
         self.version = version
         self._tools: list[dict[str, Any]] | None = None
+        self._verified: VerifiedImage | None = None
 
     def required_labels(self) -> dict[str, str]:
         return {
@@ -51,11 +52,15 @@ class McpContainerWorker:
             "io.safe-reverser.worker.abi": str(self.manifest.worker_abi),
         }
 
-    def ensure_ready(self) -> dict[str, str]:
-        return self.runtime.ensure_image(self.image, required_labels=self.required_labels())
+    def ensure_ready(self) -> VerifiedImage:
+        if self._verified is None:
+            self._verified = self.runtime.ensure_image(
+                self.image, required_labels=self.required_labels()
+            )
+        return self._verified
 
     def _exchange(self, request: dict[str, Any], *, timeout: int) -> dict[str, Any]:
-        self.ensure_ready()
+        verified = self.ensure_ready()
         init_id = 9000001
         request_id = request.get("id")
         lines = [
@@ -76,7 +81,7 @@ class McpContainerWorker:
             request,
         ]
         run = self.runtime.run_container(
-            image=self.image,
+            image=verified.immutable_ref,
             policy=self.manifest.sandbox,
             mounts=[
                 (self.project_dir, "/workspace", "ro"),
@@ -87,6 +92,7 @@ class McpContainerWorker:
             env={
                 "SAFE_REVERSER_PLUGIN_VERSION": self.version,
                 "SAFE_REVERSER_IMAGE_REF": self.image,
+                "SAFE_REVERSER_IMAGE_ID": verified.immutable_ref,
             },
             stdin_lines=lines,
         )
@@ -178,7 +184,9 @@ class McpContainerWorker:
             ]
         return list(self._tools)
 
-    def _call_tool(self, name: str, arguments: dict[str, Any], *, timeout: int) -> dict[str, Any]:
+    def _call_tool(
+        self, name: str, arguments: dict[str, Any], *, timeout: int
+    ) -> dict[str, Any]:
         result = self._exchange(
             {
                 "jsonrpc": "2.0",
@@ -190,7 +198,9 @@ class McpContainerWorker:
         )
         return self._decode_tool_result(result)
 
-    def call(self, name: str, arguments: dict[str, Any], *, timeout: int = 3600) -> dict[str, Any]:
+    def call(
+        self, name: str, arguments: dict[str, Any], *, timeout: int = 3600
+    ) -> dict[str, Any]:
         if name not in self.manifest.operations:
             raise WorkerProtocolError(
                 f"operation is not declared by {self.manifest.capability_id}: {name}"
