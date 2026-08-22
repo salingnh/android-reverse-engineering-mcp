@@ -5,10 +5,11 @@ from pathlib import Path
 from typing import Any
 
 from .contracts import CapabilityManifest
-from .runtime import ContainerRuntime, RuntimeErrorSafe
+from .runtime import ContainerRuntime
 
 PROTOCOL_VERSION = "2025-06-18"
 MAX_MCP_RESPONSE_BYTES = 2 * 1024 * 1024
+INTERNAL_MCP_OPERATIONS = frozenset({"health"})
 
 
 class WorkerProtocolError(RuntimeError):
@@ -65,7 +66,10 @@ class McpContainerWorker:
                 "params": {
                     "protocolVersion": PROTOCOL_VERSION,
                     "capabilities": {},
-                    "clientInfo": {"name": "safe-reverser-control-plane", "version": self.version},
+                    "clientInfo": {
+                        "name": "safe-reverser-control-plane",
+                        "version": self.version,
+                    },
                 },
             },
             {"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}},
@@ -87,13 +91,13 @@ class McpContainerWorker:
             stdin_lines=lines,
         )
         if run.timed_out:
-            raise WorkerProtocolError("static capability worker timed out")
+            raise WorkerProtocolError("capability worker timed out")
         if run.exit_code != 0:
             detail = (run.stderr or run.stdout or "worker exited non-zero")[-4000:]
             raise WorkerProtocolError(detail)
         encoded = run.stdout.encode("utf-8", "replace")
         if len(encoded) > MAX_MCP_RESPONSE_BYTES:
-            raise WorkerProtocolError("static capability response exceeds control-plane budget")
+            raise WorkerProtocolError("capability response exceeds control-plane budget")
         responses: list[dict[str, Any]] = []
         for raw in run.stdout.splitlines():
             raw = raw.strip()
@@ -107,37 +111,74 @@ class McpContainerWorker:
                 responses.append(value)
         match = next((item for item in responses if item.get("id") == request_id), None)
         if match is None:
-            raise WorkerProtocolError("static capability returned no matching MCP response")
+            raise WorkerProtocolError("capability returned no matching MCP response")
         if "error" in match:
             raise WorkerProtocolError(str(match["error"]))
         result = match.get("result")
         if not isinstance(result, dict):
-            raise WorkerProtocolError("static capability returned invalid MCP result")
+            raise WorkerProtocolError("capability returned invalid MCP result")
         return result
+
+    @staticmethod
+    def _decode_tool_result(result: dict[str, Any]) -> dict[str, Any]:
+        if result.get("isError"):
+            content = result.get("content")
+            detail = (
+                content[0].get("text")
+                if isinstance(content, list)
+                and content
+                and isinstance(content[0], dict)
+                else "worker tool failed"
+            )
+            raise WorkerProtocolError(str(detail))
+        content = result.get("content")
+        if not isinstance(content, list) or not content or not isinstance(content[0], dict):
+            raise WorkerProtocolError("capability returned invalid tool content")
+        text = content[0].get("text")
+        if not isinstance(text, str):
+            raise WorkerProtocolError("capability tool content is not text")
+        try:
+            payload = json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise WorkerProtocolError("capability tool content is not JSON") from exc
+        if not isinstance(payload, dict):
+            raise WorkerProtocolError("capability tool payload must be an object")
+        return payload
 
     def tools(self) -> list[dict[str, Any]]:
         if self._tools is None:
             result = self._exchange(
-                {"jsonrpc": "2.0", "id": 9000002, "method": "tools/list", "params": {}},
+                {
+                    "jsonrpc": "2.0",
+                    "id": 9000002,
+                    "method": "tools/list",
+                    "params": {},
+                },
                 timeout=180,
             )
             tools = result.get("tools")
             if not isinstance(tools, list) or any(not isinstance(item, dict) for item in tools):
-                raise WorkerProtocolError("static capability returned invalid tool list")
+                raise WorkerProtocolError("capability returned invalid tool list")
             declared = set(self.manifest.operations)
             actual = {str(item.get("name") or "") for item in tools}
-            if actual != declared:
-                missing = sorted(declared - actual)
-                extra = sorted(actual - declared)
+            missing_internal = INTERNAL_MCP_OPERATIONS - actual
+            public_actual = actual - INTERNAL_MCP_OPERATIONS
+            if missing_internal or public_actual != declared:
+                missing = sorted(declared - public_actual)
+                extra = sorted(public_actual - declared)
                 raise WorkerProtocolError(
-                    f"static capability manifest/tool drift: missing={missing} extra={extra}"
+                    "capability manifest/tool drift: "
+                    f"missing={missing} extra={extra} "
+                    f"missing_internal={sorted(missing_internal)}"
                 )
-            self._tools = tools
+            self._tools = [
+                item
+                for item in tools
+                if str(item.get("name") or "") not in INTERNAL_MCP_OPERATIONS
+            ]
         return list(self._tools)
 
-    def call(self, name: str, arguments: dict[str, Any], *, timeout: int = 3600) -> dict[str, Any]:
-        if name not in self.manifest.operations:
-            raise WorkerProtocolError(f"operation is not declared by {self.manifest.capability_id}: {name}")
+    def _call_tool(self, name: str, arguments: dict[str, Any], *, timeout: int) -> dict[str, Any]:
         result = self._exchange(
             {
                 "jsonrpc": "2.0",
@@ -147,20 +188,18 @@ class McpContainerWorker:
             },
             timeout=timeout,
         )
-        if result.get("isError"):
-            content = result.get("content")
-            detail = content[0].get("text") if isinstance(content, list) and content and isinstance(content[0], dict) else "static worker tool failed"
-            raise WorkerProtocolError(str(detail))
-        content = result.get("content")
-        if not isinstance(content, list) or not content or not isinstance(content[0], dict):
-            raise WorkerProtocolError("static capability returned invalid tool content")
-        text = content[0].get("text")
-        if not isinstance(text, str):
-            raise WorkerProtocolError("static capability tool content is not text")
-        try:
-            payload = json.loads(text)
-        except json.JSONDecodeError as exc:
-            raise WorkerProtocolError("static capability tool content is not JSON") from exc
-        if not isinstance(payload, dict):
-            raise WorkerProtocolError("static capability tool payload must be an object")
-        return payload
+        return self._decode_tool_result(result)
+
+    def call(self, name: str, arguments: dict[str, Any], *, timeout: int = 3600) -> dict[str, Any]:
+        if name not in self.manifest.operations:
+            raise WorkerProtocolError(
+                f"operation is not declared by {self.manifest.capability_id}: {name}"
+            )
+        return self._call_tool(name, arguments, timeout=timeout)
+
+    def call_internal(
+        self, name: str, arguments: dict[str, Any], *, timeout: int = 180
+    ) -> dict[str, Any]:
+        if name not in INTERNAL_MCP_OPERATIONS:
+            raise WorkerProtocolError(f"unsupported internal worker operation: {name}")
+        return self._call_tool(name, arguments, timeout=timeout)
