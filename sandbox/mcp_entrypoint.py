@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Release-aware entrypoint for the Safe Android Reverser MCP server."""
+"""Release-aware entrypoint for the isolated static-core capability worker."""
 from __future__ import annotations
 
 import os
@@ -47,26 +47,12 @@ def health(args: dict[str, Any]) -> dict[str, Any]:
         "build_commit": os.environ.get("SAFE_REVERSER_BUILD_COMMIT") or None,
         "version_consistent": len(set(versions)) == 1,
     }
-
-    # The Dart AOT backend intentionally lives in a second MCP trust boundary.
-    # Static-core advertises its availability without pretending the analyzer is
-    # embedded in this container or exposing a container-runtime socket here.
-    flutter = result.setdefault("framework_analysis", {}).setdefault("flutter", {})
-    flutter.update(
-        {
-            "status": "available",
-            "artifact_inspection": True,
-            "runtime_marker_scan": True,
-            "asset_inventory": True,
-            "dart_aot_index": True,
-            "dart_xrefs": True,
-            "dart_to_native_map": True,
-            "network_model": True,
-            "capability_server": "safe-android-reverser-flutter",
-            "execution_boundary": "separate-host-controlled-framework-static",
-            "runtime_socket_mounted_into_static_sandbox": False,
-        }
-    )
+    result["capability_worker"] = {
+        "id": "static-core",
+        "capability_api": 1,
+        "worker_abi": 1,
+        "runtime_readiness_authority": "host-control-plane",
+    }
     return result
 
 
