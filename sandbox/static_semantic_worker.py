@@ -391,7 +391,7 @@ core.TOOLS.extend(
                         "maximum": 500000,
                         "default": 250000,
                     },
-                    "force": {"type": "boolean", "default": false},
+                    "force": {"type": "boolean", "default": False},
                     "timeout_seconds": {
                         "type": "integer",
                         "minimum": 1,
