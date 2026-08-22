@@ -7,6 +7,8 @@ import json
 import re
 
 CACHE_SCHEMA_VERSION = 2
+CAPABILITY_API_VERSION = 1
+WORKER_ABI_VERSION = 1
 DART_VERSION_RE = re.compile(
     r"^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][A-Za-z0-9._-]{1,24})?$"
 )
@@ -76,6 +78,8 @@ def runtime_cache_tag(
         **identity,
         "compressed_pointers": bool(compressed_pointers),
         "cache_schema": CACHE_SCHEMA_VERSION,
+        "capability_api": CAPABILITY_API_VERSION,
+        "worker_abi": WORKER_ABI_VERSION,
     }
     digest = hashlib.sha256(
         json.dumps(
