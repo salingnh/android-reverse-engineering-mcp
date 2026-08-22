@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from .contracts import CapabilityManifest, ContractError
-from .flutter import FlutterCapability
+from .flutter import RUNTIME_CACHE_SCHEMA, FlutterCapability
 from .paths import PathPolicyError, ensure_private_child
 from .registry import CapabilityRegistry
 from .runtime import ContainerRuntime, RuntimeErrorSafe
@@ -58,6 +58,31 @@ class McpWorkerAdapter:
 
     def call(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
         return self.worker.call(name, args)
+
+
+class FlutterAotAdapter:
+    """Control-plane adapter around the Flutter domain capability."""
+
+    def __init__(self, capability: FlutterCapability) -> None:
+        self.capability = capability
+        self.manifest = capability.manifest
+
+    def status(self) -> dict[str, Any]:
+        return self.capability.status()
+
+    def diagnostics(self) -> dict[str, Any]:
+        return {
+            "domain": "flutter-dart-aot",
+            "runtime_cache_schema": RUNTIME_CACHE_SCHEMA,
+            "job_store": "analysis-job-store-v1",
+            "registry_selection_owned_by_worker": False,
+        }
+
+    def tools(self) -> list[dict[str, Any]]:
+        return self.capability.tools()
+
+    def call(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
+        return self.capability.call(name, args)
 
 
 def _env_suffix(capability_id: str) -> str:
@@ -137,7 +162,7 @@ def build_capability_adapters(
             )
             adapter: CapabilityAdapter = McpWorkerAdapter(worker)
         elif manifest.adapter == "flutter-aot":
-            adapter = FlutterCapability(
+            capability = FlutterCapability(
                 runtime,
                 manifest,
                 version=version,
@@ -148,7 +173,8 @@ def build_capability_adapters(
                 ).strip(),
             )
             if override:
-                adapter.base_image = override
+                capability.base_image = override
+            adapter = FlutterAotAdapter(capability)
         else:
             raise ContractError(
                 f"capability {capability_id!r} requests unsupported adapter {manifest.adapter!r}"
