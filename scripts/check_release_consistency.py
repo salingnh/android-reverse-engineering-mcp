@@ -16,6 +16,7 @@ CAPABILITY_API = 1
 WORKER_ABI = 1
 EVIDENCE_ENVELOPE = 1
 FLUTTER_CACHE_SCHEMA = 2
+RESERVED_PUBLIC_OPERATIONS = {"health", "list_capabilities"}
 
 
 def fail(message: str) -> None:
@@ -127,6 +128,9 @@ for capability_id, expected in expected_capabilities.items():
     operations = manifest.get("operations")
     if not isinstance(operations, list) or not operations:
         fail(f"capability operations missing in {path.name}")
+    reserved = RESERVED_PUBLIC_OPERATIONS.intersection(operations)
+    if reserved:
+        fail(f"capability owns reserved public operations in {path.name}: {sorted(reserved)}")
     overlap = seen_operations.intersection(operations)
     if overlap:
         fail(f"public operation ownership collides: {sorted(overlap)}")
@@ -205,9 +209,11 @@ control_workflow = (
 ).read_text(encoding="utf-8")
 for fragment in (
     "test_platform_architecture.py",
+    "test_public_operation_contract.py",
     "test_cross_worker_contracts.py",
     "SAFE_REVERSER_CAPABILITY_IMAGE_STATIC_CORE",
     "SAFE_REVERSER_CAPABILITY_IMAGE_FRAMEWORK_FLUTTER",
+    "capabilities']['diagnostics']",
 ):
     if fragment not in control_workflow:
         fail(f"control-plane CI is missing contract gate: {fragment}")
