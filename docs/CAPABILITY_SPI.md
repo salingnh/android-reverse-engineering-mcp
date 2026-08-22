@@ -81,7 +81,7 @@ Representative manifest:
 }
 ```
 
-Unknown or missing manifest fields are rejected. Contract booleans/integers are type-checked strictly instead of being truthiness/coercion parsed. Operation ownership is unique across all declared capabilities.
+Unknown or missing manifest fields are rejected. Contract booleans, integers, strings, and string arrays are type-checked strictly instead of being truthiness/coercion parsed. Operation ownership is unique across all declared capabilities.
 
 ## Activation contract
 
@@ -147,9 +147,11 @@ list_capabilities
 
 `health` therefore has exactly one agent-facing meaning: platform/control-plane health.
 
-Worker ABI v1 separately requires MCP-over-stdio workers to expose an **internal** `health` tool for diagnostics. The generic MCP adapter validates that this internal tool exists, removes it from the public capability tool surface, and exposes its result through the adapter `diagnostics()` contract. CLI/domain-specific adapters implement the same `diagnostics()` adapter method without claiming a public `health` operation.
+Worker ABI v1 separately requires MCP-over-stdio workers to expose an **internal** `health` tool for diagnostics. The generic MCP adapter validates that this internal tool exists, removes it from the public capability tool surface, and exposes its result through the adapter `diagnostics()` contract.
 
-A capability is `ready` only when its image identity is compatible and its worker surface satisfies the declared public operations plus the required internal Worker ABI diagnostics. Image existence alone is not sufficient for `ready`.
+CLI/domain-specific adapters must provide an equivalent bounded health/protocol probe through the same adapter contract. The Flutter adapter runs the worker's isolated `health` command and verifies the offline/no-build/no-registry-ownership invariants before claiming readiness.
+
+A capability is `ready` only when its image identity is compatible and its worker surface satisfies the declared public operations plus required Worker ABI diagnostics. Image existence alone is not sufficient for `ready`.
 
 Control-plane health aggregates diagnostics generically under:
 
@@ -166,6 +168,7 @@ The Runtime Driver owns:
 - Docker/Podman selection;
 - image inspect/pull;
 - OCI label verification;
+- immutable image-ID resolution;
 - UID/GID mapping;
 - network policy enforcement;
 - read-only root;
@@ -219,7 +222,7 @@ bounded memory / CPU / PIDs / tmpfs
 
 No worker receives a Docker/Podman socket.
 
-## Image identity
+## Image identity and immutable execution
 
 A normal capability image must publish at least:
 
@@ -230,7 +233,27 @@ io.safe-reverser.capability.api
 io.safe-reverser.worker.abi
 ```
 
-The control plane verifies these labels before execution.
+The Runtime Driver resolves the requested image reference, verifies the required OCI labels, reads the runtime's canonical image ID, normalizes it to:
+
+```text
+sha256:<64-hex-image-id>
+```
+
+and executes **that verified immutable image ID**, not the mutable tag that was inspected. This closes the inspect-tag/run-tag time-of-check/time-of-use gap.
+
+The two identities have different roles:
+
+```text
+requested image ref
+  provisioning, pull policy, configuration and audit context
+
+verified image ID
+  actual container execution identity
+```
+
+Readiness exposes both `image` and `image_id`. Persistent Flutter analysis metadata records both `runtime_image` and `runtime_image_id` for the exact runtime-cache worker.
+
+A long-lived control-plane process keeps the verified image ID for its worker instance. Updating a tag does not silently switch an already-running control plane to new code; normal upgrade/restart re-resolves and re-verifies the image.
 
 Image repository policy belongs to the host control plane. Workers return analyzer/runtime identity, not deployment repository choices.
 
@@ -258,7 +281,7 @@ compressed-pointers mode
 Blutter commit
 ```
 
-The host maps the cache tag to the configured repository and verifies all relevant OCI provenance labels before running the image.
+The host maps the cache tag to the configured repository, verifies all relevant OCI provenance labels, resolves its immutable image ID, and executes the image ID rather than the tag.
 
 The analyzer sandbox never clones/builds/downloads a missing Dart runtime.
 
@@ -344,7 +367,7 @@ primary_capability_id = framework-flutter
 primary_profile_status = declared
 ```
 
-The host control plane then enriches it with runtime state:
+The host control plane then enriches any result containing the shared `analysis_route` shape with current runtime state. Enrichment is result-driven rather than hard-coded to specific operation names.
 
 ```text
 primary_capability_state = ready | degraded | unavailable | declared | unsupported
@@ -371,6 +394,7 @@ It must not require:
 - another host path security implementation;
 - another evidence-state model;
 - another public `health` implementation;
+- operation-name-specific dispatch branches for shared route enrichment;
 - changes to agent-facing orchestration topology.
 
 ## Compatibility rules
@@ -385,6 +409,7 @@ The following are platform-level changes and require explicit review:
 - path/job security invariant change;
 - operation ownership conflict;
 - internal diagnostics ABI change;
+- verified-image execution identity change;
 - runtime-cache identity change that could reuse an incompatible image.
 
 A private analyzer parser/index may evolve without changing Capability API when its externally observable contract remains compatible.
