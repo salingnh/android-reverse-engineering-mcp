@@ -28,32 +28,39 @@ class ControlPlane:
         self.version = (self.plugin_root / "VERSION").read_text(encoding="utf-8").strip()
         if not self.version or len(self.version) > 64:
             raise ControlPlaneError("plugin VERSION is invalid")
-        self.project_dir = Path(os.environ.get("SAFE_REVERSER_PROJECT_DIR", os.getcwd())).resolve()
-        self.data_dir = Path(
+
+        raw_project = Path(os.environ.get("SAFE_REVERSER_PROJECT_DIR", os.getcwd()))
+        self.project_dir = raw_project.resolve()
+        if not self.project_dir.is_dir():
+            raise ControlPlaneError("project directory does not exist")
+
+        raw_data = Path(
             os.environ.get(
                 "SAFE_REVERSER_DATA_DIR",
                 str(Path.home() / ".local/share/safe-android-reverser"),
             )
-        ).resolve()
-        if not self.project_dir.is_dir():
-            raise ControlPlaneError("project directory does not exist")
-        self.data_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-        if self.data_dir.is_symlink() or not self.data_dir.is_dir():
+        )
+        if raw_data.is_symlink():
+            raise ControlPlaneError("plugin data directory must not be a symlink")
+        raw_data.mkdir(parents=True, exist_ok=True, mode=0o700)
+        if raw_data.is_symlink() or not raw_data.is_dir():
             raise ControlPlaneError("plugin data directory must be a regular directory")
+        self.data_dir = raw_data.resolve()
         if not os.access(self.data_dir, os.W_OK):
             raise ControlPlaneError("plugin data directory is not writable")
 
         runtime_name = str(os.environ.get("SAFE_REVERSER_RUNTIME", "")).strip()
         if runtime_name not in {"docker", "podman"}:
-            raise ControlPlaneError("SAFE_REVERSER_RUNTIME must be resolved to docker or podman by the launcher")
+            raise ControlPlaneError(
+                "SAFE_REVERSER_RUNTIME must be resolved to docker or podman by the launcher"
+            )
         if shutil.which(runtime_name) is None:
             raise ControlPlaneError(f"container runtime not found: {runtime_name}")
-        auto_pull = os.environ.get("SAFE_REVERSER_AUTO_PULL", "1") == "1"
         self.runtime = ContainerRuntime(
             runtime_name,
             host_uid=os.getuid(),
             host_gid=os.getgid(),
-            auto_pull=auto_pull,
+            auto_pull=os.environ.get("SAFE_REVERSER_AUTO_PULL", "1") == "1",
         )
         self.registry = CapabilityRegistry(self.plugin_root / "capabilities")
 
@@ -68,6 +75,8 @@ class ControlPlane:
         if static_data.is_symlink():
             raise ControlPlaneError("static-core data directory must not be a symlink")
         static_data.mkdir(mode=0o700, exist_ok=True)
+        if static_data.resolve().parent != self.data_dir:
+            raise ControlPlaneError("static-core data directory escapes plugin data root")
         self.static = McpContainerWorker(
             self.runtime,
             static_manifest,
@@ -78,20 +87,19 @@ class ControlPlane:
         )
 
         flutter_manifest = self.registry.get("framework-flutter")
-        output_tmpfs = str(os.environ.get("SAFE_REVERSER_FLUTTER_OUTPUT_TMPFS", "4g")).strip()
         self.flutter = FlutterCapability(
             self.runtime,
             flutter_manifest,
             version=self.version,
             project_dir=self.project_dir,
             data_dir=self.data_dir,
-            output_tmpfs=output_tmpfs,
+            output_tmpfs=str(
+                os.environ.get("SAFE_REVERSER_FLUTTER_OUTPUT_TMPFS", "4g")
+            ).strip(),
         )
         override = os.environ.get("SAFE_REVERSER_FLUTTER_IMAGE")
         if override:
             self.flutter.base_image = str(override).strip()
-
-        self._static_tools: list[dict[str, Any]] | None = None
 
     def _capability_states(self) -> dict[str, Any]:
         states: dict[str, Any] = {}
@@ -112,25 +120,55 @@ class ControlPlane:
         states["framework-flutter"] = self.flutter.status()
         return states
 
+    def _enrich_route(self, payload: dict[str, Any]) -> dict[str, Any]:
+        route = payload.get("analysis_route")
+        if not isinstance(route, dict):
+            return payload
+        states = self._capability_states()
+        capability_id = str(route.get("primary_capability_id") or "")
+        state = states.get(capability_id)
+        route["primary_capability_state"] = (
+            state.get("state") if isinstance(state, dict) else "unsupported"
+        )
+        route["primary_capability_runtime"] = state if isinstance(state, dict) else None
+        secondaries = route.get("secondary_profiles")
+        if isinstance(secondaries, list):
+            for item in secondaries:
+                if not isinstance(item, dict):
+                    continue
+                secondary_id = str(item.get("capability_id") or "")
+                runtime_state = states.get(secondary_id)
+                if isinstance(runtime_state, dict):
+                    item["capability_state"] = runtime_state.get("state")
+        return payload
+
     def tools(self) -> list[dict[str, Any]]:
         tools: list[dict[str, Any]] = [
             {
                 "name": "health",
-                "description": "Check the Safe Reverser host control plane and discover actual capability readiness across isolated workers.",
-                "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+                "description": "Check the Safe Reverser host control plane and discover actual readiness across isolated capability workers.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": False,
+                },
             },
             {
                 "name": "list_capabilities",
-                "description": "Return the manifest-driven capability registry and current runtime readiness states.",
-                "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+                "description": "Return the manifest-driven Capability SPI registry and current runtime readiness states.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": False,
+                },
             },
         ]
         try:
-            static_tools = self.static.tools()
-            self._static_tools = static_tools
-            tools.extend(item for item in static_tools if item.get("name") != "health")
+            tools.extend(
+                item for item in self.static.tools() if item.get("name") != "health"
+            )
         except (RuntimeErrorSafe, WorkerProtocolError):
-            # health/list_capabilities remain available so setup failure is explicit.
+            # Keep control-plane diagnostics available even when static-core is not installed.
             pass
         tools.extend(self.flutter.tools())
         names = [str(item.get("name") or "") for item in tools]
@@ -140,7 +178,8 @@ class ControlPlane:
 
     def health(self) -> dict[str, Any]:
         states = self._capability_states()
-        overall = "ok" if states.get("static-core", {}).get("state") == "ready" else "degraded"
+        required_states = [states.get("static-core", {}), states.get("framework-flutter", {})]
+        overall = "ok" if all(item.get("state") == "ready" for item in required_states) else "degraded"
         static_health: dict[str, Any] | None = None
         if states.get("static-core", {}).get("state") == "ready":
             try:
@@ -188,7 +227,10 @@ class ControlPlane:
         if name in self.registry.get("framework-flutter").operations:
             return self.flutter.call(name, arguments)
         if name in self.registry.get("static-core").operations:
-            return self.static.call(name, arguments)
+            payload = self.static.call(name, arguments)
+            if name in {"fingerprint", "route_analysis"}:
+                return self._enrich_route(payload)
+            return payload
         raise ControlPlaneError(f"unknown tool: {name}")
 
 
@@ -200,18 +242,25 @@ def _json_text(value: Any) -> str:
 
 
 def _tool_result(value: Any, *, is_error: bool = False) -> dict[str, Any]:
-    return {"content": [{"type": "text", "text": _json_text(value)}], "isError": is_error}
+    return {
+        "content": [{"type": "text", "text": _json_text(value)}],
+        "isError": is_error,
+    }
 
 
 def serve(plugin_root: Path) -> int:
     try:
         plane = ControlPlane(plugin_root)
     except (ControlPlaneError, ContractError, RuntimeErrorSafe, OSError) as exc:
-        sys.stderr.write(f"safe-android-reverser: control-plane startup failed: {exc}\n")
+        sys.stderr.write(
+            f"safe-android-reverser: control-plane startup failed: {exc}\n"
+        )
         return 2
 
     def send(payload: dict[str, Any]) -> None:
-        sys.stdout.write(json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n")
+        sys.stdout.write(
+            json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n"
+        )
         sys.stdout.flush()
 
     for line in sys.stdin:
@@ -245,7 +294,9 @@ def serve(plugin_root: Path) -> int:
                 name = str(params.get("name") or "")
                 arguments = params.get("arguments") or {}
                 if not isinstance(arguments, dict):
-                    result = _tool_result({"error": "tool arguments must be an object"}, is_error=True)
+                    result = _tool_result(
+                        {"error": "tool arguments must be an object"}, is_error=True
+                    )
                 else:
                     try:
                         result = _tool_result(plane.call(name, arguments))
@@ -255,7 +306,6 @@ def serve(plugin_root: Path) -> int:
                         FlutterCapabilityError,
                         RuntimeErrorSafe,
                         WorkerProtocolError,
-                        JobStoreError,
                         ValueError,
                         OSError,
                     ) as exc:
@@ -263,11 +313,26 @@ def serve(plugin_root: Path) -> int:
             else:
                 if request_id is None:
                     continue
-                send({"jsonrpc": "2.0", "id": request_id, "error": {"code": -32601, "message": f"method not found: {method}"}})
+                send(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": request_id,
+                        "error": {
+                            "code": -32601,
+                            "message": f"method not found: {method}",
+                        },
+                    }
+                )
                 continue
             if request_id is not None:
                 send({"jsonrpc": "2.0", "id": request_id, "result": result})
         except (json.JSONDecodeError, ValueError, TypeError) as exc:
             if request_id is not None:
-                send({"jsonrpc": "2.0", "id": request_id, "error": {"code": -32600, "message": str(exc)}})
+                send(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": request_id,
+                        "error": {"code": -32600, "message": str(exc)},
+                    }
+                )
     return 0
