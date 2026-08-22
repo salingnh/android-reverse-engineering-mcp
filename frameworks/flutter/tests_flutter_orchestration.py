@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import io
-import os
 import tempfile
 import unittest
 import zipfile
@@ -39,7 +38,6 @@ class FlutterArtifactPreparationTests(unittest.TestCase):
 
     def runtime(self):
         tag = "dart-3.5.4-arm64-cp-" + "a" * 64
-        image = "ghcr.io/salingnh/safe-android-reverser-flutter:" + tag
         return {
             "identity_status": "identified",
             "dart_version": "3.5.4",
@@ -48,7 +46,6 @@ class FlutterArtifactPreparationTests(unittest.TestCase):
             "snapshot_hash": "b" * 32,
             "compressed_pointers": True,
             "cache_tag": tag,
-            "recommended_image": image,
             "binary_cached": False,
         }
 
@@ -87,7 +84,9 @@ class FlutterArtifactPreparationTests(unittest.TestCase):
             (self.output / "input" / "libflutter.so").read_bytes(),
             b"flutter-engine",
         )
-        self.assertEqual(result["recommended_image"], self.runtime()["recommended_image"])
+        self.assertEqual(result["runtime"]["cache_tag"], self.runtime()["cache_tag"])
+        self.assertNotIn("recommended_image", result)
+        self.assertNotIn("recommended_image", result["runtime"])
 
     def test_bundle_duplicate_runtime_library_must_be_identical(self):
         first = self.apk_bytes(
@@ -178,7 +177,9 @@ class FlutterExportTests(unittest.TestCase):
             ),
             "void ping() {}\n",
         )
-        self.assertFalse(any(p.name.startswith(".safe-flutter-export-") for p in self.export.iterdir()))
+        self.assertFalse(
+            any(p.name.startswith(".safe-flutter-export-") for p in self.export.iterdir())
+        )
 
     def test_export_rejects_symlinked_analyzer_output(self):
         outside = self.output / "outside.txt"
@@ -207,7 +208,9 @@ class FlutterEntrypointOrchestrationTests(unittest.TestCase):
     def test_analyze_export_only_exports_success_or_partial_output(self):
         args = mock.Mock(output="analysis")
         fake_source = Path("/tmp/fake-analysis")
-        with mock.patch.object(entry, "_analyze_command", return_value={"status": "ok"}), mock.patch.object(
+        with mock.patch.object(
+            entry, "_analyze_command", return_value={"status": "ok"}
+        ), mock.patch.object(
             entry, "_output_dir", return_value=fake_source
         ), mock.patch.object(
             entry.exporter,
