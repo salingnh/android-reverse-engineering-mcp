@@ -24,6 +24,7 @@ VALID_STATES = {
     "unsupported",
 }
 VALID_EVIDENCE_STATES = {"observed", "derived", "hypothesized"}
+RESERVED_PUBLIC_OPERATIONS = frozenset({"health", "list_capabilities"})
 CAPABILITY_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,127}$")
 ADAPTER_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 OPERATION_RE = re.compile(r"^[a-z][a-z0-9_]{0,127}$")
@@ -34,6 +35,18 @@ REPRESENTATION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/+ -]{0,127}$")
 
 class ContractError(ValueError):
     pass
+
+
+def _strict_bool(value: Any, field: str) -> bool:
+    if type(value) is not bool:
+        raise ContractError(f"{field} must be a boolean")
+    return value
+
+
+def _strict_int(value: Any, field: str) -> int:
+    if type(value) is not int:
+        raise ContractError(f"{field} must be an integer")
+    return value
 
 
 @dataclass(frozen=True)
@@ -69,12 +82,16 @@ class SandboxPolicy:
             raise ContractError(f"unknown sandbox policy fields: {sorted(unknown)}")
         policy = cls(
             network=str(raw.get("network", "none")),
-            read_only_root=bool(raw.get("read_only_root", True)),
-            drop_all_capabilities=bool(raw.get("drop_all_capabilities", True)),
-            no_new_privileges=bool(raw.get("no_new_privileges", True)),
+            read_only_root=_strict_bool(raw.get("read_only_root", True), "read_only_root"),
+            drop_all_capabilities=_strict_bool(
+                raw.get("drop_all_capabilities", True), "drop_all_capabilities"
+            ),
+            no_new_privileges=_strict_bool(
+                raw.get("no_new_privileges", True), "no_new_privileges"
+            ),
             memory=str(raw.get("memory", "4g")),
             cpus=str(raw.get("cpus", "2")),
-            pids_limit=int(raw.get("pids_limit", 256)),
+            pids_limit=_strict_int(raw.get("pids_limit", 256), "pids_limit"),
             tmpfs_tmp=str(raw.get("tmpfs_tmp", "1g")),
             tmpfs_work=str(raw.get("tmpfs_work", "1g")),
         )
@@ -128,12 +145,28 @@ class CapabilityManifest:
         unknown = set(value) - allowed
         if unknown:
             raise ContractError(f"unknown capability manifest fields: {sorted(unknown)}")
+        required = {
+            "id",
+            "capability_api",
+            "worker_abi",
+            "representations",
+            "trust_boundary",
+            "activation",
+            "adapter",
+            "protocol",
+            "image",
+            "operations",
+            "sandbox",
+        }
+        missing = required - set(value)
+        if missing:
+            raise ContractError(f"missing capability manifest fields: {sorted(missing)}")
 
         capability_id = str(value.get("id") or "").strip()
         if not CAPABILITY_ID_RE.fullmatch(capability_id):
             raise ContractError("invalid capability id")
-        capability_api = int(value.get("capability_api", 0))
-        worker_abi = int(value.get("worker_abi", 0))
+        capability_api = _strict_int(value.get("capability_api"), "capability_api")
+        worker_abi = _strict_int(value.get("worker_abi"), "worker_abi")
         if capability_api != CAPABILITY_API_VERSION:
             raise ContractError(
                 f"unsupported capability_api={capability_api}; expected {CAPABILITY_API_VERSION}"
@@ -145,7 +178,7 @@ class CapabilityManifest:
         trust_boundary = str(value.get("trust_boundary") or "").strip()
         if trust_boundary not in VALID_TRUST_BOUNDARIES:
             raise ContractError("invalid capability trust boundary")
-        activation = str(value.get("activation") or "required").strip()
+        activation = str(value.get("activation") or "").strip()
         if activation not in VALID_ACTIVATIONS:
             raise ContractError("invalid capability activation")
         if trust_boundary == "dynamic-opt-in" and activation != "opt-in":
@@ -181,6 +214,11 @@ class CapabilityManifest:
             raise ContractError("invalid capability operation name")
         if len(set(operations)) != len(operations):
             raise ContractError("capability operations must be unique")
+        reserved = RESERVED_PUBLIC_OPERATIONS.intersection(operations)
+        if reserved:
+            raise ContractError(
+                f"capability operations are reserved by control plane: {sorted(reserved)}"
+            )
 
         sandbox = SandboxPolicy.from_dict(value.get("sandbox"))
         if trust_boundary != "dynamic-opt-in" and sandbox.network != "none":
