@@ -6,17 +6,36 @@ import importlib.util
 import json
 import os
 import re
+import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 PLUGIN_ROOT = ROOT / "plugins" / "safe-android-reverser"
 CAPABILITY_ROOT = PLUGIN_ROOT / "capabilities"
+PLUGIN_LIB = PLUGIN_ROOT / "lib"
 SEMVER_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
 CAPABILITY_API = 1
 WORKER_ABI = 1
 EVIDENCE_ENVELOPE = 1
 FLUTTER_CACHE_SCHEMA = 2
 RESERVED_PUBLIC_OPERATIONS = {"health", "list_capabilities"}
+
+# A release can require a baseline subset without making it the forever-complete
+# capability list. Additional compatible manifests are valid extensions.
+REQUIRED_BASELINE = {
+    "static-core": {
+        "activation": "required",
+        "adapter": "mcp-container",
+        "protocol": "mcp-stdio",
+        "repository": "ghcr.io/salingnh/safe-android-reverser",
+    },
+    "framework-flutter": {
+        "activation": "required",
+        "adapter": "flutter-aot",
+        "protocol": "cli-json",
+        "repository": "ghcr.io/salingnh/safe-android-reverser-flutter",
+    },
+}
 
 
 def fail(message: str) -> None:
@@ -30,6 +49,17 @@ def load_module(name: str, path: Path):
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+if str(PLUGIN_LIB) not in sys.path:
+    sys.path.insert(0, str(PLUGIN_LIB))
+
+from safe_reverser import (  # noqa: E402
+    CAPABILITY_API_VERSION,
+    EVIDENCE_ENVELOPE_VERSION,
+    WORKER_ABI_VERSION,
+)
+from safe_reverser.registry import CapabilityRegistry  # noqa: E402
 
 
 version = (PLUGIN_ROOT / "VERSION").read_text(encoding="utf-8").strip()
@@ -89,52 +119,50 @@ if " image inspect " in wrapper or '"$RUNTIME" pull' in wrapper:
 if "mkdir -p \"$DATA_DIR\"" in wrapper:
     fail("launcher must not create data root before shared path-policy validation")
 
-expected_capabilities = {
-    "static-core": {
-        "activation": "required",
-        "adapter": "mcp-container",
-        "protocol": "mcp-stdio",
-        "repository": "ghcr.io/salingnh/safe-android-reverser",
-    },
-    "framework-flutter": {
-        "activation": "required",
-        "adapter": "flutter-aot",
-        "protocol": "cli-json",
-        "repository": "ghcr.io/salingnh/safe-android-reverser-flutter",
-    },
-}
-manifest_ids = {path.stem for path in CAPABILITY_ROOT.glob("*.json")}
-if manifest_ids != set(expected_capabilities):
-    fail(
-        f"0.3 capability manifest set drift: actual={sorted(manifest_ids)} expected={sorted(expected_capabilities)}"
-    )
+# Parse every manifest through the real Capability SPI. Registry construction
+# validates schema, trust/activation/network semantics and operation collisions.
+try:
+    registry = CapabilityRegistry(CAPABILITY_ROOT)
+except Exception as exc:
+    fail(f"capability registry validation failed: {exc}")
 
-seen_operations: set[str] = set()
-for capability_id, expected in expected_capabilities.items():
-    path = CAPABILITY_ROOT / f"{capability_id}.json"
-    manifest = json.loads(path.read_text(encoding="utf-8"))
-    if manifest.get("id") != capability_id:
-        fail(f"capability manifest id drift: {path.name}")
-    if manifest.get("capability_api") != CAPABILITY_API:
-        fail(f"capability_api drift in {path.name}")
-    if manifest.get("worker_abi") != WORKER_ABI:
-        fail(f"worker_abi drift in {path.name}")
-    for field in ("activation", "adapter", "protocol"):
-        if manifest.get(field) != expected[field]:
-            fail(f"{field} drift in {path.name}")
-    image = manifest.get("image") or {}
-    if image.get("repository") != expected["repository"]:
-        fail(f"worker image repository drift in {path.name}")
-    operations = manifest.get("operations")
-    if not isinstance(operations, list) or not operations:
-        fail(f"capability operations missing in {path.name}")
-    reserved = RESERVED_PUBLIC_OPERATIONS.intersection(operations)
+manifests = registry.manifests()
+missing_baseline = set(REQUIRED_BASELINE) - set(manifests)
+if missing_baseline:
+    fail(f"required baseline capabilities are missing: {sorted(missing_baseline)}")
+
+for capability_id, manifest in manifests.items():
+    if manifest.capability_api != CAPABILITY_API:
+        fail(f"capability_api drift in {capability_id}")
+    if manifest.worker_abi != WORKER_ABI:
+        fail(f"worker_abi drift in {capability_id}")
+    reserved = RESERVED_PUBLIC_OPERATIONS.intersection(manifest.operations)
     if reserved:
-        fail(f"capability owns reserved public operations in {path.name}: {sorted(reserved)}")
-    overlap = seen_operations.intersection(operations)
-    if overlap:
-        fail(f"public operation ownership collides: {sorted(overlap)}")
-    seen_operations.update(operations)
+        fail(
+            f"capability owns reserved public operations in {capability_id}: {sorted(reserved)}"
+        )
+
+for capability_id, expected in REQUIRED_BASELINE.items():
+    manifest = manifests[capability_id]
+    for field in ("activation", "adapter", "protocol"):
+        actual = getattr(manifest, field)
+        if actual != expected[field]:
+            fail(
+                f"{field} drift in baseline capability {capability_id}: "
+                f"actual={actual!r} expected={expected[field]!r}"
+            )
+    if manifest.image_repository != expected["repository"]:
+        fail(
+            f"worker image repository drift in baseline capability {capability_id}: "
+            f"actual={manifest.image_repository!r} expected={expected['repository']!r}"
+        )
+
+if CAPABILITY_API_VERSION != CAPABILITY_API:
+    fail("host Capability API constant drift")
+if WORKER_ABI_VERSION != WORKER_ABI:
+    fail("host Worker ABI constant drift")
+if EVIDENCE_ENVELOPE_VERSION != EVIDENCE_ENVELOPE:
+    fail("host EvidenceEnvelope constant drift")
 
 init_text = (PLUGIN_ROOT / "lib" / "safe_reverser" / "__init__.py").read_text(
     encoding="utf-8"
@@ -262,6 +290,7 @@ for fragment in (
     "capabilities']['diagnostics']",
     "image_id'].startswith('sha256:')",
     "network_required_at_runtime",
+    "issubset",
 ):
     if fragment not in control_workflow:
         fail(f"control-plane CI is missing contract gate: {fragment}")
@@ -280,5 +309,6 @@ print(
     f"version={version} capability_api={CAPABILITY_API} "
     f"worker_abi={WORKER_ABI} evidence={EVIDENCE_ENVELOPE} "
     f"flutter_cache_schema={FLUTTER_CACHE_SCHEMA} "
+    f"baseline={sorted(REQUIRED_BASELINE)} manifests={sorted(manifests)} "
     "immutable_image_execution=required bounded_platform_io=required"
 )
