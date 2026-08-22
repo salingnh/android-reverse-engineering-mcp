@@ -3,19 +3,20 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any
 
-ROUTER_SCHEMA_VERSION = 1
+ROUTER_SCHEMA_VERSION = 2
 
 PROFILE_REGISTRY: dict[str, dict[str, Any]] = {
     "static-core": {
         "status": "available",
+        "capability_id": "static-core",
         "trust_boundary": "static",
         "representation": "APK/DEX/Java/Kotlin/resources",
     },
     "framework-flutter": {
-        "status": "available",
+        "status": "declared",
+        "capability_id": "framework-flutter",
         "trust_boundary": "framework-static",
         "representation": "Dart AOT/libapp.so/flutter_assets",
-        "capability_server": "safe-android-reverser-flutter",
         "available_capabilities": [
             "artifact-inventory",
             "asset-inventory",
@@ -30,36 +31,43 @@ PROFILE_REGISTRY: dict[str, dict[str, Any]] = {
     },
     "framework-react-native": {
         "status": "planned",
+        "capability_id": "framework-react-native",
         "trust_boundary": "framework-static",
         "representation": "React Native JavaScript bundle/source maps/native bridge",
     },
     "framework-hermes": {
         "status": "planned",
+        "capability_id": "framework-hermes",
         "trust_boundary": "framework-static",
         "representation": "Hermes bytecode/JavaScript bundle",
     },
     "framework-il2cpp": {
         "status": "planned",
+        "capability_id": "framework-il2cpp",
         "trust_boundary": "framework-static",
         "representation": "IL2CPP metadata/native code",
     },
     "framework-dotnet": {
         "status": "planned",
+        "capability_id": "framework-dotnet",
         "trust_boundary": "framework-static",
         "representation": ".NET managed assemblies",
     },
     "web-assets": {
         "status": "planned",
+        "capability_id": "web-assets",
         "trust_boundary": "framework-static",
         "representation": "HTML/JavaScript/web assets",
     },
     "native": {
         "status": "planned",
+        "capability_id": "native",
         "trust_boundary": "native-static",
         "representation": "ELF/JNI/native code",
     },
     "dynamic": {
         "status": "planned",
+        "capability_id": "dynamic",
         "trust_boundary": "dynamic-opt-in",
         "representation": "runtime observations",
     },
@@ -81,6 +89,7 @@ def _secondary(profile: str, purpose: str) -> dict[str, str]:
     return {
         "profile": profile,
         "status": PROFILE_REGISTRY[profile]["status"],
+        "capability_id": PROFILE_REGISTRY[profile]["capability_id"],
         "purpose": purpose,
     }
 
@@ -102,6 +111,7 @@ def _route(
         "framework_id": framework_id,
         "framework_type": framework_type,
         "primary_profile": primary_profile,
+        "primary_capability_id": primary["capability_id"],
         "primary_profile_status": primary["status"],
         "primary_representation": primary_representation,
         "secondary_profiles": secondary_profiles,
@@ -112,12 +122,12 @@ def _route(
 
 
 def route_fingerprint(fingerprint: dict[str, Any]) -> dict[str, Any]:
-    """Choose an analysis profile from bounded fingerprint evidence.
+    """Choose an analysis capability from bounded fingerprint evidence.
 
-    Framework identification and analyzer availability are deliberately separate.
-    A partial/planned framework profile remains primary instead of silently
-    falling back to JADX and pretending host-shell code contains the
-    application's business logic.
+    This router describes deterministic topology only. Runtime readiness is a
+    host control-plane concern and must be discovered separately. A declared or
+    planned framework capability remains primary instead of silently falling
+    back to JADX and pretending host-shell code contains business logic.
     """
 
     framework = fingerprint.get("framework") or {}
@@ -142,9 +152,7 @@ def route_fingerprint(fingerprint: dict[str, Any]) -> dict[str, Any]:
                 ),
             ],
             allow_java_decompile_as_primary=False,
-            limitations=[
-                "The framework-il2cpp profile is not bundled in the current static image."
-            ],
+            limitations=["The framework-il2cpp capability is planned."],
         )
 
     if normalized.startswith("flutter") or _contains_native_library(
@@ -160,8 +168,8 @@ def route_fingerprint(fingerprint: dict[str, Any]) -> dict[str, Any]:
                 "assets/flutter_assets",
             ],
             strategy=(
-                "Inspect Flutter artifacts/runtime first, then use the separate "
-                "safe-android-reverser-flutter capability server for bounded Dart "
+                "Inspect Flutter artifacts/runtime first, then let the host control "
+                "plane dispatch the framework-flutter capability for bounded Dart "
                 "AOT analysis of libapp.so; Java/Kotlin remains host-shell evidence only."
             ),
             secondary_profiles=[
@@ -178,7 +186,8 @@ def route_fingerprint(fingerprint: dict[str, Any]) -> dict[str, Any]:
             ],
             allow_java_decompile_as_primary=False,
             limitations=[
-                "Exact Dart AOT analysis requires a matching immutable runtime-cache image; a cache miss is reported explicitly and never triggers an in-sandbox build or download.",
+                "Runtime readiness is discovered by the host control plane; the router only declares the framework-flutter capability.",
+                "Exact Dart AOT analysis requires a matching immutable runtime-cache image; a cache miss never triggers an in-sandbox build or download.",
                 "Dart call/XREF adjacency is not proof of interprocedural value flow; true data-flow analysis remains a later capability.",
             ],
         )
@@ -208,9 +217,7 @@ def route_fingerprint(fingerprint: dict[str, Any]) -> dict[str, Any]:
                     ),
                 ],
                 allow_java_decompile_as_primary=False,
-                limitations=[
-                    "The framework-hermes profile is planned and not bundled in the current static image."
-                ],
+                limitations=["The framework-hermes capability is planned."],
             )
 
         return _route(
@@ -253,9 +260,7 @@ def route_fingerprint(fingerprint: dict[str, Any]) -> dict[str, Any]:
                 _secondary("native", "localized runtime/JNI analysis"),
             ],
             allow_java_decompile_as_primary=False,
-            limitations=[
-                "The framework-dotnet profile is planned and not bundled in the current static image."
-            ],
+            limitations=["The framework-dotnet capability is planned."],
         )
 
     if normalized.startswith("cordova") or normalized.startswith("capacitor"):
@@ -278,7 +283,7 @@ def route_fingerprint(fingerprint: dict[str, Any]) -> dict[str, Any]:
                 )
             ],
             allow_java_decompile_as_primary=False,
-            limitations=["A dedicated web-assets semantic index is planned."],
+            limitations=["The web-assets semantic capability is planned."],
         )
 
     if normalized.startswith("native android"):
