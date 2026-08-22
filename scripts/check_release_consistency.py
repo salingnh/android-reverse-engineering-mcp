@@ -105,6 +105,17 @@ for legacy in (
 if not (ROOT / "sandbox" / "static_semantic_worker.py").is_file():
     fail("canonical static semantic worker is missing")
 
+# Dead-reference regression gate: renaming the canonical worker must also update
+# tests/importers. Construct the legacy name so the checker does not self-match.
+legacy_module_name = "mcp_" + "server_v2"
+for scan_root in (ROOT / "sandbox", PLUGIN_ROOT / "tests"):
+    for path in scan_root.rglob("*.py"):
+        if legacy_module_name in path.read_text(encoding="utf-8"):
+            fail(
+                "legacy static worker module reference remains: "
+                f"{path.relative_to(ROOT)} -> {legacy_module_name}"
+            )
+
 wrapper = (PLUGIN_ROOT / "bin" / "safe-reverser-mcp").read_text(encoding="utf-8")
 required_wrapper_fragments = [
     'VERSION_FILE="$PLUGIN_ROOT/VERSION"',
