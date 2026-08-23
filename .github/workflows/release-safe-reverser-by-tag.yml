@@ -1,0 +1,158 @@
+name: Release Safe Android Reverser
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag, for example safe-v0.3.0 or 0.3.0
+        required: true
+        type: string
+
+concurrency:
+  group: safe-android-reverser-release-request-${{ inputs.tag }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  actions: write
+
+env:
+  GH_TOKEN: ${{ github.token }}
+
+jobs:
+  dispatch:
+    name: Resolve release and run guarded orchestrator
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve tag, release branch and exact SHA
+        id: release
+        shell: bash
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+
+          raw="$(printf '%s' "$INPUT_TAG" | tr -d '[:space:]')"
+          if [[ "$raw" =~ ^safe-v([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+            tag="$raw"
+            version="${BASH_REMATCH[1]}"
+          elif [[ "$raw" =~ ^([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+            version="${BASH_REMATCH[1]}"
+            tag="safe-v${version}"
+          else
+            echo "::error::tag must be safe-vX.Y.Z or X.Y.Z"
+            exit 1
+          fi
+
+          release_ref="release/${tag}"
+          encoded_ref="$(python3 - "$release_ref" <<'PY'
+          import sys
+          import urllib.parse
+          print(urllib.parse.quote(sys.argv[1], safe=""))
+          PY
+          )"
+
+          if ! release_sha="$(gh api "repos/${GITHUB_REPOSITORY}/branches/${encoded_ref}" --jq '.commit.sha' 2>/dev/null)"; then
+            echo "::error::release branch not found: ${release_ref}"
+            exit 1
+          fi
+
+          [[ "$release_sha" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "::error::invalid release branch HEAD SHA: $release_sha"
+            exit 1
+          }
+
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "release_ref=$release_ref" >> "$GITHUB_OUTPUT"
+          echo "release_sha=$release_sha" >> "$GITHUB_OUTPUT"
+
+          echo "Resolved ${tag} -> ${release_ref} -> ${release_sha}"
+
+      - name: Dispatch guarded release orchestrator
+        id: dispatch
+        shell: bash
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+          RELEASE_REF: ${{ steps.release.outputs.release_ref }}
+          RELEASE_SHA: ${{ steps.release.outputs.release_sha }}
+        run: |
+          set -euo pipefail
+
+          mapfile -t before_ids < <(
+            gh run list \
+              --workflow release-safe-reverser.yml \
+              --event workflow_dispatch \
+              --branch master \
+              --limit 30 \
+              --json databaseId \
+              --jq '.[].databaseId' 2>/dev/null || true
+          )
+
+          gh workflow run release-safe-reverser.yml \
+            --ref master \
+            -f version="$VERSION" \
+            -f release_ref="$RELEASE_REF" \
+            -f expected_sha="$RELEASE_SHA"
+
+          run_id=""
+          for _ in $(seq 1 60); do
+            mapfile -t current_ids < <(
+              gh run list \
+                --workflow release-safe-reverser.yml \
+                --event workflow_dispatch \
+                --branch master \
+                --limit 30 \
+                --json databaseId \
+                --jq '.[].databaseId' 2>/dev/null || true
+            )
+
+            for candidate in "${current_ids[@]:-}"; do
+              seen=false
+              for old in "${before_ids[@]:-}"; do
+                if [[ "$candidate" == "$old" ]]; then
+                  seen=true
+                  break
+                fi
+              done
+              if [[ "$seen" == false && -n "$candidate" ]]; then
+                run_id="$candidate"
+                break 2
+              fi
+            done
+            sleep 2
+          done
+
+          [[ -n "$run_id" ]] || {
+            echo "::error::could not resolve the dispatched release orchestrator run"
+            exit 1
+          }
+
+          echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
+          echo "Guarded release orchestrator run: $run_id"
+
+      - name: Wait for release completion
+        shell: bash
+        env:
+          RUN_ID: ${{ steps.dispatch.outputs.run_id }}
+        run: |
+          set -euo pipefail
+          gh run watch "$RUN_ID" --exit-status
+
+      - name: Release request summary
+        env:
+          TAG: ${{ steps.release.outputs.tag }}
+          VERSION: ${{ steps.release.outputs.version }}
+          RELEASE_REF: ${{ steps.release.outputs.release_ref }}
+          RELEASE_SHA: ${{ steps.release.outputs.release_sha }}
+          RUN_ID: ${{ steps.dispatch.outputs.run_id }}
+        run: |
+          {
+            echo "## Safe Android Reverser release request"
+            echo
+            echo "- Tag: \`${TAG}\`"
+            echo "- Version: \`${VERSION}\`"
+            echo "- Release branch: \`${RELEASE_REF}\`"
+            echo "- Exact SHA resolved automatically: \`${RELEASE_SHA}\`"
+            echo "- Guarded orchestrator run: https://github.com/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}"
+          } >> "$GITHUB_STEP_SUMMARY"
