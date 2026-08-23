@@ -7,6 +7,7 @@ on:
       - '.github/workflows/ship-safe-reverser.yml'
       - '.github/workflows/post-release-normalize.yml'
       - '.github/workflows/release-safe-reverser.yml'
+      - '.github/workflows/test-flutter-runtime-cache.yml'
       - '.github/workflows/test-release-automation.yml'
       - 'docs/MANUAL_RELEASE_ACTION.md'
       - 'docs/RELEASING.md'
@@ -30,7 +31,8 @@ jobs:
           ruby -e 'require "yaml"; ARGV.each { |path| YAML.load_file(path) }' \
             .github/workflows/ship-safe-reverser.yml \
             .github/workflows/post-release-normalize.yml \
-            .github/workflows/release-safe-reverser.yml
+            .github/workflows/release-safe-reverser.yml \
+            .github/workflows/test-flutter-runtime-cache.yml
 
       - name: Test deterministic metadata preparation in isolated copy
         shell: bash
@@ -70,13 +72,18 @@ jobs:
           set -euo pipefail
           ship=.github/workflows/ship-safe-reverser.yml
           post=.github/workflows/post-release-normalize.yml
+          runtime_cache=.github/workflows/test-flutter-runtime-cache.yml
 
           grep -Fq 'group: safe-android-reverser-production-release' "$ship"
           grep -Fq 'scripts/prepare_release_metadata.py' "$ship"
           grep -Fq 'Ensure exact-head release CI' "$ship"
+          grep -Fq 'test-flutter-runtime-cache.yml' "$ship"
           grep -Fq 'release-safe-reverser.yml' "$ship"
           grep -Fq -- '--match-head-commit' "$ship"
           grep -Fq 'Post-release smoke and provenance verification' "$ship"
+          grep -Fq 'workflow_dispatch:' "$runtime_cache"
+          grep -Fq 'Build controlled exact runtime cache' "$runtime_cache"
+          grep -Fq 'Verify cached analyzer is offline-safe' "$runtime_cache"
           grep -Fq 'workflow_run:' "$post"
           grep -Fq 'github.event.workflow_run.conclusion == ' "$post"
           grep -Fq 'git push origin HEAD:master' "$post"
