@@ -1,30 +1,73 @@
 # Manual release action
 
-`Manual release Safe Android Reverser` is the supported one-click release orchestrator for production semver releases.
+Safe Android Reverser now exposes a **tag-only** production release entry point:
 
-The workflow file lives at:
+```text
+Release Safe Android Reverser
+```
+
+Workflow file:
+
+```text
+.github/workflows/release-safe-reverser-by-tag.yml
+```
+
+It must exist on the repository default branch so GitHub exposes the **Run workflow** button.
+
+## Recommended input
+
+Provide exactly **one value**:
+
+```text
+tag = safe-v0.3.0
+```
+
+For convenience this is also accepted:
+
+```text
+tag = 0.3.0
+```
+
+The workflow normalizes `0.3.0` to `safe-v0.3.0` automatically.
+
+You do **not** need to know or enter a commit SHA.
+
+## What is resolved automatically
+
+For a tag `safe-vX.Y.Z`, the entry workflow derives:
+
+```text
+version     = X.Y.Z
+release_ref = release/safe-vX.Y.Z
+release_sha = current HEAD of release/safe-vX.Y.Z
+```
+
+The release branch must already exist. Its current HEAD becomes the only candidate release SHA.
+
+The entry workflow then dispatches the guarded internal orchestrator:
 
 ```text
 .github/workflows/release-safe-reverser.yml
 ```
 
-It must exist on the repository default branch so GitHub exposes the **Run workflow** button.
+with the derived `version`, `release_ref`, and `expected_sha`.
 
-## Inputs
+`expected_sha` still exists internally as a safety guard, but users no longer type it manually.
 
-Provide exactly three values:
+## Why this remains safe
+
+The guarded orchestrator still refuses to release unless all of these agree:
 
 ```text
-version       semantic version, for example 0.3.0
-release_ref   accepted release branch/ref, for example release/safe-v0.3.0
-expected_sha  exact 40-character commit SHA that already passed release CI
+requested tag/version
+plugins/safe-android-reverser/VERSION
+release branch HEAD
+exact release SHA
+existing Git tag, if any
+published image provenance, if any
 ```
 
-The workflow refuses to continue when the checked-out release ref, `VERSION`, and `expected_sha` do not describe the same release.
-
-## Required exact-head CI
-
-Before creating a tag, the workflow queries GitHub Actions and requires successful runs on the exact release SHA for:
+Before creating/publishing a release it also requires successful exact-head GitHub Actions on the automatically resolved release SHA for:
 
 ```text
 Build static-core capability
@@ -33,15 +76,25 @@ Test Safe Reverser control plane
 Test Flutter runtime-cache build
 ```
 
-It also reruns `scripts/check_release_consistency.py` after checking out the requested release ref.
-
-## What the workflow publishes
-
-For `VERSION=X.Y.Z`, it creates or verifies:
+It reruns:
 
 ```text
+python3 scripts/check_release_consistency.py
+```
+
+on that release tree.
+
+Therefore removing the manual SHA field does not remove the exact-head release gate. The SHA is derived from GitHub rather than copied by a human.
+
+## What gets published
+
+For `safe-vX.Y.Z`, the guarded release flow creates or verifies:
+
+```text
+Git tag
 safe-vX.Y.Z
 
+GHCR
 ghcr.io/salingnh/safe-android-reverser:X.Y.Z
 ghcr.io/salingnh/safe-android-reverser:sha-<release-commit>
 
@@ -49,7 +102,7 @@ ghcr.io/salingnh/safe-android-reverser-flutter:X.Y.Z
 ghcr.io/salingnh/safe-android-reverser-flutter:sha-<release-commit>
 ```
 
-It verifies the published semver images carry the expected:
+Published images must carry the expected:
 
 ```text
 org.opencontainers.image.version
@@ -59,47 +112,50 @@ io.safe-reverser.capability.api = 1
 io.safe-reverser.worker.abi = 1
 ```
 
-The workflow then creates a GitHub Release with:
+and must expose an immutable repository digest.
+
+The workflow then creates/updates the GitHub Release with:
 
 ```text
 safe-android-reverser-X.Y.Z.zip
 SHA256SUMS
 ```
 
-The ZIP contains the complete `plugins/safe-android-reverser` plugin directory.
+## Why package workflows are explicitly dispatched
 
-## Why it explicitly dispatches package workflows
+GitHub intentionally prevents most recursive workflow triggering for events created with a workflow `GITHUB_TOKEN`.
 
-GitHub intentionally prevents events created with the workflow `GITHUB_TOKEN` from recursively triggering most other workflows. Therefore creating `safe-vX.Y.Z` inside the manual workflow cannot rely on the tag `push` event to publish images.
-
-The release orchestrator explicitly dispatches:
+Therefore creating the Git tag inside the release orchestrator does not rely on a tag `push` event. The orchestrator explicitly dispatches:
 
 ```text
 build-safe-sandbox.yml
 build-flutter-profile.yml
 ```
 
-against the newly created tag and waits for both runs to finish successfully.
-
-This keeps the existing capability-specific build/test/publish workflows as the package source of truth instead of duplicating their image build logic in the release orchestrator.
+against the release tag and waits for both to finish.
 
 ## Safe reruns
 
-The action is designed to resume after a partial infrastructure failure.
+The release flow is resumable after an infrastructure interruption:
 
-If the Git tag already exists, it is accepted only when it resolves to `expected_sha`.
-
-If a semver GHCR image already exists, it is accepted only when its version, revision SHA, capability ID, Capability API, and Worker ABI match the requested release. A mismatched existing immutable package causes the release to fail instead of overwriting it.
-
-If the GitHub Release already exists, release assets are uploaded again with `--clobber` after package provenance verification.
+- an existing tag is accepted only when it resolves to the same automatically resolved release SHA;
+- an existing semver image is accepted only when version, revision SHA, capability ID, Capability API and Worker ABI match;
+- a mismatched immutable image causes the release to fail rather than overwrite it;
+- an existing GitHub Release can receive the verified ZIP/checksum assets again.
 
 ## Release sequence
 
 ```text
-accepted release ref + exact SHA
+user enters safe-vX.Y.Z
         |
         v
-exact-head CI evidence required
+derive release/safe-vX.Y.Z
+        |
+        v
+resolve exact branch HEAD SHA automatically
+        |
+        v
+require exact-head release CI
         |
         v
 release consistency gate
@@ -108,10 +164,7 @@ release consistency gate
 create/verify annotated safe-vX.Y.Z tag
         |
         v
-explicitly dispatch package workflows on the tag
-        |
-        v
-verify GHCR semver images + immutable digests
+publish/verify capability images
         |
         v
 build plugin ZIP + SHA256SUMS
@@ -120,16 +173,34 @@ build plugin ZIP + SHA256SUMS
 create/update GitHub Release
 ```
 
-Marketplace visibility remains a separate final gate: merge the release metadata PR into `master` only after this workflow has successfully created the tag, packages, and GitHub Release.
+Marketplace visibility remains a separate final gate: merge the release metadata PR into `master` only after this workflow is green.
 
 ## Running 0.3.0
 
-For the current 0.3.0 release candidate use:
+Go to:
 
 ```text
-version       = 0.3.0
-release_ref   = release/safe-v0.3.0
-expected_sha  = e279e0f26488e1ce214d45d7f3a512a807ff07ba
+Actions
+  -> Release Safe Android Reverser
+  -> Run workflow
 ```
 
-After the action is green, verify the release/package links and then merge PR #12 so marketplace metadata `0.3.0` becomes reachable from `master`.
+Choose `master` and enter either:
+
+```text
+safe-v0.3.0
+```
+
+or simply:
+
+```text
+0.3.0
+```
+
+The workflow automatically resolves:
+
+```text
+release/safe-v0.3.0
+```
+
+and its exact HEAD SHA. After the action is green, verify the release/package links and merge PR #12 so marketplace metadata `0.3.0` becomes reachable from `master`.
