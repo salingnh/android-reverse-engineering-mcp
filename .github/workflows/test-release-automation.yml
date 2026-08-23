@@ -7,9 +7,8 @@ on:
       - '.github/workflows/ship-safe-reverser.yml'
       - '.github/workflows/post-release-normalize.yml'
       - '.github/workflows/release-safe-reverser.yml'
-      - '.github/workflows/release-safe-reverser-by-tag.yml'
       - '.github/workflows/test-release-automation.yml'
-      - 'docs/AUTOMATED_RELEASE.md'
+      - 'docs/MANUAL_RELEASE_ACTION.md'
       - 'docs/RELEASING.md'
   workflow_dispatch:
 
@@ -31,8 +30,7 @@ jobs:
           ruby -e 'require "yaml"; ARGV.each { |path| YAML.load_file(path) }' \
             .github/workflows/ship-safe-reverser.yml \
             .github/workflows/post-release-normalize.yml \
-            .github/workflows/release-safe-reverser.yml \
-            .github/workflows/release-safe-reverser-by-tag.yml
+            .github/workflows/release-safe-reverser.yml
 
       - name: Test deterministic metadata preparation in isolated copy
         shell: bash
@@ -82,3 +80,6 @@ jobs:
           grep -Fq 'workflow_run:' "$post"
           grep -Fq 'github.event.workflow_run.conclusion == ' "$post"
           grep -Fq 'git push origin HEAD:master' "$post"
+
+      - name: Ensure obsolete release wrapper stays removed
+        run: test ! -e .github/workflows/release-safe-reverser-by-tag.yml
