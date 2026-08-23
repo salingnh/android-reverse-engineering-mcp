@@ -23,9 +23,9 @@ Coding agents must also follow [`AGENTS.md`](AGENTS.md).
 
 ## Release status
 
-Current published release: **0.2.1**.
+Release candidate: **0.3.0 — Platform Foundation + Flutter AOT**.
 
-**0.3.0 is the active platform-foundation milestone and is not released until exact-head CI, architecture/security review, and senior acceptance pass.**
+The 0.3 platform architecture has passed exact-head static-core, framework-flutter, and one-public-MCP integration CI and has been merged into `master`. Publication remains gated on the exact 0.3.0 release commit, controlled Flutter runtime-cache verification, immutable semver capability-image publication, and `safe-v0.3.0` release checks.
 
 ## Quick start
 
