@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """Prepare Safe Android Reverser release metadata deterministically.
 
-This script is intentionally narrow: it updates the canonical plugin version and the
-small set of user-facing release-status locations that must move with a release.
-It is idempotent for the same target version and fails closed when expected document
-markers are missing.
+The helper updates the canonical plugin version plus the small set of user-facing
+release-status sections that must move with a release. It is idempotent for the same
+target version and fails closed when expected document structure is missing.
 """
 
 from __future__ import annotations
@@ -68,31 +67,36 @@ def prepare(target: str) -> None:
     write_json(MARKETPLACE_FILE, marketplace)
 
     readme = README_FILE.read_text(encoding="utf-8")
+    release_status = (
+        "## Release status\n\n"
+        f"Current published release: **{target}**.\n\n"
+        "Release metadata reaches `master` only after exact-head CI, immutable capability-image "
+        "verification, and GitHub Release creation.\n"
+    )
     readme = replace_once(
         readme,
-        r"Current published release: \*\*[0-9]+\.[0-9]+\.[0-9]+\*\*\.",
-        f"Current published release: **{target}**.",
-        label="README current published release",
-    )
-    # Replace the old milestone-specific warning when present with a durable release rule.
-    readme = re.sub(
-        r"\n\*\*[^\n]*active[^\n]*milestone[^\n]*\*\*\n",
-        "\nRelease metadata reaches `master` only after exact-head CI, immutable capability-image verification, and GitHub Release creation.\n",
-        readme,
-        count=1,
-        flags=re.IGNORECASE,
+        r"## Release status\n\n.*?(?=\n## Quick start\n)",
+        release_status,
+        label="README release status section",
+        flags=re.DOTALL,
     )
     README_FILE.write_text(readme, encoding="utf-8")
 
     install = INSTALL_FILE.read_text(encoding="utf-8")
+    install_intro = (
+        "# Install, update and use Safe Android Reverser MCP\n\n"
+        "This is the supported installation/update path for Safe Android Reverser.\n\n"
+        f"Current published release is **{target}**. Release metadata is promoted to `master` only "
+        "after exact-head CI and immutable capability-image verification complete.\n\n"
+    )
     install = replace_once(
         install,
-        r"Current published release is \*\*[0-9]+\.[0-9]+\.[0-9]+\*\*\.[^\n]*",
-        (
-            f"Current published release is **{target}**. Release metadata is promoted to `master` "
-            "only after exact-head CI and immutable capability-image verification complete."
-        ),
-        label="INSTALL current published release paragraph",
+        r"# Install, update and use Safe Android Reverser MCP\n\n"
+        r"This is the supported installation/update path for Safe Android Reverser\.\n\n"
+        r".*?(?=## Distribution model from 0\.3\n)",
+        install_intro,
+        label="INSTALL release intro",
+        flags=re.DOTALL,
     )
     INSTALL_FILE.write_text(install, encoding="utf-8")
 
@@ -112,10 +116,17 @@ def verify(target: str) -> None:
     if len(matches) != 1 or matches[0].get("version") != target:
         raise SystemExit("marketplace safe-android-reverser version mismatch")
 
-    if f"Current published release: **{target}**." not in README_FILE.read_text(encoding="utf-8"):
+    readme = README_FILE.read_text(encoding="utf-8")
+    if f"Current published release: **{target}**." not in readme:
         raise SystemExit("README release status mismatch")
-    if f"Current published release is **{target}**." not in INSTALL_FILE.read_text(encoding="utf-8"):
+    if "Release candidate:" in readme.split("## Quick start", 1)[0]:
+        raise SystemExit("README still advertises release candidate state")
+
+    install = INSTALL_FILE.read_text(encoding="utf-8")
+    if f"Current published release is **{target}**." not in install:
         raise SystemExit("INSTALL release status mismatch")
+    if "Release candidate:" in install.split("## Distribution model", 1)[0]:
+        raise SystemExit("INSTALL still advertises release candidate state")
 
 
 if __name__ == "__main__":
