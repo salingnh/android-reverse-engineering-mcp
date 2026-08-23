@@ -1,0 +1,241 @@
+[
+  {
+    "name": "fingerprint",
+    "description": "Fingerprint an APK/bundle, detect framework/tooling signals, and return an explicit framework-aware analysis route so non-Java business logic is not silently treated as JADX input.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "artifact": {
+          "type": "string",
+          "description": "Artifact path relative to the Claude project root."
+        }
+      },
+      "required": ["artifact"],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "route_analysis",
+    "description": "Select primary and secondary analyzer profiles for an APK/bundle without executing the analyzers.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "artifact": {"type": "string"}
+      },
+      "required": ["artifact"],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "inspect_flutter",
+    "description": "Inspect Flutter APK/XAPK structure, ABIs, libapp/libflutter, Flutter assets and bounded Dart VM version markers without generic native decompilation.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "artifact": {"type": "string"},
+        "max_assets": {"type": "integer", "minimum": 1, "maximum": 20000, "default": 5000},
+        "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 3600, "default": 300}
+      },
+      "required": ["artifact"],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "identify_dart_runtime",
+    "description": "Recover directly observable Dart VM version markers from libflutter.so with bounded streaming scans; snapshot-hash recovery is deferred to the ELF-aware Flutter AOT profile.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "artifact": {"type": "string"},
+        "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 3600, "default": 300}
+      },
+      "required": ["artifact"],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "extract_flutter_assets",
+    "description": "Inventory Flutter packaged assets and return bounded previews of text-like manifests/configuration files with PEG provenance.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "artifact": {"type": "string"},
+        "max_items": {"type": "integer", "minimum": 1, "maximum": 20000, "default": 1000},
+        "max_previews": {"type": "integer", "minimum": 0, "maximum": 50, "default": 20},
+        "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 3600, "default": 300}
+      },
+      "required": ["artifact"],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "decompile",
+    "description": "Decompile a project artifact inside the isolated sandbox and persist output under plugin data, returning a job_id.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "artifact": {"type": "string"},
+        "engine": {"type": "string", "enum": ["jadx", "vineflower", "both"], "default": "jadx"},
+        "deobf": {"type": "boolean", "default": true},
+        "no_res": {"type": "boolean", "default": false},
+        "timeout_seconds": {"type": "integer", "minimum": 30, "maximum": 3600, "default": 900}
+      },
+      "required": ["artifact"],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "extract_api",
+    "description": "Extract URLs, Retrofit endpoints, endpoint-shaped strings and network/auth signals from a decompile job.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "job_id": {"type": "string"},
+        "max_items": {"type": "integer", "minimum": 20, "maximum": 2000, "default": 500}
+      },
+      "required": ["job_id"],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "build_program_index",
+    "description": "Build or reuse a bounded semantic program index from DEX XREFs when Androguard is available, with a lower-confidence decompiled-source fallback.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "job_id": {"type": "string"},
+        "max_methods": {"type": "integer", "minimum": 100, "maximum": 200000, "default": 100000},
+        "max_edges": {"type": "integer", "minimum": 100, "maximum": 500000, "default": 250000},
+        "force": {"type": "boolean", "default": false},
+        "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 3600, "default": 900}
+      },
+      "required": ["job_id"],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "find_symbols",
+    "description": "Search normalized class/method symbols in the program index without scanning the full decompiled tree.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "job_id": {"type": "string"},
+        "query": {"type": "string"},
+        "limit": {"type": "integer", "minimum": 1, "maximum": 500, "default": 100},
+        "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 3600, "default": 300}
+      },
+      "required": ["job_id", "query"],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "find_xrefs",
+    "description": "Find incoming/outgoing method cross-references using DEX XREFs when available, returning normalized evidence edges.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "job_id": {"type": "string"},
+        "query": {"type": "string"},
+        "direction": {"type": "string", "enum": ["incoming", "outgoing", "both"], "default": "both"},
+        "limit": {"type": "integer", "minimum": 1, "maximum": 1000, "default": 200},
+        "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 3600, "default": 300}
+      },
+      "required": ["job_id", "query"],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "get_cfg",
+    "description": "Return a bounded control-flow graph for methods matching a query. Requires Androguard in the sandbox image.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "job_id": {"type": "string"},
+        "query": {"type": "string"},
+        "max_blocks": {"type": "integer", "minimum": 1, "maximum": 10000, "default": 500},
+        "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 3600, "default": 300}
+      },
+      "required": ["job_id", "query"],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "identify_protector",
+    "description": "Identify packer/protector/obfuscator/anti-analysis signals with APKiD when that optional analyzer is installed.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "artifact": {"type": "string"},
+        "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 60, "default": 10}
+      },
+      "required": ["artifact"],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "extract_network_model",
+    "description": "Build a structured network model linking endpoints to uniquely resolved declaring methods, caller XREFs, model hints, auth/signature evidence and source provenance.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "job_id": {"type": "string"},
+        "max_items": {"type": "integer", "minimum": 20, "maximum": 2000, "default": 500},
+        "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 3600, "default": 600}
+      },
+      "required": ["job_id"],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "search_source",
+    "description": "Search decompiled Java/Kotlin within a job. Plain-text search by default; optional regex is bounded and never passed to a shell.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "job_id": {"type": "string"},
+        "query": {"type": "string"},
+        "regex": {"type": "boolean", "default": false},
+        "case_sensitive": {"type": "boolean", "default": false},
+        "limit": {"type": "integer", "minimum": 1, "maximum": 500, "default": 100}
+      },
+      "required": ["job_id", "query"],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "read_source_file",
+    "description": "Read a bounded line range from a text/source file within a decompile job.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "job_id": {"type": "string"},
+        "path": {"type": "string"},
+        "start_line": {"type": "integer", "minimum": 1, "default": 1},
+        "end_line": {"type": "integer", "minimum": 1, "default": 300}
+      },
+      "required": ["job_id", "path"],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "recover_kotlin_names",
+    "description": "Extract conservative Kotlin original-name candidates from surviving DebugMetadata/Metadata evidence, with confidence values.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "job_id": {"type": "string"}
+      },
+      "required": ["job_id"],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "list_jobs",
+    "description": "List recent sandbox reverse-analysis jobs.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
+      "additionalProperties": false
+    }
+  }
+]
