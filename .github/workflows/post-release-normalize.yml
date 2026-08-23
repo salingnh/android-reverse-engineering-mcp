@@ -1,0 +1,73 @@
+name: Post-release normalize Safe Android Reverser
+
+on:
+  workflow_run:
+    workflows: ["Ship Safe Android Reverser"]
+    types: [completed]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: safe-android-reverser-post-release
+  cancel-in-progress: false
+
+jobs:
+  normalize:
+    if: github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout published master
+        uses: actions/checkout@v6
+        with:
+          ref: master
+          fetch-depth: 0
+
+      - name: Normalize published release metadata
+        id: release
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(tr -d '[:space:]' < plugins/safe-android-reverser/VERSION)"
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          python3 scripts/prepare_release_metadata.py "$version"
+          python3 scripts/prepare_release_metadata.py "$version" --check
+          python3 scripts/check_release_consistency.py
+          git diff --check
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Commit normalized published status when needed
+        shell: bash
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          if git diff --quiet; then
+            echo "Published metadata already normalized for ${VERSION}."
+            exit 0
+          fi
+
+          # The canonical version/manifests must already have been merged by the release PR.
+          changed="$(git diff --name-only)"
+          unexpected="$(printf '%s\n' "$changed" | grep -Ev '^(README\.md|docs/INSTALL_MCP\.md)$' || true)"
+          if [[ -n "$unexpected" ]]; then
+            echo "::error::post-release normalization attempted unexpected files:"
+            printf '%s\n' "$unexpected"
+            exit 1
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add README.md docs/INSTALL_MCP.md
+          git commit -m "docs(release): mark Safe Android Reverser ${VERSION} published"
+          git push origin HEAD:master
+
+      - name: Summary
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          {
+            echo "## Post-release normalization"
+            echo
+            echo "Safe Android Reverser \`${VERSION}\` published status is normalized on \`master\`."
+          } >> "$GITHUB_STEP_SUMMARY"

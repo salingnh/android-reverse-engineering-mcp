@@ -1,0 +1,517 @@
+name: Ship Safe Android Reverser
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release version, for example 0.4.0 or safe-v0.4.0
+        required: true
+        type: string
+
+concurrency:
+  group: safe-android-reverser-production-release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  actions: write
+  packages: read
+  pull-requests: write
+
+env:
+  GH_TOKEN: ${{ github.token }}
+
+jobs:
+  ship:
+    name: Prepare, validate, publish, merge and verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    steps:
+      - name: Checkout master
+        uses: actions/checkout@v6
+        with:
+          ref: master
+          fetch-depth: 0
+
+      - name: Normalize release identity
+        id: release
+        shell: bash
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          raw="$(printf '%s' "$INPUT_VERSION" | tr -d '[:space:]')"
+          if [[ "$raw" =~ ^safe-v([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+            version="${BASH_REMATCH[1]}"
+          elif [[ "$raw" =~ ^([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+            version="${BASH_REMATCH[1]}"
+          else
+            echo "::error::version must be X.Y.Z or safe-vX.Y.Z"
+            exit 1
+          fi
+          tag="safe-v${version}"
+          release_ref="release/${tag}"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "release_ref=$release_ref" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve or create release branch
+        id: branch
+        shell: bash
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+          TAG: ${{ steps.release.outputs.tag }}
+          RELEASE_REF: ${{ steps.release.outputs.release_ref }}
+        run: |
+          set -euo pipefail
+          encoded_ref="$(python3 - "$RELEASE_REF" <<'PY'
+          import sys
+          import urllib.parse
+          print(urllib.parse.quote(sys.argv[1], safe=''))
+          PY
+          )"
+
+          if release_sha="$(gh api "repos/${GITHUB_REPOSITORY}/branches/${encoded_ref}" --jq '.commit.sha' 2>/dev/null)"; then
+            git fetch origin "${RELEASE_REF}:${RELEASE_REF}"
+            git checkout "$RELEASE_REF"
+            branch_created=false
+          else
+            if git ls-remote --exit-code --tags origin "refs/tags/${TAG}" >/dev/null 2>&1; then
+              echo "::error::${TAG} already exists but ${RELEASE_REF} is missing; verify the published release instead of recreating release source"
+              exit 1
+            fi
+
+            current="$(tr -d '[:space:]' < plugins/safe-android-reverser/VERSION)"
+            python3 - "$current" "$VERSION" <<'PY'
+          import re
+          import sys
+          current, target = sys.argv[1:3]
+          pat = re.compile(r'^[0-9]+\.[0-9]+\.[0-9]+$')
+          if not pat.fullmatch(current) or not pat.fullmatch(target):
+              raise SystemExit('invalid VERSION metadata')
+          cv = tuple(map(int, current.split('.')))
+          tv = tuple(map(int, target.split('.')))
+          if tv <= cv:
+              raise SystemExit(f'new release must be greater than current master VERSION: current={current}, target={target}')
+          PY
+
+            git checkout -b "$RELEASE_REF"
+            python3 scripts/prepare_release_metadata.py "$VERSION"
+            python3 scripts/check_release_consistency.py
+            python3 scripts/prepare_release_metadata.py "$VERSION" --check
+
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add \
+              plugins/safe-android-reverser/VERSION \
+              plugins/safe-android-reverser/.claude-plugin/plugin.json \
+              .claude-plugin/marketplace.json \
+              README.md \
+              docs/INSTALL_MCP.md
+            git commit -m "chore(release): prepare Safe Android Reverser ${VERSION}"
+            git push origin "HEAD:${RELEASE_REF}"
+            release_sha="$(git rev-parse HEAD)"
+            branch_created=true
+          fi
+
+          [[ "$release_sha" =~ ^[0-9a-f]{40}$ ]]
+          branch_version="$(tr -d '[:space:]' < plugins/safe-android-reverser/VERSION)"
+          [[ "$branch_version" == "$VERSION" ]] || {
+            echo "::error::${RELEASE_REF} VERSION=${branch_version}, requested ${VERSION}"
+            exit 1
+          }
+          python3 scripts/check_release_consistency.py
+
+          echo "release_sha=$release_sha" >> "$GITHUB_OUTPUT"
+          echo "branch_created=$branch_created" >> "$GITHUB_OUTPUT"
+
+      - name: Create or reuse release PR
+        id: pr
+        shell: bash
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+          TAG: ${{ steps.release.outputs.tag }}
+          RELEASE_REF: ${{ steps.release.outputs.release_ref }}
+          RELEASE_SHA: ${{ steps.branch.outputs.release_sha }}
+        run: |
+          set -euo pipefail
+          pr_json="$(gh pr list \
+            --repo "$GITHUB_REPOSITORY" \
+            --head "$RELEASE_REF" \
+            --base master \
+            --state all \
+            --limit 20 \
+            --json number,state,mergedAt,headRefOid \
+            --jq 'sort_by(.number) | reverse | .[0] // {}')"
+          pr_number="$(python3 -c 'import json,sys; print(json.load(sys.stdin).get("number", ""))' <<<"$pr_json")"
+          pr_state="$(python3 -c 'import json,sys; print(json.load(sys.stdin).get("state", ""))' <<<"$pr_json")"
+          pr_merged="$(python3 -c 'import json,sys; print(bool(json.load(sys.stdin).get("mergedAt")))' <<<"$pr_json")"
+          pr_head="$(python3 -c 'import json,sys; print(json.load(sys.stdin).get("headRefOid", ""))' <<<"$pr_json")"
+
+          if [[ -z "$pr_number" ]]; then
+            body_file="$RUNNER_TEMP/release-pr.md"
+            cat > "$body_file" <<EOF
+          ## Automated release candidate
+
+          Safe Android Reverser **${VERSION}**.
+
+          - Release branch: \`${RELEASE_REF}\`
+          - Exact release SHA: \`${RELEASE_SHA}\`
+          - Tag after validation: \`${TAG}\`
+
+          This PR is managed by **Ship Safe Android Reverser**. The pipeline explicitly runs exact-head release CI, publishes and verifies immutable capability images, creates the GitHub Release, and merges this PR only after publication succeeds.
+          EOF
+            pr_url="$(gh pr create \
+              --repo "$GITHUB_REPOSITORY" \
+              --base master \
+              --head "$RELEASE_REF" \
+              --title "chore(release): prepare Safe Android Reverser ${VERSION}" \
+              --body-file "$body_file")"
+            pr_number="${pr_url##*/}"
+            pr_state="OPEN"
+            pr_merged="False"
+            pr_head="$RELEASE_SHA"
+          fi
+
+          if [[ "$pr_merged" == "True" ]]; then
+            if ! git ls-remote --exit-code --tags origin "refs/tags/${TAG}" >/dev/null 2>&1; then
+              echo "::error::release PR #${pr_number} is already merged but ${TAG} does not exist"
+              exit 1
+            fi
+            echo "already_merged=true" >> "$GITHUB_OUTPUT"
+          else
+            [[ "$pr_state" == "OPEN" ]] || {
+              echo "::error::release PR #${pr_number} is closed without merge"
+              exit 1
+            }
+            [[ "$pr_head" == "$RELEASE_SHA" ]] || {
+              echo "::error::release PR head moved: ${pr_head}, expected ${RELEASE_SHA}"
+              exit 1
+            }
+            echo "already_merged=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          echo "pr_number=$pr_number" >> "$GITHUB_OUTPUT"
+
+      - name: Ensure exact-head release CI
+        if: steps.pr.outputs.already_merged != 'true'
+        shell: bash
+        env:
+          RELEASE_REF: ${{ steps.release.outputs.release_ref }}
+          RELEASE_SHA: ${{ steps.branch.outputs.release_sha }}
+        run: |
+          set -euo pipefail
+
+          workflow_success() {
+            local workflow_name="$1"
+            gh api "repos/${GITHUB_REPOSITORY}/actions/runs?head_sha=${RELEASE_SHA}&per_page=100" \
+              --jq "[.workflow_runs[] | select(.head_sha == \"${RELEASE_SHA}\" and .name == \"${workflow_name}\" and .conclusion == \"success\")] | length" \
+              | grep -qx '[1-9][0-9]*'
+          }
+
+          dispatch_and_wait() {
+            local workflow_file="$1"
+            local workflow_name="$2"
+
+            if workflow_success "$workflow_name"; then
+              echo "Exact-head CI already green: ${workflow_name}"
+              return 0
+            fi
+
+            mapfile -t before_ids < <(
+              gh run list \
+                --repo "$GITHUB_REPOSITORY" \
+                --workflow "$workflow_file" \
+                --event workflow_dispatch \
+                --limit 50 \
+                --json databaseId \
+                --jq '.[].databaseId' 2>/dev/null || true
+            )
+
+            echo "Dispatching ${workflow_name} on ${RELEASE_REF} (${RELEASE_SHA})"
+            gh workflow run "$workflow_file" --repo "$GITHUB_REPOSITORY" --ref "$RELEASE_REF"
+
+            local run_id=""
+            for _ in $(seq 1 90); do
+              mapfile -t current_ids < <(
+                gh run list \
+                  --repo "$GITHUB_REPOSITORY" \
+                  --workflow "$workflow_file" \
+                  --event workflow_dispatch \
+                  --limit 50 \
+                  --json databaseId,headSha \
+                  --jq ".[] | select(.headSha == \"${RELEASE_SHA}\") | .databaseId" 2>/dev/null || true
+              )
+              for candidate in "${current_ids[@]:-}"; do
+                local seen=false
+                for old in "${before_ids[@]:-}"; do
+                  if [[ "$candidate" == "$old" ]]; then
+                    seen=true
+                    break
+                  fi
+                done
+                if [[ "$seen" == false && -n "$candidate" ]]; then
+                  run_id="$candidate"
+                  break 2
+                fi
+              done
+              sleep 2
+            done
+
+            [[ -n "$run_id" ]] || {
+              echo "::error::could not resolve workflow run for ${workflow_name}"
+              exit 1
+            }
+            gh run watch "$run_id" --repo "$GITHUB_REPOSITORY" --exit-status
+            workflow_success "$workflow_name" || {
+              echo "::error::${workflow_name} finished without exact-head success evidence"
+              exit 1
+            }
+          }
+
+          dispatch_and_wait build-safe-sandbox.yml "Build static-core capability"
+          dispatch_and_wait build-flutter-profile.yml "Build framework-flutter capability"
+          dispatch_and_wait test-control-plane.yml "Test Safe Reverser control plane"
+          dispatch_and_wait test-flutter-runtime-cache.yml "Test Flutter runtime-cache build"
+
+      - name: Record release CI evidence on PR
+        if: steps.pr.outputs.already_merged != 'true'
+        shell: bash
+        env:
+          PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
+          VERSION: ${{ steps.release.outputs.version }}
+          RELEASE_SHA: ${{ steps.branch.outputs.release_sha }}
+        run: |
+          gh pr comment "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --body "Exact-head release CI is green for \`${RELEASE_SHA}\` (release ${VERSION}). The automated pipeline is proceeding to immutable package publication and GitHub Release creation."
+
+      - name: Dispatch guarded publication orchestrator
+        if: steps.pr.outputs.already_merged != 'true'
+        id: publish
+        shell: bash
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+          RELEASE_REF: ${{ steps.release.outputs.release_ref }}
+          RELEASE_SHA: ${{ steps.branch.outputs.release_sha }}
+        run: |
+          set -euo pipefail
+          workflow_file="release-safe-reverser.yml"
+          mapfile -t before_ids < <(
+            gh run list \
+              --repo "$GITHUB_REPOSITORY" \
+              --workflow "$workflow_file" \
+              --event workflow_dispatch \
+              --limit 50 \
+              --json databaseId \
+              --jq '.[].databaseId' 2>/dev/null || true
+          )
+
+          gh workflow run "$workflow_file" \
+            --repo "$GITHUB_REPOSITORY" \
+            --ref master \
+            -f "version=${VERSION}" \
+            -f "release_ref=${RELEASE_REF}" \
+            -f "expected_sha=${RELEASE_SHA}"
+
+          run_id=""
+          for _ in $(seq 1 90); do
+            mapfile -t current_ids < <(
+              gh run list \
+                --repo "$GITHUB_REPOSITORY" \
+                --workflow "$workflow_file" \
+                --event workflow_dispatch \
+                --limit 50 \
+                --json databaseId,createdAt \
+                --jq '.[].databaseId' 2>/dev/null || true
+            )
+            for candidate in "${current_ids[@]:-}"; do
+              seen=false
+              for old in "${before_ids[@]:-}"; do
+                if [[ "$candidate" == "$old" ]]; then
+                  seen=true
+                  break
+                fi
+              done
+              if [[ "$seen" == false && -n "$candidate" ]]; then
+                run_id="$candidate"
+                break 2
+              fi
+            done
+            sleep 2
+          done
+
+          [[ -n "$run_id" ]] || {
+            echo "::error::could not resolve guarded publication workflow run"
+            exit 1
+          }
+          echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
+          gh run watch "$run_id" --repo "$GITHUB_REPOSITORY" --exit-status
+
+      - name: Verify publication before merge
+        if: steps.pr.outputs.already_merged != 'true'
+        shell: bash
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+          TAG: ${{ steps.release.outputs.tag }}
+          RELEASE_SHA: ${{ steps.branch.outputs.release_sha }}
+        run: |
+          set -euo pipefail
+          git fetch --force origin "refs/tags/${TAG}:refs/tags/${TAG}"
+          tag_sha="$(git rev-list -n 1 "$TAG")"
+          [[ "$tag_sha" == "$RELEASE_SHA" ]]
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null
+
+      - name: Merge marketplace-visible release PR
+        if: steps.pr.outputs.already_merged != 'true'
+        shell: bash
+        env:
+          PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
+          VERSION: ${{ steps.release.outputs.version }}
+          RELEASE_SHA: ${{ steps.branch.outputs.release_sha }}
+        run: |
+          set -euo pipefail
+          gh pr merge "$PR_NUMBER" \
+            --repo "$GITHUB_REPOSITORY" \
+            --merge \
+            --match-head-commit "$RELEASE_SHA" \
+            --subject "Merge release ${VERSION}"
+
+      - name: Log in to GHCR for post-release verification
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Post-release smoke and provenance verification
+        id: verify
+        shell: bash
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+          TAG: ${{ steps.release.outputs.tag }}
+          RELEASE_SHA: ${{ steps.branch.outputs.release_sha }}
+        run: |
+          set -euo pipefail
+          git fetch origin master
+          git fetch --force origin "refs/tags/${TAG}:refs/tags/${TAG}"
+          git merge-base --is-ancestor "$RELEASE_SHA" origin/master || {
+            echo "::error::release commit is not reachable from master"
+            exit 1
+          }
+
+          master_version="$(git show origin/master:plugins/safe-android-reverser/VERSION | tr -d '[:space:]')"
+          [[ "$master_version" == "$VERSION" ]] || {
+            echo "::error::master VERSION=${master_version}, expected ${VERSION}"
+            exit 1
+          }
+
+          release_json="$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json tagName,isDraft,isPrerelease,assets)"
+          python3 - "$release_json" "$TAG" "$VERSION" <<'PY'
+          import json
+          import sys
+          payload = json.loads(sys.argv[1])
+          tag, version = sys.argv[2:4]
+          assert payload['tagName'] == tag, payload
+          assert payload['isDraft'] is False, payload
+          assert payload['isPrerelease'] is False, payload
+          names = {item['name'] for item in payload.get('assets', [])}
+          assert f'safe-android-reverser-{version}.zip' in names, names
+          assert 'SHA256SUMS' in names, names
+          PY
+
+          verify_image() {
+            local image="$1"
+            local capability="$2"
+            docker pull "$image" >/dev/null
+            python3 - "$image" "$capability" "$VERSION" "$RELEASE_SHA" <<'PY'
+          import json
+          import subprocess
+          import sys
+          image, capability, version, revision = sys.argv[1:5]
+          info = json.loads(subprocess.check_output(['docker', 'image', 'inspect', image]))[0]
+          labels = info['Config']['Labels'] or {}
+          expected = {
+              'org.opencontainers.image.version': version,
+              'org.opencontainers.image.revision': revision,
+              'io.safe-reverser.capability.id': capability,
+              'io.safe-reverser.capability.api': '1',
+              'io.safe-reverser.worker.abi': '1',
+          }
+          for key, value in expected.items():
+              assert labels.get(key) == value, (key, labels.get(key), value)
+          digests = info.get('RepoDigests') or []
+          assert digests, image
+          print(digests[0])
+          PY
+          }
+
+          static_image="ghcr.io/${GITHUB_REPOSITORY_OWNER}/safe-android-reverser:${VERSION}"
+          flutter_image="ghcr.io/${GITHUB_REPOSITORY_OWNER}/safe-android-reverser-flutter:${VERSION}"
+          static_digest="$(verify_image "$static_image" static-core | tail -n1)"
+          flutter_digest="$(verify_image "$flutter_image" framework-flutter | tail -n1)"
+
+          mkdir -p "$RUNNER_TEMP/static-data"
+          static_output="$RUNNER_TEMP/static-health.jsonl"
+          printf '%s\n' \
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"release-smoke","version":"1"}}}' \
+            '{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}' \
+            '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"health","arguments":{}}}' \
+          | docker run --rm -i \
+              --network=none --read-only --cap-drop=ALL \
+              --security-opt=no-new-privileges \
+              --tmpfs=/tmp:rw,nosuid,nodev,size=256m \
+              --tmpfs=/work:rw,nosuid,nodev,size=256m \
+              --env="SAFE_REVERSER_PLUGIN_VERSION=${VERSION}" \
+              --env="SAFE_REVERSER_IMAGE_REF=${static_image}" \
+              --volume="$RUNNER_TEMP/static-data:/data:rw" \
+              "$static_image" > "$static_output"
+          python3 - "$static_output" <<'PY'
+          import json
+          import sys
+          rows = [json.loads(line) for line in open(sys.argv[1], encoding='utf-8') if line.strip()]
+          response = next(item for item in rows if item.get('id') == 2)
+          payload = json.loads(response['result']['content'][0]['text'])
+          assert payload['capability_worker']['id'] == 'static-core', payload
+          assert payload['capability_worker']['worker_abi'] == 1, payload
+          PY
+
+          flutter_health="$(docker run --rm \
+            --network=none --read-only --cap-drop=ALL \
+            --security-opt=no-new-privileges \
+            --tmpfs=/tmp:rw,nosuid,nodev,size=256m \
+            --tmpfs=/work:rw,nosuid,nodev,size=256m \
+            "$flutter_image" health)"
+          python3 - "$flutter_health" <<'PY'
+          import json
+          import sys
+          payload = json.loads(sys.argv[1])
+          assert payload['status'] == 'ok', payload
+          assert payload['profile'] == 'framework-flutter', payload
+          assert payload['network_required_at_runtime'] is False, payload
+          assert payload['build_on_demand_allowed'] is False, payload
+          PY
+
+          echo "static_digest=$static_digest" >> "$GITHUB_OUTPUT"
+          echo "flutter_digest=$flutter_digest" >> "$GITHUB_OUTPUT"
+
+      - name: Release summary
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+          TAG: ${{ steps.release.outputs.tag }}
+          RELEASE_REF: ${{ steps.release.outputs.release_ref }}
+          RELEASE_SHA: ${{ steps.branch.outputs.release_sha }}
+          PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
+          STATIC_DIGEST: ${{ steps.verify.outputs.static_digest }}
+          FLUTTER_DIGEST: ${{ steps.verify.outputs.flutter_digest }}
+        run: |
+          {
+            echo "## Safe Android Reverser ${VERSION} — RELEASED"
+            echo
+            echo "- Tag: \`${TAG}\`"
+            echo "- Release source: \`${RELEASE_REF}@${RELEASE_SHA}\`"
+            echo "- Release PR: #${PR_NUMBER}"
+            echo "- static-core: \`${STATIC_DIGEST}\`"
+            echo "- framework-flutter: \`${FLUTTER_DIGEST}\`"
+            echo "- GitHub Release: https://github.com/${GITHUB_REPOSITORY}/releases/tag/${TAG}"
+            echo "- Marketplace metadata: merged to \`master\`"
+            echo "- Post-release image smoke: PASS"
+          } >> "$GITHUB_STEP_SUMMARY"
