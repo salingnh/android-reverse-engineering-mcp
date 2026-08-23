@@ -1,0 +1,143 @@
+name: Test Flutter runtime-cache build
+
+on:
+  pull_request:
+    paths:
+      - 'frameworks/flutter/Dockerfile.runtime'
+      - 'frameworks/flutter/build_runtime.py'
+      - 'frameworks/flutter/cache_identity.py'
+      - 'frameworks/flutter/tools.lock.env'
+      - 'plugins/safe-android-reverser/VERSION'
+      - '.github/workflows/test-flutter-runtime-cache.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  runtime-cache-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Read controlled runtime identity
+        id: identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          source frameworks/flutter/tools.lock.env
+          version="$(tr -d '[:space:]' < plugins/safe-android-reverser/VERSION)"
+          dart_version='3.5.4'
+          snapshot_hash='0123456789abcdef0123456789abcdef'
+          cache_tag="$(python3 frameworks/flutter/cache_identity.py \
+            --dart-version "$dart_version" \
+            --snapshot-hash "$snapshot_hash" \
+            --arch arm64 \
+            --os android \
+            --compressed-pointers true \
+            --blutter-commit "$BLUTTER_COMMIT")"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "dart_version=$dart_version" >> "$GITHUB_OUTPUT"
+          echo "snapshot_hash=$snapshot_hash" >> "$GITHUB_OUTPUT"
+          echo "cache_tag=$cache_tag" >> "$GITHUB_OUTPUT"
+          echo "blutter_repository=$BLUTTER_REPOSITORY" >> "$GITHUB_OUTPUT"
+          echo "blutter_commit=$BLUTTER_COMMIT" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build controlled exact runtime cache
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: frameworks/flutter/Dockerfile.runtime
+          load: true
+          push: false
+          tags: safe-android-reverser-flutter-runtime:release-smoke
+          build-args: |
+            SAFE_REVERSER_VERSION=${{ steps.identity.outputs.version }}
+            SAFE_REVERSER_BUILD_COMMIT=${{ github.sha }}
+            BLUTTER_REPOSITORY=${{ steps.identity.outputs.blutter_repository }}
+            BLUTTER_COMMIT=${{ steps.identity.outputs.blutter_commit }}
+            DART_VERSION=${{ steps.identity.outputs.dart_version }}
+            SNAPSHOT_HASH=${{ steps.identity.outputs.snapshot_hash }}
+            TARGET_ARCH=arm64
+            COMPRESSED_POINTERS=true
+          cache-from: type=gha,scope=flutter-runtime-release-smoke
+          cache-to: type=gha,mode=max,scope=flutter-runtime-release-smoke
+
+      - name: Verify exact runtime-cache provenance
+        env:
+          VERSION: ${{ steps.identity.outputs.version }}
+          DART_VERSION: ${{ steps.identity.outputs.dart_version }}
+          SNAPSHOT_HASH: ${{ steps.identity.outputs.snapshot_hash }}
+          BLUTTER_COMMIT: ${{ steps.identity.outputs.blutter_commit }}
+          CACHE_TAG: ${{ steps.identity.outputs.cache_tag }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import subprocess
+          info = json.loads(subprocess.check_output([
+              'docker', 'image', 'inspect',
+              'safe-android-reverser-flutter-runtime:release-smoke'
+          ]))[0]
+          labels = info['Config']['Labels']
+          expected = {
+              'org.opencontainers.image.version': os.environ['VERSION'],
+              'io.safe-reverser.capability.id': 'framework-flutter',
+              'io.safe-reverser.capability.api': '1',
+              'io.safe-reverser.worker.abi': '1',
+              'io.safe-reverser.runtime-cache.schema': '2',
+              'io.safe-reverser.blutter.commit': os.environ['BLUTTER_COMMIT'],
+              'io.safe-reverser.dart.version': os.environ['DART_VERSION'],
+              'io.safe-reverser.dart.snapshot': os.environ['SNAPSHOT_HASH'],
+              'io.safe-reverser.dart.arch': 'arm64',
+              'io.safe-reverser.dart.compressed-pointers': 'true',
+          }
+          for key, value in expected.items():
+              assert labels.get(key) == value, (key, labels.get(key), value)
+          assert os.environ['CACHE_TAG'].startswith('dart-3.5.4-arm64-cp-')
+          PY
+
+      - name: Verify cached analyzer is offline-safe
+        env:
+          BLUTTER_COMMIT: ${{ steps.identity.outputs.blutter_commit }}
+        run: |
+          output="$(docker run --rm \
+            --network=none \
+            --read-only \
+            --cap-drop=ALL \
+            --security-opt=no-new-privileges \
+            --tmpfs=/tmp:rw,nosuid,nodev,size=256m \
+            --tmpfs=/work:rw,nosuid,nodev,size=256m \
+            safe-android-reverser-flutter-runtime:release-smoke health)"
+          python3 - "$output" "$BLUTTER_COMMIT" <<'PY'
+          import json
+          import sys
+          payload = json.loads(sys.argv[1])
+          assert payload['status'] == 'ok', payload
+          assert payload['blutter_commit'] == sys.argv[2], payload
+          assert payload['cached_binary_count'] >= 1, payload
+          assert payload['network_required_at_runtime'] is False, payload
+          assert payload['network_capable_upstream_path_used'] is False, payload
+          assert payload['build_on_demand_allowed'] is False, payload
+          assert payload['registry_selection_owned_by_worker'] is False, payload
+          PY
+
+      - name: Verify redistribution licenses
+        run: |
+          docker run --rm \
+            --network=none --read-only --cap-drop=ALL \
+            --security-opt=no-new-privileges \
+            --tmpfs=/tmp:rw,nosuid,nodev,size=256m \
+            --tmpfs=/work:rw,nosuid,nodev,size=256m \
+            --entrypoint=/bin/sh \
+            safe-android-reverser-flutter-runtime:release-smoke \
+            -ec '
+              binary="$(find /opt/blutter/bin -maxdepth 1 -type f -name "blutter_*" -print -quit)"
+              test -n "$binary"
+              "$binary" --help >/dev/null
+              grep -q "MIT License" /opt/licenses/BLUTTER-LICENSE
+              grep -q "Redistribution and use in source and binary forms" /opt/licenses/DART-SDK-LICENSE
+            '
