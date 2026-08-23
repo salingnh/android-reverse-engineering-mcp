@@ -1,0 +1,84 @@
+name: Test release automation
+
+on:
+  pull_request:
+    paths:
+      - 'scripts/prepare_release_metadata.py'
+      - '.github/workflows/ship-safe-reverser.yml'
+      - '.github/workflows/post-release-normalize.yml'
+      - '.github/workflows/release-safe-reverser.yml'
+      - '.github/workflows/release-safe-reverser-by-tag.yml'
+      - '.github/workflows/test-release-automation.yml'
+      - 'docs/AUTOMATED_RELEASE.md'
+      - 'docs/RELEASING.md'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  contracts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Validate helper syntax
+        run: python3 -m py_compile scripts/prepare_release_metadata.py
+
+      - name: Validate workflow YAML syntax
+        shell: bash
+        run: |
+          ruby -e 'require "yaml"; ARGV.each { |path| YAML.load_file(path) }' \
+            .github/workflows/ship-safe-reverser.yml \
+            .github/workflows/post-release-normalize.yml \
+            .github/workflows/release-safe-reverser.yml \
+            .github/workflows/release-safe-reverser-by-tag.yml
+
+      - name: Test deterministic metadata preparation in isolated copy
+        shell: bash
+        run: |
+          set -euo pipefail
+          target="$RUNNER_TEMP/release-metadata-test"
+          mkdir -p "$target"
+          tar --exclude=.git -cf - . | tar -xf - -C "$target"
+          cd "$target"
+
+          current="$(tr -d '[:space:]' < plugins/safe-android-reverser/VERSION)"
+          next="$(python3 - "$current" <<'PY'
+          import sys
+          major, minor, patch = map(int, sys.argv[1].split('.'))
+          print(f'{major}.{minor}.{patch + 1}')
+          PY
+          )"
+
+          python3 scripts/prepare_release_metadata.py "$next"
+          python3 scripts/prepare_release_metadata.py "$next" --check
+          python3 scripts/check_release_consistency.py
+
+          before="$(find plugins/safe-android-reverser/VERSION \
+            plugins/safe-android-reverser/.claude-plugin/plugin.json \
+            .claude-plugin/marketplace.json README.md docs/INSTALL_MCP.md \
+            -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum)"
+          python3 scripts/prepare_release_metadata.py "$next"
+          after="$(find plugins/safe-android-reverser/VERSION \
+            plugins/safe-android-reverser/.claude-plugin/plugin.json \
+            .claude-plugin/marketplace.json README.md docs/INSTALL_MCP.md \
+            -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum)"
+          [[ "$before" == "$after" ]]
+
+      - name: Validate one-click release safety markers
+        shell: bash
+        run: |
+          set -euo pipefail
+          ship=.github/workflows/ship-safe-reverser.yml
+          post=.github/workflows/post-release-normalize.yml
+
+          grep -Fq 'group: safe-android-reverser-production-release' "$ship"
+          grep -Fq 'scripts/prepare_release_metadata.py' "$ship"
+          grep -Fq 'Ensure exact-head release CI' "$ship"
+          grep -Fq 'release-safe-reverser.yml' "$ship"
+          grep -Fq -- '--match-head-commit' "$ship"
+          grep -Fq 'Post-release smoke and provenance verification' "$ship"
+          grep -Fq 'workflow_run:' "$post"
+          grep -Fq 'github.event.workflow_run.conclusion == ' "$post"
+          grep -Fq 'git push origin HEAD:master' "$post"
