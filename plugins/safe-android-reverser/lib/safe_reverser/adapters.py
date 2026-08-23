@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import os
 from pathlib import Path
 from typing import Any, Protocol
@@ -9,6 +10,7 @@ from .flutter import RUNTIME_CACHE_SCHEMA, FlutterCapability
 from .paths import PathPolicyError, ensure_private_child
 from .registry import CapabilityRegistry
 from .runtime import ContainerRuntime, RuntimeErrorSafe
+from .tool_catalog import catalogs_equal, load_tool_catalog
 from .worker import McpContainerWorker, WorkerProtocolError
 
 MAX_ENABLED_CAPABILITIES = 64
@@ -27,11 +29,20 @@ class CapabilityAdapter(Protocol):
 
 
 class McpWorkerAdapter:
-    """Generic adapter for an MCP-over-stdio capability worker image."""
+    """Generic adapter for an MCP-over-stdio capability worker image.
 
-    def __init__(self, worker: McpContainerWorker) -> None:
+    Public MCP discovery must remain host-local. The trusted tool catalog is
+    shipped with the plugin and returned immediately from tools/list; worker
+    image verification and worker-tool drift checks remain readiness concerns
+    and happen through status/health or on the first actual tool call.
+    """
+
+    def __init__(
+        self, worker: McpContainerWorker, public_tools: list[dict[str, Any]]
+    ) -> None:
         self.worker = worker
         self.manifest = worker.manifest
+        self._public_tools = copy.deepcopy(public_tools)
 
     def status(self) -> dict[str, Any]:
         try:
@@ -45,7 +56,11 @@ class McpWorkerAdapter:
         try:
             # `ready` means the worker image is compatible and its public/internal
             # MCP surface conforms to the Worker ABI, not merely that the image exists.
-            self.worker.tools()
+            actual_tools = self.worker.tools()
+            if not catalogs_equal(self._public_tools, actual_tools):
+                raise WorkerProtocolError(
+                    "capability worker tool descriptors drift from the trusted host catalog"
+                )
         except WorkerProtocolError as exc:
             return {
                 "state": "degraded",
@@ -66,7 +81,8 @@ class McpWorkerAdapter:
         return self.worker.call_internal("health", {})
 
     def tools(self) -> list[dict[str, Any]]:
-        return self.worker.tools()
+        # MCP initialize/tools-list must not pull, inspect or start worker images.
+        return copy.deepcopy(self._public_tools)
 
     def call(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
         return self.worker.call(name, args)
@@ -90,6 +106,7 @@ class FlutterAotAdapter:
         }
 
     def tools(self) -> list[dict[str, Any]]:
+        # Flutter tool descriptors are already host-local static metadata.
         return self.capability.tools()
 
     def call(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
@@ -152,6 +169,7 @@ def build_capability_adapters(
             f"unknown explicitly enabled capabilities: {sorted(unknown_enabled)}"
         )
 
+    catalog_root = registry.manifest_dir.parent / "tool-catalogs"
     adapters: dict[str, CapabilityAdapter] = {}
     for capability_id, manifest in registry.manifests().items():
         if manifest.activation == "opt-in" and capability_id not in enabled_opt_in:
@@ -171,7 +189,8 @@ def build_capability_adapters(
                 data_dir=capability_data,
                 version=version,
             )
-            adapter: CapabilityAdapter = McpWorkerAdapter(worker)
+            public_tools = load_tool_catalog(catalog_root, manifest)
+            adapter: CapabilityAdapter = McpWorkerAdapter(worker, public_tools)
         elif manifest.adapter == "flutter-aot":
             capability = FlutterCapability(
                 runtime,
