@@ -36,6 +36,9 @@ jobs:
       - name: Test platform architecture contracts
         run: PYTHONPATH=plugins/safe-android-reverser/lib python3 plugins/safe-android-reverser/tests/test_platform_architecture.py
 
+      - name: Test MCP discovery startup
+        run: PYTHONPATH=plugins/safe-android-reverser/lib python3 plugins/safe-android-reverser/tests/test_mcp_discovery.py
+
       - name: Test public operation ownership contracts
         run: PYTHONPATH=plugins/safe-android-reverser/lib python3 plugins/safe-android-reverser/tests/test_public_operation_contract.py
 
@@ -64,9 +67,11 @@ jobs:
             plugins/safe-android-reverser/lib/safe_reverser/jobs.py \
             plugins/safe-android-reverser/lib/safe_reverser/worker.py \
             plugins/safe-android-reverser/lib/safe_reverser/flutter.py \
+            plugins/safe-android-reverser/lib/safe_reverser/tool_catalog.py \
             plugins/safe-android-reverser/lib/safe_reverser/adapters.py \
             plugins/safe-android-reverser/lib/safe_reverser/control_plane.py \
             plugins/safe-android-reverser/tests/test_platform_architecture.py \
+            plugins/safe-android-reverser/tests/test_mcp_discovery.py \
             plugins/safe-android-reverser/tests/test_public_operation_contract.py \
             plugins/safe-android-reverser/tests/test_cross_worker_contracts.py \
             plugins/safe-android-reverser/tests/test_runtime_image_pinning.py \
@@ -75,6 +80,7 @@ jobs:
       - name: Validate single public MCP manifest
         run: |
           python3 -m json.tool plugins/safe-android-reverser/.mcp.json >/dev/null
+          python3 -m json.tool plugins/safe-android-reverser/tool-catalogs/static-core.json >/dev/null
           python3 - <<'PY'
           import json
           manifest = json.load(open('plugins/safe-android-reverser/.mcp.json', encoding='utf-8'))
@@ -87,7 +93,9 @@ jobs:
           from pathlib import Path
           from safe_reverser.contracts import RESERVED_PUBLIC_OPERATIONS
           from safe_reverser.registry import CapabilityRegistry
-          registry = CapabilityRegistry(Path('plugins/safe-android-reverser/capabilities'))
+          from safe_reverser.tool_catalog import load_tool_catalog
+          plugin_root = Path('plugins/safe-android-reverser')
+          registry = CapabilityRegistry(plugin_root / 'capabilities')
           baseline = {'static-core', 'framework-flutter'}
           assert baseline.issubset(registry.manifests()), registry.manifests()
           static = registry.get('static-core')
@@ -96,6 +104,8 @@ jobs:
           assert static.adapter == 'mcp-container'
           assert static.activation == 'required'
           assert not RESERVED_PUBLIC_OPERATIONS.intersection(static.operations)
+          tools = load_tool_catalog(plugin_root / 'tool-catalogs', static)
+          assert {item['name'] for item in tools} == set(static.operations), tools
           assert flutter.protocol == 'cli-json'
           assert flutter.adapter == 'flutter-aot'
           assert flutter.activation == 'required'
