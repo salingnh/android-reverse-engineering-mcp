@@ -1,6 +1,6 @@
 # Release automation
 
-The standard production release path is now the one-click workflow:
+The standard production release path is the one-click workflow:
 
 ```text
 Ship Safe Android Reverser
@@ -75,18 +75,18 @@ Automation does not weaken release gates:
 - post-release verification requires the tagged release commit to be reachable from `master`;
 - published static and Flutter images are pulled again and smoke-tested with offline/read-only/cap-drop restrictions.
 
-## Internal / recovery workflows
+## Internal recovery workflow
 
-These remain intentionally available as lower-level recovery building blocks:
+The lower-level publisher remains intentionally available because `Ship Safe Android Reverser` invokes it and it can also be used to diagnose or resume a partially completed publication:
 
 ```text
-Release Safe Android Reverser
-Manual release Safe Android Reverser
+Internal publisher workflow file:
+.github/workflows/release-safe-reverser.yml
 ```
 
-Normal releases should not start there. They are useful only when resuming or diagnosing a partially completed release.
+It accepts explicit `version`, `release_ref`, and `expected_sha` as machine-to-machine safety inputs. It is not the normal operator entrypoint.
 
-The guarded internal orchestrator continues to accept explicit `version`, `release_ref`, and `expected_sha` because those are machine-to-machine safety inputs. The one-click workflow derives them automatically.
+The former tag-only wrapper has been removed. There is now only one normal release action exposed by the project: `Ship Safe Android Reverser`.
 
 ## GitHub token behavior
 
