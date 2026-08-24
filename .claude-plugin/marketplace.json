@@ -27,7 +27,7 @@
       "name": "safe-android-reverser",
       "source": "./plugins/safe-android-reverser",
       "description": "Capability-aware Android reverse engineering through one sandboxed MCP control plane with static-core and Flutter AOT semantic analysis.",
-      "version": "0.3.0",
+      "version": "0.3.1",
       "author": {
         "name": "salingnh"
       },
