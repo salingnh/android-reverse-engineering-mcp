@@ -88,6 +88,7 @@ class GitHubActionsProviderTests(unittest.TestCase):
         self.assertEqual(request.headers["X-github-api-version"], GITHUB_API_VERSION)
         payload = json.loads(request.data)
         self.assertEqual(payload["ref"], "feat/0.4-runtime-cache-resolver")
+        self.assertIs(payload["return_run_details"], True)
         inputs = payload["inputs"]
         self.assertEqual(inputs["request_identity"], runtime_identity.request_identity)
         self.assertEqual(inputs["dart_version"], "3.11.1")
@@ -100,6 +101,26 @@ class GitHubActionsProviderTests(unittest.TestCase):
         self.assertEqual(inputs["capability_api"], "1")
         self.assertEqual(inputs["worker_abi"], "1")
         self.assertNotIn("stage-a-secret-token", json.dumps(payload))
+
+    def test_namespace_binds_persisted_handle_to_nonsecret_configuration(self):
+        first = self.provider(QueueOpener())
+        second = GitHubActionsControlledBuildProvider(
+            token="rotated-secret-token",
+            repository="salingnh/android-reverse-engineering-mcp",
+            workflow="build-flutter-runtime-cache.yml",
+            ref="feat/0.4-runtime-cache-resolver",
+            opener=QueueOpener(),
+        )
+        changed = GitHubActionsControlledBuildProvider(
+            token="stage-a-secret-token",
+            repository="salingnh/android-reverse-engineering-mcp",
+            workflow="build-flutter-runtime-cache.yml",
+            ref="master",
+            opener=QueueOpener(),
+        )
+        self.assertEqual(first.namespace, second.namespace)
+        self.assertNotEqual(first.namespace, changed.namespace)
+        self.assertNotIn("secret", first.namespace)
 
     def test_submit_rejects_noncanonical_request_identity(self):
         provider = self.provider(QueueOpener(FakeResponse({"workflow_run_id": 42})))

@@ -512,6 +512,30 @@ class RuntimeCacheResolver:
             started_at_epoch=started,
             deadline_epoch=started + self.build_timeout_seconds,
         )
+        # Reconcile before every submit, including retries after a prior
+        # ambiguous transport result. Provider-side acceptance may become
+        # visible only after the first reconciliation attempt; submitting first
+        # on retry would knowingly permit duplicate builds after restart or
+        # eventual-consistency delay.
+        try:
+            existing = self.provider.reconcile(
+                identity, identity.request_identity
+            )
+        except ControlledBuildError as exc:
+            return self._provider_failure(identity, cache_ref, exc)
+        if existing is not None:
+            if existing.namespace != self.provider.namespace:
+                return self._failed(
+                    identity,
+                    cache_ref,
+                    "provider_contract_failed",
+                    "controlled build provider returned an incompatible handle",
+                    retryable=False,
+                )
+            payload["provider_handle"] = existing.to_private_dict()
+            payload["updated_at_epoch"] = self._now()
+            self.store.write(identity, payload)
+            return self._building(identity, cache_ref, payload)
         try:
             handle = self.provider.submit(identity, identity.request_identity)
         except ControlledBuildError as exc:

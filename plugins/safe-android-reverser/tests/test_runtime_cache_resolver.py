@@ -109,6 +109,7 @@ class FakeProvider:
         self.status_error = None
         self.status_value = ProviderBuildStatus(ProviderBuildState.BUILDING)
         self.reconcile_handle = None
+        self.reconcile_values = None
         self.submit_delay = 0
         self.status_hook = None
         self.lock = threading.Lock()
@@ -135,6 +136,8 @@ class FakeProvider:
 
     def reconcile(self, _identity, _request_identity):
         self.reconcile_count += 1
+        if self.reconcile_values is not None:
+            return self.reconcile_values.pop(0)
         return self.reconcile_handle
 
     def cancel(self, _handle):
@@ -208,6 +211,17 @@ class RuntimeCacheResolverTests(unittest.TestCase):
         result = self.resolver(provider).resolve(identity(), CACHE_REF)
         self.assertEqual(result.state, RuntimeCacheState.BUILDING)
         self.assertEqual(provider.submit_count, 1)
+        self.assertEqual(provider.reconcile_count, 1)
+
+    def test_existing_provider_request_is_reconciled_before_submit(self):
+        provider = FakeProvider(clock=self.clock)
+        provider.reconcile_handle = ProviderBuildHandle(
+            provider.namespace, "existing-request", int(self.clock())
+        )
+        result = self.resolver(provider).resolve(identity(), CACHE_REF)
+        self.assertEqual(result.state, RuntimeCacheState.BUILDING)
+        self.assertEqual(provider.reconcile_count, 1)
+        self.assertEqual(provider.submit_count, 0)
 
     def test_successful_build_is_verified_before_ready(self):
         runtime_identity = identity()
@@ -296,6 +310,24 @@ class RuntimeCacheResolverTests(unittest.TestCase):
         self.assertEqual(resolver.resolve(identity(), CACHE_REF).state, RuntimeCacheState.BUILDING)
         self.assertEqual(provider.submit_count, 2)
 
+    def test_retry_reconciles_eventually_visible_request_without_resubmit(self):
+        provider = FakeProvider(clock=self.clock)
+        provider.submit_error = ProviderRequestError("ambiguous transport result")
+        resolver = self.resolver(provider)
+        self.assertEqual(
+            resolver.resolve(identity(), CACHE_REF).state,
+            RuntimeCacheState.FAILED,
+        )
+        self.assertEqual(provider.submit_count, 1)
+        self.clock.advance(5)
+        provider.submit_error = None
+        provider.reconcile_handle = ProviderBuildHandle(
+            provider.namespace, "eventually-visible", int(self.clock())
+        )
+        result = resolver.resolve(identity(), CACHE_REF)
+        self.assertEqual(result.state, RuntimeCacheState.BUILDING)
+        self.assertEqual(provider.submit_count, 1)
+
     def test_restart_resumes_persisted_build(self):
         provider = FakeProvider(clock=self.clock)
         first = self.resolver(provider)
@@ -334,13 +366,16 @@ class RuntimeCacheResolverTests(unittest.TestCase):
     def test_lost_submit_response_reconciles_before_failure_or_retry(self):
         provider = FakeProvider(clock=self.clock)
         provider.submit_error = ProviderRequestError("ambiguous transport result")
-        provider.reconcile_handle = ProviderBuildHandle(
-            provider.namespace, "accepted-before-disconnect", int(self.clock())
-        )
+        provider.reconcile_values = [
+            None,
+            ProviderBuildHandle(
+                provider.namespace, "accepted-before-disconnect", int(self.clock())
+            ),
+        ]
         result = self.resolver(provider).resolve(identity(), CACHE_REF)
         self.assertEqual(result.state, RuntimeCacheState.BUILDING)
         self.assertEqual(provider.submit_count, 1)
-        self.assertEqual(provider.reconcile_count, 1)
+        self.assertEqual(provider.reconcile_count, 2)
 
     def test_concurrent_calls_submit_exactly_one_build(self):
         provider = FakeProvider(clock=self.clock)

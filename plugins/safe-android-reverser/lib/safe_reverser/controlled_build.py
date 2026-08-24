@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import time
@@ -177,10 +178,28 @@ class GitHubActionsControlledBuildProvider:
         self.timeout_seconds = max(1, min(int(timeout_seconds), 60))
         self._opener = opener or urllib.request.urlopen
         self._clock = clock
+        provider_config = json.dumps(
+            {
+                "api_base": self.api_base,
+                "repository": self.repository,
+                "workflow": self.workflow,
+                "ref": self.ref,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        ).encode("ascii")
+        self._namespace = (
+            "github-actions-v1-"
+            + hashlib.sha256(provider_config).hexdigest()[:16]
+        )
 
     @property
     def namespace(self) -> str:
-        return "github-actions-v1"
+        # The private namespace binds persisted opaque handles to one provider
+        # configuration. Credentials are intentionally excluded from the
+        # fingerprint so rotation does not strand an in-flight request.
+        return self._namespace
 
     def _workflow_path(self) -> str:
         repository = "/".join(
@@ -272,7 +291,11 @@ class GitHubActionsControlledBuildProvider:
         response = self._request(
             "POST",
             self._workflow_path() + "/dispatches",
-            payload={"ref": self.ref, "inputs": self._inputs(identity, request_identity)},
+            payload={
+                "ref": self.ref,
+                "inputs": self._inputs(identity, request_identity),
+                "return_run_details": True,
+            },
         )
         raw_id = response.get("workflow_run_id")
         try:
@@ -308,6 +331,10 @@ class GitHubActionsControlledBuildProvider:
         identity: RuntimeIdentity,
         request_identity: str,
     ) -> ProviderBuildStatus:
+        if request_identity != identity.request_identity:
+            raise ProviderPollingError(
+                "controlled-build request identity does not match runtime identity"
+            )
         if handle.namespace != self.namespace or not handle.opaque_id.isdigit():
             raise ProviderPollingError("controlled-build handle belongs to another provider")
         run = self._request(
@@ -345,6 +372,10 @@ class GitHubActionsControlledBuildProvider:
     def reconcile(
         self, identity: RuntimeIdentity, request_identity: str
     ) -> ProviderBuildHandle | None:
+        if request_identity != identity.request_identity:
+            raise ProviderPollingError(
+                "controlled-build request identity does not match runtime identity"
+            )
         query = urllib.parse.urlencode(
             {
                 "branch": self.ref,
