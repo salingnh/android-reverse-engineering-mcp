@@ -25,7 +25,17 @@ from safe_reverser.jobs import AnalysisJobStore, JobStoreError
 import safe_reverser.jobs as jobs_module
 from safe_reverser.paths import PathPolicyError, secure_child, secure_directory_root
 from safe_reverser.registry import CapabilityRegistry
-from safe_reverser.runtime import ContainerRuntime, RunResult, RuntimeErrorSafe
+from safe_reverser.runtime import (
+    ContainerRuntime,
+    RunResult,
+    RuntimeErrorSafe,
+    VerifiedImage,
+)
+from safe_reverser.runtime_cache import (
+    RuntimeCacheResolution,
+    RuntimeCacheState,
+    RuntimeIdentity,
+)
 
 
 class FakeRuntime:
@@ -36,7 +46,13 @@ class FakeRuntime:
     def ensure_image(self, image, *, required_labels):
         self.image = image
         self.required_labels = dict(required_labels)
-        return dict(required_labels)
+        labels = dict(required_labels)
+        labels.setdefault("org.opencontainers.image.revision", "f" * 40)
+        return VerifiedImage(
+            requested_ref=image,
+            immutable_ref="sha256:" + "a" * 64,
+            labels=labels,
+        )
 
     def validate_tmpfs_spec(self, spec):
         ContainerRuntime.validate_tmpfs_spec(spec)
@@ -308,7 +324,8 @@ class PlatformArchitectureTests(unittest.TestCase):
             )
             self.assertIn('io.safe-reverser.capability.api="1"', text)
             self.assertIn('io.safe-reverser.worker.abi="1"', text)
-        self.assertIn('io.safe-reverser.runtime-cache.schema="2"', runtime)
+        self.assertIn('io.safe-reverser.runtime-cache.schema="3"', runtime)
+        self.assertIn('io.safe-reverser.dart.os="${TARGET_OS}"', runtime)
 
     def test_flutter_worker_does_not_own_registry_selection(self):
         adapter = (
@@ -321,6 +338,38 @@ class PlatformArchitectureTests(unittest.TestCase):
         self.assertNotIn("ghcr.io/salingnh/safe-android-reverser-flutter", adapter)
         self.assertNotIn('"recommended_image"', adapter)
         self.assertNotIn("SAFE_FLUTTER_IMAGE_REPOSITORY", host_adapter)
+
+    def test_controlled_builder_is_deduplicated_outside_worker_boundary(self):
+        workflow = (
+            REPO_ROOT / ".github" / "workflows" / "build-flutter-runtime-cache.yml"
+        ).read_text(encoding="utf-8")
+        flutter_host = (
+            PLUGIN_ROOT / "lib" / "safe_reverser" / "flutter.py"
+        ).read_text(encoding="utf-8")
+        provider = (
+            PLUGIN_ROOT / "lib" / "safe_reverser" / "controlled_build.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn("run-name: Runtime cache ${{ inputs.request_identity }}", workflow)
+        self.assertIn(
+            "group: flutter-runtime-cache-${{ inputs.request_identity }}", workflow
+        )
+        for field in (
+            "request_identity",
+            "dart_version",
+            "snapshot_hash",
+            "arch",
+            "os",
+            "compressed_pointers",
+            "blutter_commit",
+            "runtime_cache_schema",
+            "capability_api",
+            "worker_abi",
+        ):
+            self.assertIn(f"      {field}:", workflow)
+        self.assertNotIn("GitHub", flutter_host)
+        self.assertNotIn("workflow_run_id", flutter_host)
+        self.assertIn("class GitHubActionsControlledBuildProvider", provider)
+        self.assertNotIn("run_container", provider)
 
     def test_generic_capability_image_override_precedes_compat_alias(self):
         manifest = self.registry.get("framework-flutter")
@@ -357,17 +406,29 @@ class PlatformArchitectureTests(unittest.TestCase):
                 "cache_tag": "dart-3.5.4-arm64-cp-" + "d" * 64,
             },
         }
+        prepared["runtime"]["cache_tag"] = RuntimeIdentity(
+            dart_version="3.5.4",
+            snapshot_hash="b" * 32,
+            arch="arm64",
+            os="android",
+            compressed_pointers=True,
+            blutter_commit="c" * 40,
+            runtime_cache_schema=3,
+            capability_api=1,
+            worker_abi=1,
+        ).cache_tag
         image, dart_runtime, commit = capability._runtime_image(prepared)
         self.assertTrue(
             image.startswith("ghcr.io/salingnh/safe-android-reverser-flutter:")
         )
         self.assertEqual(commit, "c" * 40)
-        ready, _ = capability._ensure_runtime_ready(image, dart_runtime, commit)
-        self.assertTrue(ready)
+        resolution = capability._resolve_runtime_cache(image, dart_runtime, commit)
+        self.assertEqual(resolution.state, RuntimeCacheState.READY)
         self.assertEqual(runtime.required_labels["io.safe-reverser.worker.abi"], "1")
         self.assertEqual(
-            runtime.required_labels["io.safe-reverser.runtime-cache.schema"], "2"
+            runtime.required_labels["io.safe-reverser.runtime-cache.schema"], "3"
         )
+        self.assertEqual(runtime.required_labels["io.safe-reverser.dart.os"], "android")
 
     def test_flutter_analysis_uses_shared_job_store_and_cleans_prepared_input(self):
         runtime = FakeRuntime()
@@ -403,7 +464,18 @@ class PlatformArchitectureTests(unittest.TestCase):
         ), mock.patch.object(
             capability, "_prepare", side_effect=fake_prepare
         ), mock.patch.object(
-            capability, "_ensure_runtime_ready", return_value=(True, "ready")
+            capability,
+            "_resolve_runtime_cache",
+            return_value=RuntimeCacheResolution(
+                RuntimeCacheState.READY,
+                "f" * 64,
+                "example.invalid/flutter:fixture",
+                image=VerifiedImage(
+                    "example.invalid/flutter:fixture",
+                    "sha256:" + "f" * 64,
+                    {"org.opencontainers.image.revision": "e" * 40},
+                ),
+            ),
         ), mock.patch.object(
             capability,
             "_execute",
@@ -419,6 +491,61 @@ class PlatformArchitectureTests(unittest.TestCase):
         job = capability.jobs.get(result["job_id"])
         self.assertFalse((job / "input").exists())
         self.assertEqual(capability.jobs.read(job)["status"], "ok")
+
+    def test_flutter_cache_build_state_is_semantic_and_credential_free(self):
+        runtime = FakeRuntime()
+        capability = FlutterCapability(
+            runtime,
+            self.registry.get("framework-flutter"),
+            version="0.3.0",
+            project_dir=self.project,
+            data_dir=self.data,
+        )
+        prepared = {
+            "status": "runtime_cache_miss",
+            "profile": "framework-flutter",
+            "blutter_commit": "c" * 40,
+            "runtime": {
+                "identity_status": "identified",
+                "dart_version": "3.11.1",
+                "os": "android",
+                "arch": "arm64",
+                "snapshot_hash": "b" * 32,
+                "compressed_pointers": True,
+                "cache_tag": "dart-3.11.1-arm64-cp-" + "d" * 64,
+            },
+        }
+
+        def fake_prepare(job, _artifact):
+            (job / "input").mkdir()
+            return prepared
+
+        secret = "stage-a-builder-secret"
+        with mock.patch.dict(
+            os.environ,
+            {"SAFE_REVERSER_CONTROLLED_BUILD_TOKEN": secret},
+            clear=False,
+        ), mock.patch.object(
+            capability, "_prepare", side_effect=fake_prepare
+        ), mock.patch.object(
+            capability,
+            "_resolve_runtime_cache",
+            return_value=RuntimeCacheResolution(
+                RuntimeCacheState.BUILDING,
+                "e" * 64,
+                "example.invalid/flutter:fixture",
+            ),
+        ):
+            result = capability.analyze(
+                {"artifact": "app.apk", "timeout_seconds": 60}
+            )
+        self.assertEqual(result["status"], "runtime_cache_building")
+        self.assertEqual(result["runtime_cache"]["state"], "BUILDING")
+        serialized = json.dumps(result)
+        self.assertNotIn(secret, serialized)
+        self.assertNotIn("GitHub", serialized)
+        job = capability.jobs.get(result["job_id"])
+        self.assertNotIn(secret, (job / "job.json").read_text(encoding="utf-8"))
 
     def test_control_plane_is_adapter_registry_driven(self):
         env = {

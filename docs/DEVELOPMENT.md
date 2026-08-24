@@ -123,6 +123,24 @@ Breaking changes require:
 5. updated release/upgrade documentation;
 6. senior architecture/security review.
 
+### Controlled runtime-cache builders
+
+Analyzer workers remain offline when a runtime cache is missing. Optional controlled build providers are configured only on the host control plane:
+
+```text
+SAFE_REVERSER_CONTROLLED_BUILD_PROVIDER=github-actions
+SAFE_REVERSER_CONTROLLED_BUILD_TOKEN=<host-only credential>
+SAFE_REVERSER_CONTROLLED_BUILD_REPOSITORY=salingnh/android-reverse-engineering-mcp
+SAFE_REVERSER_CONTROLLED_BUILD_WORKFLOW=build-flutter-runtime-cache.yml
+SAFE_REVERSER_CONTROLLED_BUILD_REF=master
+SAFE_REVERSER_CONTROLLED_BUILD_TIMEOUT_SECONDS=21600
+SAFE_REVERSER_CONTROLLED_BUILD_RETRY_SECONDS=300
+```
+
+Do not use a generic provider token variable that is automatically inherited by child processes. The Runtime Driver passes an explicit allowlist of worker environment variables; controlled-build credentials must never be added to it. Provider configuration and opaque handles are private implementation details and are not public MCP operations.
+
+If no provider is configured, an exact cache miss remains `BUILD_REQUIRED`. If one is configured, subsequent analysis calls reconcile `BUILDING` state and use the cache only after exact provenance and immutable-image verification.
+
 Operation names alone are not sufficient for long-term compatibility. Before 1.0, public semantic operations must gain a stable schema compatibility policy for inputs and externally meaningful outputs.
 
 ## 7. Security engineering rules

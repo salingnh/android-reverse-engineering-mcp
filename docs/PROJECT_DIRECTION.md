@@ -283,6 +283,32 @@ The host maps that identity to a repository, verifies provenance labels, resolve
 
 A cache/ABI change creates a new identity rather than silently reusing incompatible runtime code.
 
+Starting in 0.4 Stage A, cache misses are resolved through a durable host service rather than analyzer-specific orchestration:
+
+```text
+Flutter capability
+       |
+       v
+RuntimeCacheResolver
+       |-- lookup / exact verification / immutable image selection
+       |-- bounded private persistence / restart reconciliation / deduplication
+       `-- ControlledBuildProvider
+              |-- GitHub Actions provider
+              |-- future Jenkins or enterprise provider
+              `-- future self-hosted or prebuilt provider
+```
+
+GitHub Actions is one transport implementation, not the architecture. Public analysis responses may report only semantic cache state (`READY`, `BUILD_REQUIRED`, `BUILDING`, `FAILED`); workflow names, run IDs, HTTP endpoints, credentials, and provider-specific status values remain behind the provider boundary.
+
+The private Flutter runtime-cache schema moves from 2 to 3 to bind the OS as a verifiable OCI label. Schema-2 images are not mutated. Compatible identities are rebuilt under schema 3, whose changed digest prevents silent reuse. Capability API 1 and Worker ABI 1 are unchanged.
+
+Host modules added by Stage A are durable platform services:
+
+```text
+safe_reverser/runtime_cache.py     exact identity, state, persistence, resolver
+safe_reverser/controlled_build.py  provider contract and provider implementations
+```
+
 ## Compatibility direction
 
 Current independently versioned contracts:
@@ -292,7 +318,7 @@ Capability API       1
 Worker ABI           1
 EvidenceEnvelope     1
 PEG schema           2
-Flutter cache schema 2
+Flutter cache schema 3
 ```
 
 A breaking contract change requires:

@@ -62,6 +62,7 @@ jobs:
             DART_VERSION=${{ steps.identity.outputs.dart_version }}
             SNAPSHOT_HASH=${{ steps.identity.outputs.snapshot_hash }}
             TARGET_ARCH=arm64
+            TARGET_OS=android
             COMPRESSED_POINTERS=true
           cache-from: type=gha,scope=flutter-runtime-release-smoke
           cache-to: type=gha,mode=max,scope=flutter-runtime-release-smoke
@@ -88,11 +89,12 @@ jobs:
               'io.safe-reverser.capability.id': 'framework-flutter',
               'io.safe-reverser.capability.api': '1',
               'io.safe-reverser.worker.abi': '1',
-              'io.safe-reverser.runtime-cache.schema': '2',
+              'io.safe-reverser.runtime-cache.schema': '3',
               'io.safe-reverser.blutter.commit': os.environ['BLUTTER_COMMIT'],
               'io.safe-reverser.dart.version': os.environ['DART_VERSION'],
               'io.safe-reverser.dart.snapshot': os.environ['SNAPSHOT_HASH'],
               'io.safe-reverser.dart.arch': 'arm64',
+              'io.safe-reverser.dart.os': 'android',
               'io.safe-reverser.dart.compressed-pointers': 'true',
           }
           for key, value in expected.items():

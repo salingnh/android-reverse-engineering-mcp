@@ -6,7 +6,7 @@ import hashlib
 import json
 import re
 
-CACHE_SCHEMA_VERSION = 2
+CACHE_SCHEMA_VERSION = 3
 CAPABILITY_API_VERSION = 1
 WORKER_ABI_VERSION = 1
 DART_VERSION_RE = re.compile(
@@ -96,6 +96,43 @@ def runtime_cache_tag(
     return tag
 
 
+def runtime_request_identity(
+    *,
+    dart_version: str,
+    snapshot_hash: str,
+    arch: str,
+    compressed_pointers: bool,
+    blutter_commit: str,
+    os_name: str | None = None,
+    os: str | None = None,
+) -> str:
+    runtime_os = os_name if os_name is not None else os
+    if os_name is not None and os is not None and os_name != os:
+        raise ValueError("conflicting Flutter runtime operating-system values")
+    identity = validate_runtime_identity(
+        dart_version=dart_version,
+        snapshot_hash=snapshot_hash,
+        arch=arch,
+        os_name=str(runtime_os or ""),
+        blutter_commit=blutter_commit,
+    )
+    canonical = {
+        **identity,
+        "compressed_pointers": bool(compressed_pointers),
+        "runtime_cache_schema": CACHE_SCHEMA_VERSION,
+        "capability_api": CAPABILITY_API_VERSION,
+        "worker_abi": WORKER_ABI_VERSION,
+    }
+    return hashlib.sha256(
+        json.dumps(
+            canonical,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        ).encode("ascii")
+    ).hexdigest()
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Derive exact Flutter runtime cache identity")
     parser.add_argument("--dart-version", required=True)
@@ -104,9 +141,19 @@ def main() -> int:
     parser.add_argument("--os", dest="os_name", default="android")
     parser.add_argument("--compressed-pointers", choices=["true", "false"], default="true")
     parser.add_argument("--blutter-commit", required=True)
+    parser.add_argument(
+        "--output",
+        choices=["cache-tag", "request-identity"],
+        default="cache-tag",
+    )
     args = parser.parse_args()
+    function = (
+        runtime_request_identity
+        if args.output == "request-identity"
+        else runtime_cache_tag
+    )
     print(
-        runtime_cache_tag(
+        function(
             dart_version=args.dart_version,
             snapshot_hash=args.snapshot_hash,
             arch=args.arch,

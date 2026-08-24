@@ -23,14 +23,14 @@ The agent never chooses Docker/Podman commands and never receives raw unrestrict
 
 ## Versioned contracts
 
-0.3.0 defines independently versioned contracts:
+The 0.4 development line currently defines independently versioned contracts:
 
 ```text
 Capability API       1
 Worker ABI           1
 EvidenceEnvelope     1
 PEG schema           2
-Flutter cache schema 2
+Flutter cache schema 3
 ```
 
 A future breaking change requires an architecture decision, migration path, compatibility tests, documentation, and senior review.
@@ -304,6 +304,29 @@ Blutter commit
 The host maps the cache tag to a configured repository, verifies all required labels, resolves an immutable image ID, and executes that ID.
 
 The analyzer worker never clones/builds/downloads a missing Dart runtime during normal analysis.
+
+Runtime cache resolution is a host-side semantic service:
+
+```text
+FlutterCapability
+        |
+        v
+RuntimeCacheResolver
+        |-- exact cache lookup and OCI-label verification
+        |-- private persistent state and request deduplication
+        |-- timeout/retry/restart reconciliation
+        `-- ControlledBuildProvider
+              |-- GitHubActionsControlledBuildProvider
+              `-- future provider implementations
+```
+
+The provider-neutral state model is `READY`, `BUILD_REQUIRED`, `BUILDING`, and `FAILED`. The provider request identity is the SHA-256 of canonical JSON containing every exact runtime-identity field. Provider handles and provider transport metadata remain private.
+
+`READY` requires all exact labels, a valid OCI source revision, and a canonical immutable `sha256:` image ID. A successful build or mutable tag is not readiness evidence by itself.
+
+Flutter cache schema 3 adds the required `io.safe-reverser.dart.os` OCI label. Schema-2 images remain immutable and are not rewritten. Their migration path is deterministic rebuild under the schema-3 identity; the changed schema participates in the cache digest, so an older image cannot collide with or be silently reused as a schema-3 cache.
+
+Controlled builders execute outside analyzer workers. Builder credentials are host-only and must never enter worker environment, analysis job metadata, evidence envelopes, MCP responses, provider-neutral state details, or raw error output.
 
 ## Path contract
 

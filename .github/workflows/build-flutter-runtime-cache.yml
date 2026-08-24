@@ -1,8 +1,13 @@
 name: Build Flutter runtime cache
+run-name: Runtime cache ${{ inputs.request_identity }}
 
 on:
   workflow_dispatch:
     inputs:
+      request_identity:
+        description: Provider-independent SHA-256 identity for deduplication and reconciliation
+        required: true
+        type: string
       dart_version:
         description: Exact Dart semantic version embedded by Flutter, for example 3.5.4
         required: true
@@ -16,6 +21,34 @@ on:
         required: true
         default: true
         type: boolean
+      arch:
+        description: Exact target architecture
+        required: true
+        type: string
+      os:
+        description: Exact target operating system
+        required: true
+        type: string
+      blutter_commit:
+        description: Exact pinned Blutter commit
+        required: true
+        type: string
+      runtime_cache_schema:
+        description: Runtime-cache schema version
+        required: true
+        type: string
+      capability_api:
+        description: Capability API version
+        required: true
+        type: string
+      worker_abi:
+        description: Worker ABI version
+        required: true
+        type: string
+
+concurrency:
+  group: flutter-runtime-cache-${{ inputs.request_identity }}
+  cancel-in-progress: false
 
 permissions:
   contents: read
@@ -26,6 +59,7 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 360
     steps:
       - uses: actions/checkout@v6
 
@@ -36,18 +70,41 @@ jobs:
           DART_VERSION: ${{ inputs.dart_version }}
           SNAPSHOT_HASH: ${{ inputs.snapshot_hash }}
           COMPRESSED_POINTERS: ${{ inputs.compressed_pointers }}
+          REQUEST_IDENTITY: ${{ inputs.request_identity }}
+          TARGET_ARCH: ${{ inputs.arch }}
+          TARGET_OS: ${{ inputs.os }}
+          REQUESTED_BLUTTER_COMMIT: ${{ inputs.blutter_commit }}
+          REQUESTED_CACHE_SCHEMA: ${{ inputs.runtime_cache_schema }}
+          REQUESTED_CAPABILITY_API: ${{ inputs.capability_api }}
+          REQUESTED_WORKER_ABI: ${{ inputs.worker_abi }}
         run: |
           set -euo pipefail
           source frameworks/flutter/tools.lock.env
+          [[ "$REQUEST_IDENTITY" =~ ^[0-9a-f]{64}$ ]]
+          test "$TARGET_ARCH" = arm64
+          test "$TARGET_OS" = android
+          test "$REQUESTED_BLUTTER_COMMIT" = "$BLUTTER_COMMIT"
+          test "$REQUESTED_CACHE_SCHEMA" = 3
+          test "$REQUESTED_CAPABILITY_API" = 1
+          test "$REQUESTED_WORKER_ABI" = 1
           version="$(tr -d '[:space:]' < plugins/safe-android-reverser/VERSION)"
           snapshot="$(printf '%s' "$SNAPSHOT_HASH" | tr '[:upper:]' '[:lower:]')"
           tag="$(python3 frameworks/flutter/cache_identity.py \
             --dart-version "$DART_VERSION" \
             --snapshot-hash "$snapshot" \
-            --arch arm64 \
-            --os android \
+            --arch "$TARGET_ARCH" \
+            --os "$TARGET_OS" \
             --compressed-pointers "$COMPRESSED_POINTERS" \
             --blutter-commit "$BLUTTER_COMMIT")"
+          derived_request_identity="$(python3 frameworks/flutter/cache_identity.py \
+            --dart-version "$DART_VERSION" \
+            --snapshot-hash "$snapshot" \
+            --arch "$TARGET_ARCH" \
+            --os "$TARGET_OS" \
+            --compressed-pointers "$COMPRESSED_POINTERS" \
+            --blutter-commit "$BLUTTER_COMMIT" \
+            --output request-identity)"
+          test "$REQUEST_IDENTITY" = "$derived_request_identity"
           [[ "$tag" =~ ^[A-Za-z0-9_.-]+$ ]]
           test "${#tag}" -le 128
           echo "version=$version" >> "$GITHUB_OUTPUT"
@@ -74,7 +131,8 @@ jobs:
             BLUTTER_COMMIT=${{ steps.identity.outputs.blutter_commit }}
             DART_VERSION=${{ inputs.dart_version }}
             SNAPSHOT_HASH=${{ steps.identity.outputs.snapshot_hash }}
-            TARGET_ARCH=arm64
+            TARGET_ARCH=${{ inputs.arch }}
+            TARGET_OS=${{ inputs.os }}
             COMPRESSED_POINTERS=${{ inputs.compressed_pointers }}
           cache-from: type=gha,scope=flutter-runtime-${{ steps.identity.outputs.cache_tag }}
           cache-to: type=gha,mode=max,scope=flutter-runtime-${{ steps.identity.outputs.cache_tag }}
@@ -98,11 +156,12 @@ jobs:
               'io.safe-reverser.capability.id': 'framework-flutter',
               'io.safe-reverser.capability.api': '1',
               'io.safe-reverser.worker.abi': '1',
-              'io.safe-reverser.runtime-cache.schema': '2',
+              'io.safe-reverser.runtime-cache.schema': '3',
               'io.safe-reverser.blutter.commit': os.environ['EXPECTED_COMMIT'],
               'io.safe-reverser.dart.version': os.environ['EXPECTED_DART'],
               'io.safe-reverser.dart.snapshot': os.environ['EXPECTED_SNAPSHOT'],
-              'io.safe-reverser.dart.arch': 'arm64',
+              'io.safe-reverser.dart.arch': '${{ inputs.arch }}',
+              'io.safe-reverser.dart.os': '${{ inputs.os }}',
               'io.safe-reverser.dart.compressed-pointers': os.environ['EXPECTED_COMPRESSED'].lower(),
           }
           for key, value in expected.items():
@@ -184,7 +243,8 @@ jobs:
             BLUTTER_COMMIT=${{ steps.identity.outputs.blutter_commit }}
             DART_VERSION=${{ inputs.dart_version }}
             SNAPSHOT_HASH=${{ steps.identity.outputs.snapshot_hash }}
-            TARGET_ARCH=arm64
+            TARGET_ARCH=${{ inputs.arch }}
+            TARGET_OS=${{ inputs.os }}
             COMPRESSED_POINTERS=${{ inputs.compressed_pointers }}
           provenance: mode=max
           sbom: true

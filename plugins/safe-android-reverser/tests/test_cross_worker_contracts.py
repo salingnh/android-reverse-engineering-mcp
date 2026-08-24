@@ -14,6 +14,7 @@ if str(LIB_ROOT) not in sys.path:
 
 from safe_reverser import CAPABILITY_API_VERSION, WORKER_ABI_VERSION
 from safe_reverser.flutter import RUNTIME_CACHE_SCHEMA
+from safe_reverser.runtime_cache import RuntimeIdentity
 
 
 def _load_flutter_cache_identity():
@@ -51,6 +52,42 @@ class CrossWorkerContractTests(unittest.TestCase):
         finally:
             cache.WORKER_ABI_VERSION = old
         self.assertNotEqual(baseline, changed)
+
+    def test_worker_and_host_derive_the_same_exact_cache_tag(self):
+        cache = _load_flutter_cache_identity()
+        runtime = RuntimeIdentity(
+            dart_version="3.11.1",
+            snapshot_hash="a" * 32,
+            arch="arm64",
+            os="android",
+            compressed_pointers=True,
+            blutter_commit="b" * 40,
+            runtime_cache_schema=RUNTIME_CACHE_SCHEMA,
+            capability_api=CAPABILITY_API_VERSION,
+            worker_abi=WORKER_ABI_VERSION,
+        )
+        self.assertEqual(
+            runtime.cache_tag,
+            cache.runtime_cache_tag(
+                dart_version=runtime.dart_version,
+                snapshot_hash=runtime.snapshot_hash,
+                arch=runtime.arch,
+                os_name=runtime.os,
+                compressed_pointers=runtime.compressed_pointers,
+                blutter_commit=runtime.blutter_commit,
+            ),
+        )
+        self.assertEqual(
+            runtime.request_identity,
+            cache.runtime_request_identity(
+                dart_version=runtime.dart_version,
+                snapshot_hash=runtime.snapshot_hash,
+                arch=runtime.arch,
+                os_name=runtime.os,
+                compressed_pointers=runtime.compressed_pointers,
+                blutter_commit=runtime.blutter_commit,
+            ),
+        )
 
 
 if __name__ == "__main__":

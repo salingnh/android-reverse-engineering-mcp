@@ -186,7 +186,9 @@ local Dart/snapshot/runtime identity
   ↓
 registry-independent cache tag
   ↓
-host selects exact runtime-cache image
+host RuntimeCacheResolver selects exact runtime-cache image
+  ↓
+READY or provider-neutral controlled build state
   ↓
 verify Capability API / Worker ABI / cache schema / Dart / snapshot / arch / OS / compressed pointers / Blutter commit
   ↓
@@ -197,7 +199,7 @@ offline Blutter
 bounded persistent Dart semantic index
 ```
 
-A cache miss is explicit and never triggers a hidden analyzer/runtime build inside the analysis sandbox.
+A cache miss is explicit and never triggers a hidden analyzer/runtime build inside the analysis sandbox. Inspect `runtime_cache.state`: `BUILD_REQUIRED` means no controlled builder is configured, `BUILDING` means retry the semantic analysis later so the host can reconcile, `FAILED` includes a bounded provider-neutral failure code, and only `READY` permits offline AOT execution. Provider workflow/run details and credentials are never part of the tool contract.
 
 Retain returned `job_id`, then use:
 

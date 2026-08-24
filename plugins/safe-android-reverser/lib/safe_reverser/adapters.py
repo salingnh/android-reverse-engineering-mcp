@@ -5,15 +5,18 @@ import os
 from pathlib import Path
 from typing import Any, Protocol
 
+from .controlled_build import GitHubActionsControlledBuildProvider
 from .contracts import CapabilityManifest, ContractError
 from .flutter import RUNTIME_CACHE_SCHEMA, FlutterCapability
 from .paths import PathPolicyError, ensure_private_child
 from .registry import CapabilityRegistry
 from .runtime import ContainerRuntime, RuntimeErrorSafe
+from .runtime_cache import RuntimeCacheResolver
 from .tool_catalog import catalogs_equal, load_tool_catalog
 from .worker import McpContainerWorker, WorkerProtocolError
 
 MAX_ENABLED_CAPABILITIES = 64
+CONTROLLED_BUILD_PROVIDER_ENV = "SAFE_REVERSER_CONTROLLED_BUILD_PROVIDER"
 
 
 class CapabilityAdapter(Protocol):
@@ -101,6 +104,7 @@ class FlutterAotAdapter:
     def diagnostics(self) -> dict[str, Any]:
         return {
             "runtime_cache_schema": RUNTIME_CACHE_SCHEMA,
+            "runtime_cache_resolver": self.capability.runtime_cache_diagnostics(),
             "job_store": "analysis-job-store-v1",
             "worker": self.capability.diagnostics(),
         }
@@ -143,6 +147,57 @@ def _image_override(manifest: CapabilityManifest) -> str | None:
         value = os.environ.get("SAFE_REVERSER_FLUTTER_IMAGE")
         return value.strip() if value else None
     return None
+
+
+def _runtime_cache_resolver(
+    runtime: ContainerRuntime, data_dir: Path
+) -> RuntimeCacheResolver:
+    provider_name = str(os.environ.get(CONTROLLED_BUILD_PROVIDER_ENV, "")).strip()
+    provider = None
+    if provider_name:
+        if provider_name != "github-actions":
+            raise ContractError("unsupported controlled-build provider configuration")
+        try:
+            provider = GitHubActionsControlledBuildProvider(
+                token=str(
+                    os.environ.get("SAFE_REVERSER_CONTROLLED_BUILD_TOKEN", "")
+                ),
+                repository=str(
+                    os.environ.get(
+                        "SAFE_REVERSER_CONTROLLED_BUILD_REPOSITORY",
+                        "salingnh/android-reverse-engineering-mcp",
+                    )
+                ).strip(),
+                workflow=str(
+                    os.environ.get(
+                        "SAFE_REVERSER_CONTROLLED_BUILD_WORKFLOW",
+                        "build-flutter-runtime-cache.yml",
+                    )
+                ).strip(),
+                ref=str(
+                    os.environ.get("SAFE_REVERSER_CONTROLLED_BUILD_REF", "master")
+                ).strip(),
+            )
+        except RuntimeError as exc:
+            raise ContractError(str(exc)) from exc
+    try:
+        build_timeout = int(
+            os.environ.get("SAFE_REVERSER_CONTROLLED_BUILD_TIMEOUT_SECONDS", "21600")
+        )
+        retry_delay = int(
+            os.environ.get("SAFE_REVERSER_CONTROLLED_BUILD_RETRY_SECONDS", "300")
+        )
+    except ValueError as exc:
+        raise ContractError(
+            "controlled-build timing configuration must be integer"
+        ) from exc
+    return RuntimeCacheResolver(
+        runtime,
+        data_root=data_dir,
+        provider=provider,
+        build_timeout_seconds=build_timeout,
+        retry_delay_seconds=retry_delay,
+    )
 
 
 def build_capability_adapters(
@@ -198,6 +253,7 @@ def build_capability_adapters(
                 version=version,
                 project_dir=project_dir,
                 data_dir=data_dir,
+                runtime_cache_resolver=_runtime_cache_resolver(runtime, data_dir),
                 output_tmpfs=str(
                     os.environ.get("SAFE_REVERSER_FLUTTER_OUTPUT_TMPFS", "4g")
                 ).strip(),
