@@ -449,7 +449,6 @@ jobs:
           static_digest="$(verify_image "$static_image" static-core | tail -n1)"
           flutter_digest="$(verify_image "$flutter_image" framework-flutter | tail -n1)"
 
-          mkdir -p "$RUNNER_TEMP/static-data"
           static_output="$RUNNER_TEMP/static-health.jsonl"
           printf '%s\n' \
             '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"release-smoke","version":"1"}}}' \
@@ -460,9 +459,9 @@ jobs:
               --security-opt=no-new-privileges \
               --tmpfs=/tmp:rw,nosuid,nodev,size=256m \
               --tmpfs=/work:rw,nosuid,nodev,size=256m \
+              --tmpfs=/data:rw,nosuid,nodev,size=64m,uid=10001,gid=10001,mode=0700 \
               --env="SAFE_REVERSER_PLUGIN_VERSION=${VERSION}" \
               --env="SAFE_REVERSER_IMAGE_REF=${static_image}" \
-              --volume="$RUNNER_TEMP/static-data:/data:rw" \
               "$static_image" > "$static_output"
           python3 - "$static_output" <<'PY'
           import json
