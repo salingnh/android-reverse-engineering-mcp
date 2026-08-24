@@ -34,6 +34,14 @@ class RuntimeErrorSafe(RuntimeError):
     pass
 
 
+class ImageUnavailableError(RuntimeErrorSafe):
+    """The requested image could not be found locally or fetched."""
+
+
+class ImageVerificationError(RuntimeErrorSafe):
+    """The requested image exists but violates its immutable contract."""
+
+
 @dataclass(frozen=True)
 class RunResult:
     exit_code: int
@@ -196,22 +204,24 @@ class ContainerRuntime:
         info = self.image_info(image)
         if info is None:
             if not self.auto_pull:
-                raise RuntimeErrorSafe(f"capability image is not installed: {image}")
+                raise ImageUnavailableError(
+                    f"capability image is not installed: {image}"
+                )
             pull = self.run_host(["pull", image], timeout=1800)
             if pull.exit_code != 0:
                 detail = (pull.stderr or pull.stdout or "pull failed")[-4000:]
-                raise RuntimeErrorSafe(
+                raise ImageUnavailableError(
                     f"failed to pull capability image {image}: {detail}"
                 )
             info = self.image_info(image)
         if info is None:
-            raise RuntimeErrorSafe(
+            raise ImageUnavailableError(
                 f"capability image unavailable after pull: {image}"
             )
         labels = self.labels(info)
         for key, expected in required_labels.items():
             if labels.get(key) != expected:
-                raise RuntimeErrorSafe(
+                raise ImageVerificationError(
                     f"capability image provenance mismatch for {key}: "
                     f"expected={expected!r} actual={labels.get(key)!r}"
                 )
