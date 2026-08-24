@@ -6,7 +6,8 @@ Read these before changing code:
 2. `docs/ARCHITECTURE_EVOLUTION_RULES.md` — mandatory no-throwaway architecture and long-term evolution gate.
 3. `docs/CAPABILITY_SPI.md` — Capability API, Worker ABI, sandbox and evidence contracts.
 4. `docs/DEVELOPMENT.md` — mandatory development/review/CI rules.
-5. `docs/ROADMAP.md` — current milestone and acceptance criteria.
+5. `docs/ROADMAP.md` — release train, milestone scope and acceptance criteria.
+6. `docs/ROADMAP_0_4_EXECUTION.md` — mandatory staged execution plan for milestone 0.4.
 
 Mandatory invariants:
 
@@ -30,6 +31,8 @@ Mandatory invariants:
 - Do not add temporary fallback/compatibility paths merely to preserve a product model that project direction has rejected.
 
 Before implementing any non-trivial stage, perform the pre-implementation review in `docs/ARCHITECTURE_EVOLUTION_RULES.md`. If the design is already known to require replacement in a later milestone, stop and redesign before writing production code.
+
+For milestone 0.4, follow `docs/ROADMAP_0_4_EXECUTION.md` exactly: implement one stage at a time, complete its test/review/exact-head gate, produce the Gate Report, and stop before beginning the next stage.
 
 Before considering work complete:
 
