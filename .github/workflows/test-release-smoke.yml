@@ -1,0 +1,92 @@
+name: Test Safe Reverser release smoke
+
+on:
+  pull_request:
+    paths:
+      - 'sandbox/**'
+      - 'plugins/safe-android-reverser/VERSION'
+      - '.github/workflows/ship-safe-reverser.yml'
+      - '.github/workflows/test-release-smoke.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  static-worker-release-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Read release version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(tr -d '[:space:]' < plugins/safe-android-reverser/VERSION)"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build static-core worker image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: sandbox/Dockerfile
+          load: true
+          push: false
+          tags: safe-android-reverser:release-smoke-ci
+          build-args: |
+            SAFE_REVERSER_VERSION=${{ steps.version.outputs.version }}
+            SAFE_REVERSER_BUILD_COMMIT=${{ github.sha }}
+          cache-from: type=gha,scope=static-core
+
+      - name: Verify image default identity
+        run: |
+          set -euo pipefail
+          test "$(docker image inspect safe-android-reverser:release-smoke-ci --format '{{.Config.User}}')" = "10001:10001"
+
+      - name: Run post-release static-core health smoke
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          output="$RUNNER_TEMP/static-health.jsonl"
+          printf '%s\n' \
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"release-smoke-ci","version":"1"}}}' \
+            '{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}' \
+            '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"health","arguments":{}}}' \
+          | docker run --rm -i \
+              --network=none --read-only --cap-drop=ALL \
+              --security-opt=no-new-privileges \
+              --tmpfs=/tmp:rw,nosuid,nodev,size=256m \
+              --tmpfs=/work:rw,nosuid,nodev,size=256m \
+              --tmpfs=/data:rw,nosuid,nodev,size=64m,uid=10001,gid=10001,mode=0700 \
+              --env="SAFE_REVERSER_PLUGIN_VERSION=${VERSION}" \
+              --env="SAFE_REVERSER_IMAGE_REF=safe-android-reverser:release-smoke-ci" \
+              safe-android-reverser:release-smoke-ci > "$output"
+
+          python3 - "$output" <<'PY'
+          import json
+          import sys
+
+          rows = [json.loads(line) for line in open(sys.argv[1], encoding='utf-8') if line.strip()]
+          response = next(item for item in rows if item.get('id') == 2)
+          payload = json.loads(response['result']['content'][0]['text'])
+          assert payload['capability_worker']['id'] == 'static-core', payload
+          assert payload['capability_worker']['worker_abi'] == 1, payload
+          PY
+
+      - name: Guard release workflow data mount
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          text = Path('.github/workflows/ship-safe-reverser.yml').read_text(encoding='utf-8')
+          expected = '--tmpfs=/data:rw,nosuid,nodev,size=64m,uid=10001,gid=10001,mode=0700'
+          assert expected in text, 'Ship workflow must provide /data as UID/GID 10001 tmpfs for the image-default smoke'
+          assert '$RUNNER_TEMP/static-data:/data:rw' not in text, 'Ship workflow must not bind a runner-owned directory over image /data'
+          PY
