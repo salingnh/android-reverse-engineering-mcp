@@ -171,6 +171,7 @@ class RuntimeImagePinningTests(unittest.TestCase):
 
     def test_builder_credentials_are_absent_from_worker_environments(self) -> None:
         secret = "stage-a-builder-secret"
+        private_attempt = "8" * 32
         static_manifest = self.registry.get("static-core")
         static_runtime = FakeWorkerRuntime(static_manifest)
         flutter_manifest = self.registry.get("framework-flutter")
@@ -181,6 +182,7 @@ class RuntimeImagePinningTests(unittest.TestCase):
                 "SAFE_REVERSER_CONTROLLED_BUILD_TOKEN": secret,
                 "GITHUB_TOKEN": secret,
                 "GH_TOKEN": secret,
+                "SAFE_REVERSER_PRIVATE_BUILD_ATTEMPT": private_attempt,
             },
             clear=False,
         ):
@@ -212,6 +214,7 @@ class RuntimeImagePinningTests(unittest.TestCase):
 
         serialized = json.dumps(static_runtime.last_worker_env)
         self.assertNotIn(secret, serialized)
+        self.assertNotIn(private_attempt, serialized)
         self.assertNotIn("TOKEN", serialized)
         self.assertIsNone(flutter_runtime.last_worker_env)
 

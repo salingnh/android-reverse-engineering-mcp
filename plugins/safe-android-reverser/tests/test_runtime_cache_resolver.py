@@ -18,12 +18,14 @@ if str(LIB_ROOT) not in sys.path:
     sys.path.insert(0, str(LIB_ROOT))
 
 from safe_reverser.controlled_build import (
+    BuildAttempt,
     ProviderAuthenticationError,
     ProviderBuildHandle,
     ProviderBuildState,
     ProviderBuildStatus,
     ProviderPollingError,
     ProviderRequestError,
+    ProviderSubmissionAmbiguousError,
     ProviderUnavailableError,
 )
 from safe_reverser.runtime import ImageUnavailableError, VerifiedImage
@@ -96,6 +98,18 @@ class FakeRuntime:
         return value
 
 
+class AttemptFactory:
+    def __init__(self, start=1):
+        self.value = start
+        self.lock = threading.Lock()
+
+    def __call__(self):
+        with self.lock:
+            value = self.value
+            self.value += 1
+        return f"{value:032x}"
+
+
 class FakeProvider:
     namespace = "fixture-provider-v1"
 
@@ -112,30 +126,39 @@ class FakeProvider:
         self.reconcile_values = None
         self.submit_delay = 0
         self.status_hook = None
+        self.reconcile_hook = None
+        self.submitted_attempts = []
+        self.status_attempts = []
+        self.reconcile_attempts = []
         self.lock = threading.Lock()
 
-    def submit(self, _identity, _request_identity):
+    def submit(self, _identity, _request_identity, attempt):
         with self.lock:
             self.submit_count += 1
+            self.submitted_attempts.append(attempt)
         if self.submit_delay:
             time.sleep(self.submit_delay)
         if self.submit_error:
             raise self.submit_error
         return ProviderBuildHandle(
-            self.namespace, "fixture-1", int(self.clock())
+            self.namespace, f"fixture-{attempt.attempt_identity}"
         )
 
-    def status(self, _handle, _identity, _request_identity):
+    def status(self, _handle, _identity, _request_identity, attempt):
         with self.lock:
             self.status_count += 1
+            self.status_attempts.append(attempt)
         if self.status_error:
             raise self.status_error
         if self.status_hook:
             self.status_hook()
         return self.status_value
 
-    def reconcile(self, _identity, _request_identity):
+    def reconcile(self, _identity, _request_identity, attempt):
         self.reconcile_count += 1
+        self.reconcile_attempts.append(attempt)
+        if self.reconcile_hook is not None:
+            return self.reconcile_hook(attempt)
         if self.reconcile_values is not None:
             return self.reconcile_values.pop(0)
         return self.reconcile_handle
@@ -150,15 +173,15 @@ class ProcessProvider:
     def __init__(self, counter_path):
         self.counter_path = Path(counter_path)
 
-    def submit(self, _identity, _request_identity):
+    def submit(self, _identity, _request_identity, attempt):
         with self.counter_path.open("a", encoding="utf-8") as handle:
-            handle.write("submit\n")
-        return ProviderBuildHandle(self.namespace, "process-1", int(time.time()))
+            handle.write(f"submit {attempt.attempt_identity}\n")
+        return ProviderBuildHandle(self.namespace, "process-1")
 
-    def status(self, _handle, _identity, _request_identity):
+    def status(self, _handle, _identity, _request_identity, _attempt):
         return ProviderBuildStatus(ProviderBuildState.BUILDING)
 
-    def reconcile(self, _identity, _request_identity):
+    def reconcile(self, _identity, _request_identity, _attempt):
         return None
 
     def cancel(self, _handle):
@@ -181,6 +204,7 @@ class RuntimeCacheResolverTests(unittest.TestCase):
         self.data = Path(self.tmp.name)
         self.runtime = FakeRuntime()
         self.clock = FakeClock()
+        self.attempts = AttemptFactory()
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -193,6 +217,7 @@ class RuntimeCacheResolverTests(unittest.TestCase):
             build_timeout_seconds=60,
             retry_delay_seconds=5,
             clock=self.clock,
+            attempt_identity_factory=self.attempts,
         )
 
     def test_cache_hit_and_valid_immutable_image_are_ready(self):
@@ -296,37 +321,45 @@ class RuntimeCacheResolverTests(unittest.TestCase):
         self.assertIn("temporarily", result.warning)
         self.assertNotIn("credential-never-copy", result.warning)
 
-    def test_retry_after_failure_resubmits_only_after_backoff(self):
+    def test_historical_failed_attempt_retry_creates_new_attempt(self):
         provider = FakeProvider(clock=self.clock)
         provider.submit_error = ProviderRequestError("failed")
         resolver = self.resolver(provider)
         first = resolver.resolve(identity(), CACHE_REF)
+        request_identity = first.request_identity
         self.assertEqual(first.state, RuntimeCacheState.FAILED)
         self.assertEqual(provider.submit_count, 1)
+        first_attempt = provider.submitted_attempts[0].attempt_identity
         self.assertEqual(resolver.resolve(identity(), CACHE_REF).state, RuntimeCacheState.FAILED)
         self.assertEqual(provider.submit_count, 1)
         self.clock.advance(5)
         provider.submit_error = None
-        self.assertEqual(resolver.resolve(identity(), CACHE_REF).state, RuntimeCacheState.BUILDING)
+        retry = resolver.resolve(identity(), CACHE_REF)
+        self.assertEqual(retry.state, RuntimeCacheState.BUILDING)
         self.assertEqual(provider.submit_count, 2)
+        self.assertEqual(retry.request_identity, request_identity)
+        self.assertNotEqual(
+            provider.submitted_attempts[1].attempt_identity, first_attempt
+        )
 
-    def test_retry_reconciles_eventually_visible_request_without_resubmit(self):
+    def test_ambiguous_submit_reconciles_same_current_attempt(self):
         provider = FakeProvider(clock=self.clock)
-        provider.submit_error = ProviderRequestError("ambiguous transport result")
-        resolver = self.resolver(provider)
-        self.assertEqual(
-            resolver.resolve(identity(), CACHE_REF).state,
-            RuntimeCacheState.FAILED,
+        provider.submit_error = ProviderSubmissionAmbiguousError(
+            "ambiguous transport result"
         )
-        self.assertEqual(provider.submit_count, 1)
-        self.clock.advance(5)
-        provider.submit_error = None
-        provider.reconcile_handle = ProviderBuildHandle(
-            provider.namespace, "eventually-visible", int(self.clock())
-        )
-        result = resolver.resolve(identity(), CACHE_REF)
+        provider.reconcile_values = [
+            None,
+            ProviderBuildHandle(provider.namespace, "accepted-current-attempt"),
+        ]
+        result = self.resolver(provider).resolve(identity(), CACHE_REF)
         self.assertEqual(result.state, RuntimeCacheState.BUILDING)
         self.assertEqual(provider.submit_count, 1)
+        self.assertEqual(provider.reconcile_count, 2)
+        submitted = provider.submitted_attempts[0].attempt_identity
+        self.assertEqual(
+            {item.attempt_identity for item in provider.reconcile_attempts},
+            {submitted},
+        )
 
     def test_restart_resumes_persisted_build(self):
         provider = FakeProvider(clock=self.clock)
@@ -353,8 +386,11 @@ class RuntimeCacheResolverTests(unittest.TestCase):
                     "cache_ref": CACHE_REF,
                     "provider_namespace": provider.namespace,
                     "provider_handle": None,
-                    "started_at_epoch": int(self.clock()),
-                    "deadline_epoch": int(self.clock()) + 60,
+                    "build_attempt": BuildAttempt(
+                        "4" * 32,
+                        int(self.clock()),
+                        int(self.clock()) + 60,
+                    ).to_private_dict(),
                     "updated_at_epoch": int(self.clock()),
                 },
             )
@@ -365,7 +401,9 @@ class RuntimeCacheResolverTests(unittest.TestCase):
 
     def test_lost_submit_response_reconciles_before_failure_or_retry(self):
         provider = FakeProvider(clock=self.clock)
-        provider.submit_error = ProviderRequestError("ambiguous transport result")
+        provider.submit_error = ProviderSubmissionAmbiguousError(
+            "ambiguous transport result"
+        )
         provider.reconcile_values = [
             None,
             ProviderBuildHandle(
@@ -376,6 +414,60 @@ class RuntimeCacheResolverTests(unittest.TestCase):
         self.assertEqual(result.state, RuntimeCacheState.BUILDING)
         self.assertEqual(provider.submit_count, 1)
         self.assertEqual(provider.reconcile_count, 2)
+
+    def test_ambiguous_submit_restart_recovers_same_current_attempt(self):
+        provider = FakeProvider(clock=self.clock)
+        provider.submit_error = ProviderSubmissionAmbiguousError(
+            "response lost after acceptance"
+        )
+        provider.reconcile_values = [None, None]
+        first_resolver = self.resolver(provider)
+        first = first_resolver.resolve(identity(), CACHE_REF)
+        self.assertEqual(first.state, RuntimeCacheState.BUILDING)
+        persisted = first_resolver.store.read(identity())
+        current_attempt = BuildAttempt.from_private_dict(
+            persisted["build_attempt"]
+        )
+
+        resumed_provider = FakeProvider(clock=self.clock)
+        resumed_provider.reconcile_hook = lambda value: (
+            ProviderBuildHandle(resumed_provider.namespace, "recovered-after-restart")
+            if value.attempt_identity == current_attempt.attempt_identity
+            else None
+        )
+        resumed = self.resolver(resumed_provider).resolve(identity(), CACHE_REF)
+        self.assertEqual(resumed.state, RuntimeCacheState.BUILDING)
+        self.assertEqual(resumed_provider.submit_count, 0)
+        self.assertEqual(
+            resumed_provider.reconcile_attempts[0].attempt_identity,
+            current_attempt.attempt_identity,
+        )
+
+    def test_historical_success_without_image_eventually_retries_new_attempt(self):
+        runtime_identity = identity()
+        provider = FakeProvider(clock=self.clock)
+        resolver = self.resolver(provider)
+        first = resolver.resolve(runtime_identity, CACHE_REF)
+        self.assertEqual(first.state, RuntimeCacheState.BUILDING)
+        first_attempt = provider.submitted_attempts[0]
+        provider.status_value = ProviderBuildStatus(
+            ProviderBuildState.SUCCEEDED, source_revision=REVISION
+        )
+        waiting = resolver.resolve(runtime_identity, CACHE_REF)
+        self.assertEqual(waiting.state, RuntimeCacheState.BUILDING)
+        self.assertIn("not yet available", waiting.warning)
+        self.clock.advance(61)
+        timed_out = resolver.resolve(runtime_identity, CACHE_REF)
+        self.assertEqual(timed_out.failure_code, "build_timeout")
+        self.clock.advance(5)
+        retry = resolver.resolve(runtime_identity, CACHE_REF)
+        self.assertEqual(retry.state, RuntimeCacheState.BUILDING)
+        self.assertEqual(retry.request_identity, first.request_identity)
+        self.assertEqual(provider.submit_count, 2)
+        self.assertNotEqual(
+            provider.submitted_attempts[1].attempt_identity,
+            first_attempt.attempt_identity,
+        )
 
     def test_concurrent_calls_submit_exactly_one_build(self):
         provider = FakeProvider(clock=self.clock)
@@ -391,6 +483,7 @@ class RuntimeCacheResolverTests(unittest.TestCase):
             states = list(pool.map(lambda _item: call(), range(8)))
         self.assertEqual(set(states), {RuntimeCacheState.BUILDING})
         self.assertEqual(provider.submit_count, 1)
+        self.assertEqual(len(provider.submitted_attempts), 1)
 
     def test_concurrent_processes_submit_exactly_one_build(self):
         context = multiprocessing.get_context("fork")
@@ -412,7 +505,9 @@ class RuntimeCacheResolverTests(unittest.TestCase):
             process.join(timeout=10)
             self.assertEqual(process.exitcode, 0)
         self.assertEqual(set(states), {"BUILDING"})
-        self.assertEqual(counter.read_text(encoding="utf-8").splitlines(), ["submit"])
+        lines = counter.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(len(lines), 1)
+        self.assertRegex(lines[0], r"^submit [0-9a-f]{32}$")
 
     def test_published_image_wins_before_provider_reconciliation(self):
         runtime_identity = identity()
@@ -478,6 +573,20 @@ class RuntimeCacheResolverTests(unittest.TestCase):
             for path in self.data.rglob("*.json")
         )
         self.assertNotIn(secret, state_text)
+
+    def test_attempt_identity_is_private_but_persisted_before_submit(self):
+        provider = FakeProvider(clock=self.clock)
+        provider.submit_error = ProviderSubmissionAmbiguousError("lost response")
+        provider.reconcile_values = [None, None]
+        resolver = self.resolver(provider)
+        result = resolver.resolve(identity(), CACHE_REF)
+        persisted = resolver.store.read(identity())
+        attempt_identity = persisted["build_attempt"]["attempt_identity"]
+        self.assertRegex(attempt_identity, r"^[0-9a-f]{32}$")
+        self.assertEqual(
+            attempt_identity, provider.submitted_attempts[0].attempt_identity
+        )
+        self.assertNotIn(attempt_identity, json.dumps(result.public_status()))
 
     def test_persistent_state_and_locks_are_private(self):
         self.resolver().resolve(identity(), CACHE_REF)

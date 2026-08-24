@@ -320,7 +320,9 @@ RuntimeCacheResolver
               `-- future provider implementations
 ```
 
-The provider-neutral state model is `READY`, `BUILD_REQUIRED`, `BUILDING`, and `FAILED`. The provider request identity is the SHA-256 of canonical JSON containing every exact runtime-identity field. Provider handles and provider transport metadata remain private.
+The provider-neutral state model is `READY`, `BUILD_REQUIRED`, `BUILDING`, and `FAILED`. The stable provider request identity is the SHA-256 of canonical JSON containing every exact runtime-identity field. It identifies the desired cache and does not change across retries.
+
+Each controlled build retry has a separate private provider-neutral `BuildAttempt` containing a cryptographically strong attempt identity and bounded start/deadline metadata. The resolver persists the attempt before submission and uses that exact attempt for ambiguous-response and restart reconciliation. A genuine retry creates a new attempt without changing the stable cache request identity. Provider adapters translate attempt metadata to their own run/job model; provider run names, creation timestamps and handles do not enter the resolver contract or public MCP surface. Resolver persistence schema 2 stores only this private neutral attempt record plus the opaque provider handle.
 
 `READY` requires all exact labels, a valid OCI source revision, and a canonical immutable `sha256:` image ID. A successful build or mutable tag is not readiness evidence by itself.
 

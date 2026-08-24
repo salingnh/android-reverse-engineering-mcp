@@ -1,11 +1,15 @@
 name: Build Flutter runtime cache
-run-name: Runtime cache ${{ inputs.request_identity }}
+run-name: Runtime cache ${{ inputs.request_identity }} attempt ${{ inputs.attempt_identity }}
 
 on:
   workflow_dispatch:
     inputs:
       request_identity:
         description: Provider-independent SHA-256 identity for deduplication and reconciliation
+        required: true
+        type: string
+      attempt_identity:
+        description: Private provider-neutral identity for this bounded build attempt
         required: true
         type: string
       dart_version:
@@ -71,6 +75,7 @@ jobs:
           SNAPSHOT_HASH: ${{ inputs.snapshot_hash }}
           COMPRESSED_POINTERS: ${{ inputs.compressed_pointers }}
           REQUEST_IDENTITY: ${{ inputs.request_identity }}
+          ATTEMPT_IDENTITY: ${{ inputs.attempt_identity }}
           TARGET_ARCH: ${{ inputs.arch }}
           TARGET_OS: ${{ inputs.os }}
           REQUESTED_BLUTTER_COMMIT: ${{ inputs.blutter_commit }}
@@ -81,6 +86,7 @@ jobs:
           set -euo pipefail
           source frameworks/flutter/tools.lock.env
           [[ "$REQUEST_IDENTITY" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$ATTEMPT_IDENTITY" =~ ^[0-9a-f]{32}$ ]]
           test "$TARGET_ARCH" = arm64
           test "$TARGET_OS" = android
           test "$REQUESTED_BLUTTER_COMMIT" = "$BLUTTER_COMMIT"

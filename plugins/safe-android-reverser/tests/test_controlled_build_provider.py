@@ -15,12 +15,19 @@ if str(LIB_ROOT) not in sys.path:
 
 from safe_reverser.controlled_build import (
     GITHUB_API_VERSION,
+    BuildAttempt,
     GitHubActionsControlledBuildProvider,
     ProviderAuthenticationError,
+    ProviderBuildHandle,
     ProviderBuildState,
     ProviderPollingError,
+    ProviderRequestError,
+    ProviderSubmissionAmbiguousError,
 )
 from safe_reverser.runtime_cache import RuntimeIdentity
+
+CREATED_AT = "2023-11-14T22:13:20Z"
+CREATED_AT_EPOCH = 1_700_000_000
 
 
 def identity():
@@ -35,6 +42,51 @@ def identity():
         capability_api=1,
         worker_abi=1,
     )
+
+
+def attempt(value: str = "1" * 32):
+    return BuildAttempt(
+        attempt_identity=value,
+        started_at_epoch=CREATED_AT_EPOCH,
+        deadline_epoch=CREATED_AT_EPOCH + 3600,
+    )
+
+
+def dispatch_response(run_id: int = 42):
+    return {
+        "workflow_run_id": run_id,
+        "run_url": (
+            "https://api.github.com/repos/salingnh/"
+            f"android-reverse-engineering-mcp/actions/runs/{run_id}"
+        ),
+        "html_url": (
+            "https://github.com/salingnh/"
+            f"android-reverse-engineering-mcp/actions/runs/{run_id}"
+        ),
+    }
+
+
+def run_payload(
+    provider,
+    runtime_identity,
+    build_attempt,
+    *,
+    run_id: int = 42,
+    created_at: str = CREATED_AT,
+    status: str = "completed",
+    conclusion: str = "success",
+):
+    return {
+        "id": run_id,
+        "event": "workflow_dispatch",
+        "display_title": provider._run_title(
+            runtime_identity.request_identity, build_attempt
+        ),
+        "created_at": created_at,
+        "status": status,
+        "conclusion": conclusion,
+        "head_sha": "c" * 40,
+    }
 
 
 class FakeResponse:
@@ -73,24 +125,25 @@ class GitHubActionsProviderTests(unittest.TestCase):
             workflow="build-flutter-runtime-cache.yml",
             ref="feat/0.4-runtime-cache-resolver",
             opener=opener,
-            clock=lambda: 1234,
         )
 
-    def test_submit_translates_exact_identity_behind_provider_boundary(self):
-        opener = QueueOpener(FakeResponse({"workflow_run_id": 42}))
+    def test_api_2026_03_10_dispatch_has_exact_current_request_shape(self):
+        opener = QueueOpener(FakeResponse(dispatch_response()))
         runtime_identity = identity()
-        handle = self.provider(opener).submit(
-            runtime_identity, runtime_identity.request_identity
+        build_attempt = attempt()
+        self.provider(opener).submit(
+            runtime_identity, runtime_identity.request_identity, build_attempt
         )
-        self.assertEqual(handle.opaque_id, "42")
         request = opener.requests[0][0]
         self.assertEqual(request.method, "POST")
         self.assertEqual(request.headers["X-github-api-version"], GITHUB_API_VERSION)
         payload = json.loads(request.data)
+        self.assertEqual(set(payload), {"ref", "inputs"})
+        self.assertNotIn("return_run_details", payload)
         self.assertEqual(payload["ref"], "feat/0.4-runtime-cache-resolver")
-        self.assertIs(payload["return_run_details"], True)
         inputs = payload["inputs"]
         self.assertEqual(inputs["request_identity"], runtime_identity.request_identity)
+        self.assertEqual(inputs["attempt_identity"], build_attempt.attempt_identity)
         self.assertEqual(inputs["dart_version"], "3.11.1")
         self.assertEqual(inputs["snapshot_hash"], "a" * 32)
         self.assertEqual(inputs["arch"], "arm64")
@@ -101,6 +154,22 @@ class GitHubActionsProviderTests(unittest.TestCase):
         self.assertEqual(inputs["capability_api"], "1")
         self.assertEqual(inputs["worker_abi"], "1")
         self.assertNotIn("stage-a-secret-token", json.dumps(payload))
+
+    def test_api_2026_03_10_http_200_run_details_are_parsed(self):
+        opener = QueueOpener(FakeResponse(dispatch_response(77), status=200))
+        runtime_identity = identity()
+        handle = self.provider(opener).submit(
+            runtime_identity, runtime_identity.request_identity, attempt()
+        )
+        self.assertEqual(handle.opaque_id, "77")
+        self.assertIsNone(handle.provider_created_at_epoch)
+
+    def test_api_2026_03_10_invalid_run_details_are_ambiguous(self):
+        response = dispatch_response()
+        response["run_url"] = "https://api.github.com/wrong-run"
+        provider = self.provider(QueueOpener(FakeResponse(response)))
+        with self.assertRaises(ProviderSubmissionAmbiguousError):
+            provider.submit(identity(), identity().request_identity, attempt())
 
     def test_namespace_binds_persisted_handle_to_nonsecret_configuration(self):
         first = self.provider(QueueOpener())
@@ -123,75 +192,114 @@ class GitHubActionsProviderTests(unittest.TestCase):
         self.assertNotIn("secret", first.namespace)
 
     def test_submit_rejects_noncanonical_request_identity(self):
-        provider = self.provider(QueueOpener(FakeResponse({"workflow_run_id": 42})))
-        from safe_reverser.controlled_build import ProviderRequestError
-
+        provider = self.provider(QueueOpener(FakeResponse(dispatch_response())))
         with self.assertRaises(ProviderRequestError):
-            provider.submit(identity(), "0" * 64)
+            provider.submit(identity(), "0" * 64, attempt())
 
-    def test_status_maps_github_state_to_provider_neutral_state(self):
+    def test_status_maps_github_state_and_validates_creation_metadata(self):
         runtime_identity = identity()
-        title = f"Runtime cache {runtime_identity.request_identity}"
-        opener = QueueOpener(
-            FakeResponse(
-                {
-                    "event": "workflow_dispatch",
-                    "display_title": title,
-                    "status": "completed",
-                    "conclusion": "success",
-                    "head_sha": "c" * 40,
-                }
-            )
+        build_attempt = attempt()
+        provider = self.provider(QueueOpener())
+        provider._opener = QueueOpener(
+            FakeResponse(run_payload(provider, runtime_identity, build_attempt))
         )
-        provider = self.provider(opener)
-        from safe_reverser.controlled_build import ProviderBuildHandle
-
         status = provider.status(
-            ProviderBuildHandle(provider.namespace, "42", 1234),
+            ProviderBuildHandle(provider.namespace, "42"),
             runtime_identity,
             runtime_identity.request_identity,
+            build_attempt,
         )
         self.assertEqual(status.state, ProviderBuildState.SUCCEEDED)
         self.assertEqual(status.source_revision, "c" * 40)
 
     def test_status_rejects_run_identity_mismatch(self):
-        opener = QueueOpener(
-            FakeResponse(
-                {
-                    "event": "workflow_dispatch",
-                    "display_title": "another request",
-                    "status": "queued",
-                }
+        provider = self.provider(
+            QueueOpener(
+                FakeResponse(
+                    {
+                        "id": 42,
+                        "event": "workflow_dispatch",
+                        "display_title": "another attempt",
+                        "created_at": CREATED_AT,
+                        "status": "queued",
+                    }
+                )
             )
         )
-        provider = self.provider(opener)
-        from safe_reverser.controlled_build import ProviderBuildHandle
-
         with self.assertRaises(ProviderPollingError):
             provider.status(
-                ProviderBuildHandle(provider.namespace, "42", 1234),
+                ProviderBuildHandle(provider.namespace, "42"),
                 identity(),
                 identity().request_identity,
+                attempt(),
             )
 
-    def test_reconcile_finds_request_by_provider_independent_identity(self):
+    def test_reconcile_selects_current_attempt_not_historical_attempt(self):
         runtime_identity = identity()
-        title = f"Runtime cache {runtime_identity.request_identity}"
-        opener = QueueOpener(
-            FakeResponse(
-                {
-                    "workflow_runs": [
-                        {"id": 77, "display_title": title},
-                        {"id": 76, "display_title": "Runtime cache unrelated"},
-                    ]
-                }
-            )
+        old_attempt = attempt("2" * 32)
+        current_attempt = attempt("3" * 32)
+        provider = self.provider(QueueOpener())
+        current_run = run_payload(
+            provider, runtime_identity, current_attempt, run_id=77
         )
-        handle = self.provider(opener).reconcile(
-            runtime_identity, runtime_identity.request_identity
+        historical_run = run_payload(
+            provider, runtime_identity, old_attempt, run_id=76
+        )
+        provider._opener = QueueOpener(
+            FakeResponse({"workflow_runs": [historical_run, current_run]})
+        )
+        handle = provider.reconcile(
+            runtime_identity,
+            runtime_identity.request_identity,
+            current_attempt,
         )
         self.assertEqual(handle.opaque_id, "77")
-        self.assertIn("event=workflow_dispatch", opener.requests[0][0].full_url)
+        self.assertEqual(handle.provider_created_at_epoch, CREATED_AT_EPOCH)
+
+    def test_reconcile_rejects_historical_created_at_without_local_now(self):
+        runtime_identity = identity()
+        build_attempt = attempt()
+        provider = self.provider(QueueOpener())
+        historical = run_payload(
+            provider,
+            runtime_identity,
+            build_attempt,
+            run_id=75,
+            created_at="2020-01-01T00:00:00Z",
+        )
+        provider._opener = QueueOpener(
+            FakeResponse({"workflow_runs": [historical]})
+        )
+        with self.assertRaises(ProviderPollingError):
+            provider.reconcile(
+                runtime_identity,
+                runtime_identity.request_identity,
+                build_attempt,
+            )
+
+    def test_reconcile_is_bounded_and_rejects_duplicate_current_attempt(self):
+        runtime_identity = identity()
+        build_attempt = attempt()
+        provider = self.provider(QueueOpener())
+        duplicate = run_payload(provider, runtime_identity, build_attempt)
+        provider._opener = QueueOpener(
+            FakeResponse({"workflow_runs": [duplicate, duplicate]})
+        )
+        with self.assertRaises(ProviderPollingError):
+            provider.reconcile(
+                runtime_identity,
+                runtime_identity.request_identity,
+                build_attempt,
+            )
+        provider._opener = QueueOpener(
+            FakeResponse({"workflow_runs": [{} for _item in range(101)]})
+        )
+        with self.assertRaises(ProviderPollingError):
+            provider.reconcile(
+                runtime_identity,
+                runtime_identity.request_identity,
+                build_attempt,
+            )
 
     def test_auth_error_is_redacted(self):
         error = urllib.error.HTTPError(
@@ -203,7 +311,7 @@ class GitHubActionsProviderTests(unittest.TestCase):
         )
         provider = self.provider(QueueOpener(error))
         with self.assertRaises(ProviderAuthenticationError) as raised:
-            provider.submit(identity(), identity().request_identity)
+            provider.submit(identity(), identity().request_identity, attempt())
         self.assertNotIn("stage-a-secret-token", str(raised.exception))
 
 

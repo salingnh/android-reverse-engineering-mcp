@@ -349,12 +349,17 @@ class PlatformArchitectureTests(unittest.TestCase):
         provider = (
             PLUGIN_ROOT / "lib" / "safe_reverser" / "controlled_build.py"
         ).read_text(encoding="utf-8")
-        self.assertIn("run-name: Runtime cache ${{ inputs.request_identity }}", workflow)
+        self.assertIn(
+            "run-name: Runtime cache ${{ inputs.request_identity }} "
+            "attempt ${{ inputs.attempt_identity }}",
+            workflow,
+        )
         self.assertIn(
             "group: flutter-runtime-cache-${{ inputs.request_identity }}", workflow
         )
         for field in (
             "request_identity",
+            "attempt_identity",
             "dart_version",
             "snapshot_hash",
             "arch",
@@ -521,6 +526,7 @@ class PlatformArchitectureTests(unittest.TestCase):
             return prepared
 
         secret = "stage-a-builder-secret"
+        private_attempt = "7" * 32
         with mock.patch.dict(
             os.environ,
             {"SAFE_REVERSER_CONTROLLED_BUILD_TOKEN": secret},
@@ -543,9 +549,19 @@ class PlatformArchitectureTests(unittest.TestCase):
         self.assertEqual(result["runtime_cache"]["state"], "BUILDING")
         serialized = json.dumps(result)
         self.assertNotIn(secret, serialized)
+        self.assertNotIn(private_attempt, serialized)
         self.assertNotIn("GitHub", serialized)
         job = capability.jobs.get(result["job_id"])
-        self.assertNotIn(secret, (job / "job.json").read_text(encoding="utf-8"))
+        job_text = (job / "job.json").read_text(encoding="utf-8")
+        self.assertNotIn(secret, job_text)
+        self.assertNotIn(private_attempt, job_text)
+        normalized = normalize_capability_result(
+            capability_id="framework-flutter",
+            operation="analyze_flutter_aot",
+            producer_version="0.3.0",
+            payload=result,
+        )
+        self.assertNotIn(private_attempt, json.dumps(normalized))
 
     def test_control_plane_is_adapter_registry_driven(self):
         env = {

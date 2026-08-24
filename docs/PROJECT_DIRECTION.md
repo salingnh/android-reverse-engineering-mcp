@@ -298,7 +298,7 @@ RuntimeCacheResolver
               `-- future self-hosted or prebuilt provider
 ```
 
-GitHub Actions is one transport implementation, not the architecture. Public analysis responses may report only semantic cache state (`READY`, `BUILD_REQUIRED`, `BUILDING`, `FAILED`); workflow names, run IDs, HTTP endpoints, credentials, and provider-specific status values remain behind the provider boundary.
+GitHub Actions is one transport implementation, not the architecture. The deterministic request identity continues to identify an exact runtime cache across retries. A private provider-neutral `BuildAttempt` identifies one bounded attempt, is persisted before submit, survives restart, and changes only for a genuine retry. Reconciliation is always scoped to the current attempt, so an old failed or successful run cannot be mistaken for a new retry. Public analysis responses may report only semantic cache state (`READY`, `BUILD_REQUIRED`, `BUILDING`, `FAILED`); attempt identities, workflow names, run IDs, creation metadata, HTTP endpoints, credentials, and provider-specific status values remain behind the provider boundary.
 
 The private Flutter runtime-cache schema moves from 2 to 3 to bind the OS as a verifiable OCI label. Schema-2 images are not mutated. Compatible identities are rebuilt under schema 3, whose changed digest prevents silent reuse. Capability API 1 and Worker ABI 1 are unchanged.
 

@@ -3,11 +3,11 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Callable, Protocol
 
@@ -19,6 +19,7 @@ MAX_PROVIDER_HANDLE = 512
 MAX_PROVIDER_NAMESPACE = 64
 GITHUB_API_VERSION = "2026-03-10"
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+ATTEMPT_IDENTITY_RE = re.compile(r"^[0-9a-f]{32}$")
 REPOSITORY_RE = re.compile(
     r"^[A-Za-z0-9](?:[A-Za-z0-9_.-]{0,99})/[A-Za-z0-9](?:[A-Za-z0-9_.-]{0,99})$"
 )
@@ -42,6 +43,10 @@ class ProviderRequestError(ControlledBuildError):
     code = "provider_request_failed"
 
 
+class ProviderSubmissionAmbiguousError(ControlledBuildError):
+    code = "provider_submission_ambiguous"
+
+
 class ProviderPollingError(ControlledBuildError):
     code = "provider_polling_failed"
 
@@ -53,12 +58,69 @@ class ProviderBuildState(Enum):
 
 
 @dataclass(frozen=True)
+class BuildAttempt:
+    attempt_identity: str
+    started_at_epoch: int
+    deadline_epoch: int
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.attempt_identity) is not str
+            or type(self.started_at_epoch) is not int
+            or type(self.deadline_epoch) is not int
+        ):
+            raise ValueError("controlled-build attempt fields have invalid types")
+        if not ATTEMPT_IDENTITY_RE.fullmatch(self.attempt_identity):
+            raise ValueError("invalid controlled-build attempt identity")
+        if self.started_at_epoch < 0 or self.deadline_epoch <= self.started_at_epoch:
+            raise ValueError("invalid controlled-build attempt time bounds")
+        if self.deadline_epoch - self.started_at_epoch > 24 * 60 * 60:
+            raise ValueError("controlled-build attempt exceeds time bound")
+
+    def to_private_dict(self) -> dict[str, Any]:
+        return {
+            "attempt_identity": self.attempt_identity,
+            "started_at_epoch": self.started_at_epoch,
+            "deadline_epoch": self.deadline_epoch,
+        }
+
+    @classmethod
+    def from_private_dict(cls, value: dict[str, Any]) -> BuildAttempt:
+        if not isinstance(value, dict) or set(value) != {
+            "attempt_identity",
+            "started_at_epoch",
+            "deadline_epoch",
+        }:
+            raise ValueError("controlled-build attempt must be an exact object")
+        if (
+            type(value["attempt_identity"]) is not str
+            or type(value["started_at_epoch"]) is not int
+            or type(value["deadline_epoch"]) is not int
+        ):
+            raise ValueError("controlled-build attempt fields have invalid types")
+        return cls(
+            attempt_identity=value["attempt_identity"],
+            started_at_epoch=value["started_at_epoch"],
+            deadline_epoch=value["deadline_epoch"],
+        )
+
+
+@dataclass(frozen=True)
 class ProviderBuildHandle:
     namespace: str
     opaque_id: str
-    submitted_at_epoch: int
+    provider_created_at_epoch: int | None = None
 
     def __post_init__(self) -> None:
+        if (
+            type(self.namespace) is not str
+            or type(self.opaque_id) is not str
+            or (
+                self.provider_created_at_epoch is not None
+                and type(self.provider_created_at_epoch) is not int
+            )
+        ):
+            raise ValueError("controlled-build provider handle fields have invalid types")
         if (
             not self.namespace
             or len(self.namespace) > MAX_PROVIDER_NAMESPACE
@@ -71,24 +133,44 @@ class ProviderBuildHandle:
             or "\x00" in self.opaque_id
         ):
             raise ValueError("invalid controlled-build provider handle")
-        if self.submitted_at_epoch < 0:
-            raise ValueError("invalid controlled-build submission time")
+        if (
+            self.provider_created_at_epoch is not None
+            and self.provider_created_at_epoch < 0
+        ):
+            raise ValueError("invalid provider build creation time")
 
     def to_private_dict(self) -> dict[str, Any]:
         return {
             "namespace": self.namespace,
             "opaque_id": self.opaque_id,
-            "submitted_at_epoch": self.submitted_at_epoch,
+            "provider_created_at_epoch": self.provider_created_at_epoch,
         }
 
     @classmethod
     def from_private_dict(cls, value: dict[str, Any]) -> ProviderBuildHandle:
-        if not isinstance(value, dict):
-            raise ValueError("controlled-build handle must be an object")
+        if not isinstance(value, dict) or set(value) != {
+            "namespace",
+            "opaque_id",
+            "provider_created_at_epoch",
+        }:
+            raise ValueError("controlled-build handle must be an exact object")
+        if (
+            type(value["namespace"]) is not str
+            or type(value["opaque_id"]) is not str
+            or (
+                value["provider_created_at_epoch"] is not None
+                and type(value["provider_created_at_epoch"]) is not int
+            )
+        ):
+            raise ValueError("controlled-build handle fields have invalid types")
         return cls(
-            namespace=str(value.get("namespace") or ""),
-            opaque_id=str(value.get("opaque_id") or ""),
-            submitted_at_epoch=int(value.get("submitted_at_epoch") or 0),
+            namespace=value["namespace"],
+            opaque_id=value["opaque_id"],
+            provider_created_at_epoch=(
+                value["provider_created_at_epoch"]
+                if value.get("provider_created_at_epoch") is not None
+                else None
+            ),
         )
 
 
@@ -117,7 +199,10 @@ class ControlledBuildProvider(Protocol):
     def namespace(self) -> str: ...
 
     def submit(
-        self, identity: RuntimeIdentity, request_identity: str
+        self,
+        identity: RuntimeIdentity,
+        request_identity: str,
+        attempt: BuildAttempt,
     ) -> ProviderBuildHandle: ...
 
     def status(
@@ -125,10 +210,14 @@ class ControlledBuildProvider(Protocol):
         handle: ProviderBuildHandle,
         identity: RuntimeIdentity,
         request_identity: str,
+        attempt: BuildAttempt,
     ) -> ProviderBuildStatus: ...
 
     def reconcile(
-        self, identity: RuntimeIdentity, request_identity: str
+        self,
+        identity: RuntimeIdentity,
+        request_identity: str,
+        attempt: BuildAttempt,
     ) -> ProviderBuildHandle | None: ...
 
     def cancel(self, handle: ProviderBuildHandle) -> None: ...
@@ -147,7 +236,6 @@ class GitHubActionsControlledBuildProvider:
         api_base: str = "https://api.github.com",
         timeout_seconds: int = 20,
         opener: Callable[..., Any] | None = None,
-        clock: Callable[[], float] = time.time,
     ) -> None:
         token = str(token or "")
         if not token or len(token) > 8192 or any(ch in token for ch in "\x00\r\n"):
@@ -177,7 +265,6 @@ class GitHubActionsControlledBuildProvider:
         self.api_base = api_base.rstrip("/")
         self.timeout_seconds = max(1, min(int(timeout_seconds), 60))
         self._opener = opener or urllib.request.urlopen
-        self._clock = clock
         provider_config = json.dumps(
             {
                 "api_base": self.api_base,
@@ -215,6 +302,7 @@ class GitHubActionsControlledBuildProvider:
         *,
         payload: dict[str, Any] | None = None,
         polling: bool = False,
+        submission: bool = False,
     ) -> dict[str, Any]:
         body = None
         if payload is not None:
@@ -234,6 +322,9 @@ class GitHubActionsControlledBuildProvider:
             },
         )
         error_type = ProviderPollingError if polling else ProviderRequestError
+        ambiguous_type = (
+            ProviderSubmissionAmbiguousError if submission else error_type
+        )
         try:
             with self._opener(request, timeout=self.timeout_seconds) as response:
                 raw = response.read(MAX_PROVIDER_RESPONSE_BYTES + 1)
@@ -243,33 +334,52 @@ class GitHubActionsControlledBuildProvider:
                 raise ProviderAuthenticationError(
                     "controlled-build provider rejected authentication"
                 ) from exc
+            if submission and (exc.code == 408 or exc.code >= 500):
+                raise ProviderSubmissionAmbiguousError(
+                    "controlled-build submission result is ambiguous"
+                ) from exc
             raise error_type(
                 f"controlled-build provider returned HTTP {int(exc.code)}"
             ) from exc
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
-            raise ProviderUnavailableError(
-                "controlled-build provider is unavailable"
+            raise ambiguous_type(
+                "controlled-build submission result is ambiguous"
+                if submission
+                else "controlled-build provider is unavailable"
             ) from exc
         if len(raw) > MAX_PROVIDER_RESPONSE_BYTES:
-            raise error_type("controlled-build provider response exceeds size bound")
+            raise ambiguous_type(
+                "controlled-build provider response exceeds size bound"
+            )
         if status < 200 or status >= 300:
+            if submission and (status == 408 or status >= 500):
+                raise ProviderSubmissionAmbiguousError(
+                    "controlled-build submission result is ambiguous"
+                )
             raise error_type(f"controlled-build provider returned HTTP {status}")
         if not raw:
             return {}
         try:
             value = json.loads(raw)
         except (UnicodeError, json.JSONDecodeError) as exc:
-            raise error_type("controlled-build provider returned invalid JSON") from exc
+            raise ambiguous_type(
+                "controlled-build provider returned invalid JSON"
+            ) from exc
         if not isinstance(value, dict):
-            raise error_type("controlled-build provider returned a non-object response")
+            raise ambiguous_type(
+                "controlled-build provider returned a non-object response"
+            )
         return value
 
     @staticmethod
     def _inputs(
-        identity: RuntimeIdentity, request_identity: str
+        identity: RuntimeIdentity,
+        request_identity: str,
+        attempt: BuildAttempt,
     ) -> dict[str, Any]:
         return {
             "request_identity": request_identity,
+            "attempt_identity": attempt.attempt_identity,
             "dart_version": identity.dart_version,
             "snapshot_hash": identity.snapshot_hash,
             "arch": identity.arch,
@@ -282,59 +392,147 @@ class GitHubActionsControlledBuildProvider:
         }
 
     def submit(
-        self, identity: RuntimeIdentity, request_identity: str
+        self,
+        identity: RuntimeIdentity,
+        request_identity: str,
+        attempt: BuildAttempt,
     ) -> ProviderBuildHandle:
-        if request_identity != identity.request_identity:
-            raise ProviderRequestError(
-                "controlled-build request identity does not match runtime identity"
-            )
+        self._validate_identity(identity, request_identity, attempt, polling=False)
         response = self._request(
             "POST",
             self._workflow_path() + "/dispatches",
             payload={
                 "ref": self.ref,
-                "inputs": self._inputs(identity, request_identity),
-                "return_run_details": True,
+                "inputs": self._inputs(identity, request_identity, attempt),
             },
+            submission=True,
         )
-        raw_id = response.get("workflow_run_id")
-        try:
-            run_id = int(raw_id)
-        except (TypeError, ValueError) as exc:
-            raise ProviderRequestError(
+        run_id = response.get("workflow_run_id")
+        if type(run_id) is not int:
+            raise ProviderSubmissionAmbiguousError(
                 "controlled-build provider omitted the run handle"
-            ) from exc
+            )
         if run_id <= 0:
-            raise ProviderRequestError("controlled-build provider returned an invalid run handle")
+            raise ProviderSubmissionAmbiguousError(
+                "controlled-build provider returned an invalid run handle"
+            )
+        self._validate_dispatch_urls(response, run_id)
         return ProviderBuildHandle(
             namespace=self.namespace,
             opaque_id=str(run_id),
-            submitted_at_epoch=int(self._clock()),
         )
 
-    def _run_to_handle(self, run: dict[str, Any]) -> ProviderBuildHandle:
+    @staticmethod
+    def _run_title(request_identity: str, attempt: BuildAttempt) -> str:
+        return (
+            f"Runtime cache {request_identity} "
+            f"attempt {attempt.attempt_identity}"
+        )
+
+    @staticmethod
+    def _parse_created_at(value: Any) -> int:
+        if not isinstance(value, str) or len(value) > 64:
+            raise ProviderPollingError(
+                "controlled-build run omitted provider creation metadata"
+            )
         try:
-            run_id = int(run.get("id"))
-        except (TypeError, ValueError) as exc:
-            raise ProviderPollingError("controlled-build run has no valid handle") from exc
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise ProviderPollingError(
+                "controlled-build run creation metadata is invalid"
+            ) from exc
+        if parsed.tzinfo is None:
+            raise ProviderPollingError(
+                "controlled-build run creation metadata has no timezone"
+            )
+        return int(parsed.astimezone(timezone.utc).timestamp())
+
+    @staticmethod
+    def _validate_created_at(created_at: int, attempt: BuildAttempt) -> None:
+        clock_skew_seconds = 5 * 60
+        if not (
+            attempt.started_at_epoch - clock_skew_seconds
+            <= created_at
+            <= attempt.deadline_epoch + clock_skew_seconds
+        ):
+            raise ProviderPollingError(
+                "controlled-build run creation metadata is outside current attempt"
+            )
+
+    def _run_to_handle(
+        self, run: dict[str, Any], attempt: BuildAttempt
+    ) -> ProviderBuildHandle:
+        run_id = run.get("id")
+        if type(run_id) is not int:
+            raise ProviderPollingError("controlled-build run has no valid handle")
         if run_id <= 0:
             raise ProviderPollingError("controlled-build run has an invalid handle")
+        created_at = self._parse_created_at(run.get("created_at"))
+        self._validate_created_at(created_at, attempt)
         return ProviderBuildHandle(
             namespace=self.namespace,
             opaque_id=str(run_id),
-            submitted_at_epoch=int(self._clock()),
+            provider_created_at_epoch=created_at,
         )
+
+    def _validate_dispatch_urls(
+        self, response: dict[str, Any], run_id: int
+    ) -> None:
+        expected_run_url = (
+            self.api_base
+            + f"/repos/{self.repository}/actions/runs/{run_id}"
+        )
+        if response.get("run_url") != expected_run_url:
+            raise ProviderSubmissionAmbiguousError(
+                "controlled-build provider returned an invalid run URL"
+            )
+        html_url = response.get("html_url")
+        if not isinstance(html_url, str) or len(html_url) > 2048:
+            raise ProviderSubmissionAmbiguousError(
+                "controlled-build provider omitted the HTML run URL"
+            )
+        parsed = urllib.parse.urlsplit(html_url)
+        api_host = urllib.parse.urlsplit(self.api_base).hostname
+        expected_html_host = "github.com" if api_host == "api.github.com" else api_host
+        expected_suffix = f"/{self.repository}/actions/runs/{run_id}"
+        if (
+            parsed.scheme != "https"
+            or parsed.hostname != expected_html_host
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.query
+            or parsed.fragment
+            or not parsed.path.endswith(expected_suffix)
+        ):
+            raise ProviderSubmissionAmbiguousError(
+                "controlled-build provider returned an invalid HTML run URL"
+            )
+
+    @staticmethod
+    def _validate_identity(
+        identity: RuntimeIdentity,
+        request_identity: str,
+        attempt: BuildAttempt,
+        *,
+        polling: bool,
+    ) -> None:
+        if request_identity != identity.request_identity:
+            error_type = ProviderPollingError if polling else ProviderRequestError
+            raise error_type(
+                "controlled-build request identity does not match runtime identity"
+            )
+        if not isinstance(attempt, BuildAttempt):
+            error_type = ProviderPollingError if polling else ProviderRequestError
+            raise error_type("controlled-build attempt metadata is invalid")
 
     def status(
         self,
         handle: ProviderBuildHandle,
         identity: RuntimeIdentity,
         request_identity: str,
+        attempt: BuildAttempt,
     ) -> ProviderBuildStatus:
-        if request_identity != identity.request_identity:
-            raise ProviderPollingError(
-                "controlled-build request identity does not match runtime identity"
-            )
+        self._validate_identity(identity, request_identity, attempt, polling=True)
         if handle.namespace != self.namespace or not handle.opaque_id.isdigit():
             raise ProviderPollingError("controlled-build handle belongs to another provider")
         run = self._request(
@@ -342,9 +540,20 @@ class GitHubActionsControlledBuildProvider:
             f"/repos/{self.repository}/actions/runs/{handle.opaque_id}",
             polling=True,
         )
-        expected_title = f"Runtime cache {request_identity}"
+        expected_title = self._run_title(request_identity, attempt)
         if run.get("event") != "workflow_dispatch" or run.get("display_title") != expected_title:
             raise ProviderPollingError("controlled-build run identity does not match")
+        actual_handle = self._run_to_handle(run, attempt)
+        if actual_handle.opaque_id != handle.opaque_id:
+            raise ProviderPollingError("controlled-build run handle does not match")
+        if (
+            handle.provider_created_at_epoch is not None
+            and handle.provider_created_at_epoch
+            != actual_handle.provider_created_at_epoch
+        ):
+            raise ProviderPollingError(
+                "controlled-build run creation metadata changed"
+            )
         status = str(run.get("status") or "")
         if status != "completed":
             return ProviderBuildStatus(ProviderBuildState.BUILDING)
@@ -370,12 +579,12 @@ class GitHubActionsControlledBuildProvider:
         )
 
     def reconcile(
-        self, identity: RuntimeIdentity, request_identity: str
+        self,
+        identity: RuntimeIdentity,
+        request_identity: str,
+        attempt: BuildAttempt,
     ) -> ProviderBuildHandle | None:
-        if request_identity != identity.request_identity:
-            raise ProviderPollingError(
-                "controlled-build request identity does not match runtime identity"
-            )
+        self._validate_identity(identity, request_identity, attempt, polling=True)
         query = urllib.parse.urlencode(
             {
                 "branch": self.ref,
@@ -390,11 +599,20 @@ class GitHubActionsControlledBuildProvider:
         runs = payload.get("workflow_runs")
         if not isinstance(runs, list) or len(runs) > 100:
             raise ProviderPollingError("controlled-build run list is invalid or unbounded")
-        expected_title = f"Runtime cache {request_identity}"
+        expected_title = self._run_title(request_identity, attempt)
+        matches: list[ProviderBuildHandle] = []
         for run in runs:
-            if isinstance(run, dict) and run.get("display_title") == expected_title:
-                return self._run_to_handle(run)
-        return None
+            if (
+                isinstance(run, dict)
+                and run.get("event") == "workflow_dispatch"
+                and run.get("display_title") == expected_title
+            ):
+                matches.append(self._run_to_handle(run, attempt))
+        if len(matches) > 1:
+            raise ProviderPollingError(
+                "multiple controlled-build runs match the current attempt"
+            )
+        return matches[0] if matches else None
 
     def cancel(self, handle: ProviderBuildHandle) -> None:
         if handle.namespace != self.namespace or not handle.opaque_id.isdigit():

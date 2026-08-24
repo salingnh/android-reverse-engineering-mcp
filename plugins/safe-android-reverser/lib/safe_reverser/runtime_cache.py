@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import stat
 import time
 from contextlib import contextmanager
@@ -14,6 +15,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterator
 
 from .controlled_build import (
+    BuildAttempt,
     ControlledBuildError,
     ControlledBuildProvider,
     ProviderAuthenticationError,
@@ -21,6 +23,7 @@ from .controlled_build import (
     ProviderBuildState,
     ProviderPollingError,
     ProviderRequestError,
+    ProviderSubmissionAmbiguousError,
     ProviderUnavailableError,
 )
 from .paths import (
@@ -37,7 +40,7 @@ from .runtime import (
     VerifiedImage,
 )
 
-RUNTIME_CACHE_STATE_SCHEMA = 1
+RUNTIME_CACHE_STATE_SCHEMA = 2
 MAX_RUNTIME_CACHE_STATE_BYTES = 64 * 1024
 MAX_STATE_ENTRIES = 10_000
 DART_VERSION_RE = re.compile(
@@ -48,6 +51,10 @@ COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 PLATFORM_TOKEN_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,31}$")
 IMAGE_ID_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 FAILURE_CODE_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+
+
+def _new_attempt_identity() -> str:
+    return secrets.token_hex(16)
 
 
 class RuntimeCacheError(RuntimeError):
@@ -246,7 +253,7 @@ class RuntimeCacheStateStore:
     def __init__(self, data_root: Path) -> None:
         try:
             self.root = ensure_private_child(data_root.resolve(), "runtime-cache-resolver")
-            self.states = ensure_private_child(self.root, "states-v1")
+            self.states = ensure_private_child(self.root, "states-v2")
             self.locks = ensure_private_child(self.root, "locks-v1")
         except PathPolicyError as exc:
             raise RuntimeCacheStoreError(str(exc)) from exc
@@ -344,6 +351,7 @@ class RuntimeCacheResolver:
         build_timeout_seconds: int = 6 * 60 * 60,
         retry_delay_seconds: int = 300,
         clock: Callable[[], float] = time.time,
+        attempt_identity_factory: Callable[[], str] = _new_attempt_identity,
     ) -> None:
         self.runtime = runtime
         self.provider = provider
@@ -351,9 +359,48 @@ class RuntimeCacheResolver:
         self.build_timeout_seconds = max(60, min(int(build_timeout_seconds), 24 * 60 * 60))
         self.retry_delay_seconds = max(1, min(int(retry_delay_seconds), 24 * 60 * 60))
         self._clock = clock
+        self._attempt_identity_factory = attempt_identity_factory
 
     def _now(self) -> int:
         return int(self._clock())
+
+    def _new_attempt(
+        self, previous_attempt_identity: str | None = None
+    ) -> BuildAttempt:
+        for _item in range(8):
+            candidate = self._attempt_identity_factory()
+            started = self._now()
+            try:
+                if type(candidate) is not str:
+                    raise ValueError("attempt identity must be a string")
+                attempt = BuildAttempt(
+                    attempt_identity=candidate,
+                    started_at_epoch=started,
+                    deadline_epoch=started + self.build_timeout_seconds,
+                )
+            except (TypeError, ValueError) as exc:
+                raise RuntimeCacheError(
+                    "controlled-build attempt identity factory returned invalid data"
+                ) from exc
+            if attempt.attempt_identity != previous_attempt_identity:
+                return attempt
+        raise RuntimeCacheError(
+            "controlled-build attempt identity did not advance on retry"
+        )
+
+    @staticmethod
+    def _attempt_from_payload(
+        payload: dict[str, Any] | None, *, required: bool
+    ) -> BuildAttempt | None:
+        raw = (payload or {}).get("build_attempt")
+        if raw is None and not required:
+            return None
+        try:
+            return BuildAttempt.from_private_dict(raw)
+        except (TypeError, ValueError) as exc:
+            raise RuntimeCacheStoreError(
+                "runtime-cache build attempt is invalid"
+            ) from exc
 
     def _verify_image(
         self,
@@ -415,10 +462,14 @@ class RuntimeCacheResolver:
         detail: str,
         *,
         retryable: bool = True,
+        attempt: BuildAttempt | None = None,
     ) -> RuntimeCacheResolution:
         if not FAILURE_CODE_RE.fullmatch(code):
             code = "runtime_cache_failed"
         retry_after = self._now() + self.retry_delay_seconds if retryable else None
+        extra: dict[str, Any] = {}
+        if attempt is not None:
+            extra["build_attempt"] = attempt.to_private_dict()
         self._write(
             identity,
             cache_ref,
@@ -427,6 +478,7 @@ class RuntimeCacheResolver:
             detail=detail,
             retryable=retryable,
             retry_after_epoch=retry_after,
+            **extra,
         )
         return RuntimeCacheResolution(
             RuntimeCacheState.FAILED,
@@ -442,6 +494,8 @@ class RuntimeCacheResolver:
         identity: RuntimeIdentity,
         cache_ref: str,
         exc: ControlledBuildError,
+        *,
+        attempt: BuildAttempt | None = None,
     ) -> RuntimeCacheResolution:
         if isinstance(exc, ProviderAuthenticationError):
             return self._failed(
@@ -449,6 +503,7 @@ class RuntimeCacheResolver:
                 cache_ref,
                 "provider_authentication_failed",
                 "controlled build authentication failed",
+                attempt=attempt,
             )
         if isinstance(exc, ProviderUnavailableError):
             return self._failed(
@@ -456,6 +511,7 @@ class RuntimeCacheResolver:
                 cache_ref,
                 "provider_unavailable",
                 "controlled build provider is unavailable",
+                attempt=attempt,
             )
         if isinstance(exc, ProviderRequestError):
             return self._failed(
@@ -463,12 +519,14 @@ class RuntimeCacheResolver:
                 cache_ref,
                 "provider_request_failed",
                 "controlled build request failed",
+                attempt=attempt,
             )
         return self._failed(
             identity,
             cache_ref,
             "provider_failed",
             "controlled build provider failed",
+            attempt=attempt,
         )
 
     def _building(
@@ -492,7 +550,11 @@ class RuntimeCacheResolver:
         )
 
     def _start_build(
-        self, identity: RuntimeIdentity, cache_ref: str
+        self,
+        identity: RuntimeIdentity,
+        cache_ref: str,
+        *,
+        previous_attempt_identity: str | None = None,
     ) -> RuntimeCacheResolution:
         if self.provider is None:
             self._write(identity, cache_ref, RuntimeCacheState.BUILD_REQUIRED)
@@ -502,15 +564,14 @@ class RuntimeCacheResolver:
                 cache_ref,
                 detail="exact runtime cache is not available",
             )
-        started = self._now()
+        attempt = self._new_attempt(previous_attempt_identity)
         payload = self._write(
             identity,
             cache_ref,
             RuntimeCacheState.BUILDING,
             provider_namespace=self.provider.namespace,
             provider_handle=None,
-            started_at_epoch=started,
-            deadline_epoch=started + self.build_timeout_seconds,
+            build_attempt=attempt.to_private_dict(),
         )
         # Reconcile before every submit, including retries after a prior
         # ambiguous transport result. Provider-side acceptance may become
@@ -519,10 +580,12 @@ class RuntimeCacheResolver:
         # eventual-consistency delay.
         try:
             existing = self.provider.reconcile(
-                identity, identity.request_identity
+                identity, identity.request_identity, attempt
             )
         except ControlledBuildError as exc:
-            return self._provider_failure(identity, cache_ref, exc)
+            return self._provider_failure(
+                identity, cache_ref, exc, attempt=attempt
+            )
         if existing is not None:
             if existing.namespace != self.provider.namespace:
                 return self._failed(
@@ -531,20 +594,24 @@ class RuntimeCacheResolver:
                     "provider_contract_failed",
                     "controlled build provider returned an incompatible handle",
                     retryable=False,
+                    attempt=attempt,
                 )
             payload["provider_handle"] = existing.to_private_dict()
             payload["updated_at_epoch"] = self._now()
             self.store.write(identity, payload)
             return self._building(identity, cache_ref, payload)
         try:
-            handle = self.provider.submit(identity, identity.request_identity)
-        except ControlledBuildError as exc:
-            # The provider may have accepted the request before the transport
-            # response was lost. Reconcile by the provider-independent identity
-            # before declaring failure so retries cannot knowingly duplicate it.
+            handle = self.provider.submit(
+                identity, identity.request_identity, attempt
+            )
+        except ProviderSubmissionAmbiguousError:
+            # The provider may have accepted this exact attempt before the
+            # response was lost. Keep the attempt active and reconcile only its
+            # identity; a new retry attempt is not permitted before its bounded
+            # deadline.
             try:
                 recovered = self.provider.reconcile(
-                    identity, identity.request_identity
+                    identity, identity.request_identity, attempt
                 )
             except ControlledBuildError:
                 recovered = None
@@ -556,12 +623,22 @@ class RuntimeCacheResolver:
                         "provider_contract_failed",
                         "controlled build provider returned an incompatible handle",
                         retryable=False,
+                        attempt=attempt,
                     )
                 payload["provider_handle"] = recovered.to_private_dict()
                 payload["updated_at_epoch"] = self._now()
                 self.store.write(identity, payload)
                 return self._building(identity, cache_ref, payload)
-            return self._provider_failure(identity, cache_ref, exc)
+            return self._building(
+                identity,
+                cache_ref,
+                payload,
+                warning="controlled build submission is awaiting reconciliation",
+            )
+        except ControlledBuildError as exc:
+            return self._provider_failure(
+                identity, cache_ref, exc, attempt=attempt
+            )
         if handle.namespace != self.provider.namespace:
             return self._failed(
                 identity,
@@ -569,6 +646,7 @@ class RuntimeCacheResolver:
                 "provider_contract_failed",
                 "controlled build provider returned an incompatible handle",
                 retryable=False,
+                attempt=attempt,
             )
         payload["provider_handle"] = handle.to_private_dict()
         payload["updated_at_epoch"] = self._now()
@@ -581,12 +659,16 @@ class RuntimeCacheResolver:
         cache_ref: str,
         payload: dict[str, Any],
     ) -> RuntimeCacheResolution:
+        attempt = self._attempt_from_payload(payload, required=True)
+        if attempt is None:
+            raise RuntimeCacheStoreError("runtime-cache build attempt is missing")
         if self.provider is None:
             return self._failed(
                 identity,
                 cache_ref,
                 "provider_unavailable",
                 "controlled build provider is unavailable",
+                attempt=attempt,
             )
         if payload.get("provider_namespace") != self.provider.namespace:
             return self._failed(
@@ -594,11 +676,8 @@ class RuntimeCacheResolver:
                 cache_ref,
                 "provider_changed",
                 "controlled build provider configuration changed",
+                attempt=attempt,
             )
-        try:
-            deadline = int(payload.get("deadline_epoch") or 0)
-        except (TypeError, ValueError):
-            raise RuntimeCacheStoreError("runtime-cache deadline is invalid")
         raw_handle = payload.get("provider_handle")
         handle: ProviderBuildHandle | None = None
         if raw_handle is not None:
@@ -606,7 +685,7 @@ class RuntimeCacheResolver:
                 handle = ProviderBuildHandle.from_private_dict(raw_handle)
             except (TypeError, ValueError) as exc:
                 raise RuntimeCacheStoreError("runtime-cache provider handle is invalid") from exc
-        if deadline <= self._now():
+        if attempt.deadline_epoch <= self._now():
             if handle is not None:
                 try:
                     self.provider.cancel(handle)
@@ -617,10 +696,13 @@ class RuntimeCacheResolver:
                 cache_ref,
                 "build_timeout",
                 "controlled runtime-cache build timed out",
+                attempt=attempt,
             )
         if handle is None:
             try:
-                handle = self.provider.reconcile(identity, identity.request_identity)
+                handle = self.provider.reconcile(
+                    identity, identity.request_identity, attempt
+                )
             except ProviderPollingError:
                 return self._building(
                     identity,
@@ -629,7 +711,9 @@ class RuntimeCacheResolver:
                     warning="controlled build reconciliation is temporarily unavailable",
                 )
             except ControlledBuildError as exc:
-                return self._provider_failure(identity, cache_ref, exc)
+                return self._provider_failure(
+                    identity, cache_ref, exc, attempt=attempt
+                )
             if handle is None:
                 return self._building(
                     identity,
@@ -643,7 +727,7 @@ class RuntimeCacheResolver:
             self.store.write(identity, payload)
         try:
             status = self.provider.status(
-                handle, identity, identity.request_identity
+                handle, identity, identity.request_identity, attempt
             )
         except ProviderPollingError:
             return self._building(
@@ -653,7 +737,9 @@ class RuntimeCacheResolver:
                 warning="controlled build status is temporarily unavailable",
             )
         except ControlledBuildError as exc:
-            return self._provider_failure(identity, cache_ref, exc)
+            return self._provider_failure(
+                identity, cache_ref, exc, attempt=attempt
+            )
         if status.state is ProviderBuildState.BUILDING:
             return self._building(identity, cache_ref, payload)
         if status.state is ProviderBuildState.FAILED:
@@ -665,6 +751,7 @@ class RuntimeCacheResolver:
                 cache_ref,
                 code,
                 "controlled runtime-cache build failed",
+                attempt=attempt,
             )
         if status.state is not ProviderBuildState.SUCCEEDED or status.source_revision is None:
             return self._failed(
@@ -673,6 +760,7 @@ class RuntimeCacheResolver:
                 "provider_contract_failed",
                 "controlled build provider returned an invalid success state",
                 retryable=False,
+                attempt=attempt,
             )
         try:
             verified = self._verify_image(
@@ -692,6 +780,7 @@ class RuntimeCacheResolver:
                 "image_verification_failed",
                 "published runtime-cache image failed immutable verification",
                 retryable=False,
+                attempt=attempt,
             )
         self._write(
             identity,
@@ -762,4 +851,16 @@ class RuntimeCacheResolver:
                         detail=str((payload or {}).get("detail") or "runtime cache resolution failed"),
                         retry_after_epoch=retry_after or None,
                     )
+                previous_attempt = self._attempt_from_payload(
+                    payload, required=False
+                )
+                return self._start_build(
+                    identity,
+                    cache_ref,
+                    previous_attempt_identity=(
+                        previous_attempt.attempt_identity
+                        if previous_attempt is not None
+                        else None
+                    ),
+                )
             return self._start_build(identity, cache_ref)
