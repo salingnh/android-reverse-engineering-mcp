@@ -4,6 +4,9 @@ on:
   pull_request:
     paths:
       - 'scripts/prepare_release_metadata.py'
+      - 'scripts/check_single_plugin_model.py'
+      - '.claude-plugin/marketplace.json'
+      - 'plugins/**'
       - '.github/workflows/ship-safe-reverser.yml'
       - '.github/workflows/post-release-normalize.yml'
       - '.github/workflows/release-safe-reverser.yml'
@@ -23,7 +26,13 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Validate helper syntax
-        run: python3 -m py_compile scripts/prepare_release_metadata.py
+        run: |
+          python3 -m py_compile \
+            scripts/prepare_release_metadata.py \
+            scripts/check_single_plugin_model.py
+
+      - name: Enforce single-plugin MCP-only model
+        run: python3 scripts/check_single_plugin_model.py
 
       - name: Validate workflow YAML syntax
         shell: bash
@@ -43,6 +52,8 @@ jobs:
           tar --exclude=.git -cf - . | tar -xf - -C "$target"
           cd "$target"
 
+          python3 scripts/check_single_plugin_model.py
+
           current="$(tr -d '[:space:]' < plugins/safe-android-reverser/VERSION)"
           next="$(python3 - "$current" <<'PY'
           import sys
@@ -54,6 +65,7 @@ jobs:
           python3 scripts/prepare_release_metadata.py "$next"
           python3 scripts/prepare_release_metadata.py "$next" --check
           python3 scripts/check_release_consistency.py
+          python3 scripts/check_single_plugin_model.py
 
           before="$(find plugins/safe-android-reverser/VERSION \
             plugins/safe-android-reverser/.claude-plugin/plugin.json \

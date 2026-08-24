@@ -1,28 +1,15 @@
 {
   "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
   "name": "salingnh-reverse-tools",
-  "description": "Android reverse-engineering plugins, including a sandboxed MCP-based profile.",
+  "description": "Safe Android Reverser MCP for sandboxed, capability-aware Android reverse engineering.",
   "owner": {
     "name": "salingnh"
   },
   "metadata": {
-    "description": "Android reverse-engineering plugins with safe containerized execution",
-    "version": "2.1.1"
+    "description": "Single-entrypoint Android reverse engineering through the Safe Android Reverser MCP control plane",
+    "version": "3.0.0"
   },
   "plugins": [
-    {
-      "name": "android-reverse-engineering",
-      "source": "./plugins/android-reverse-engineering",
-      "description": "Original host-executed Android reverse-engineering workflow retained from upstream.",
-      "version": "1.5.0",
-      "author": {
-        "name": "Simone Avogadro"
-      },
-      "repository": "https://github.com/SimoneAvogadro/android-reverse-engineering-skill",
-      "license": "Apache-2.0",
-      "keywords": ["android", "reverse-engineering", "apk", "jadx", "decompile", "api-extraction"],
-      "category": "security"
-    },
     {
       "name": "safe-android-reverser",
       "source": "./plugins/safe-android-reverser",
