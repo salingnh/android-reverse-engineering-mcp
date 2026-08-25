@@ -81,9 +81,13 @@ COPY --from=runtime-builder /opt/blutter/blutter.py /opt/blutter/blutter.py
 COPY --from=runtime-builder /opt/blutter/extract_dart_info.py /opt/blutter/extract_dart_info.py
 COPY --from=runtime-builder /opt/blutter/dartvm_fetch_build.py /opt/blutter/dartvm_fetch_build.py
 COPY --from=runtime-builder /opt/blutter/bin/ /opt/blutter/bin/
+COPY ownership_contract.py /opt/safe-flutter/ownership_contract.py
+COPY program_model.py /opt/safe-flutter/program_model.py
+COPY sandbox/peg_schema.py /opt/safe-flutter/peg_schema.py
 COPY frameworks/flutter/cache_identity.py /opt/safe-flutter/cache_identity.py
 COPY frameworks/flutter/safe_blutter_adapter.py /opt/safe-flutter/safe_blutter_adapter.py
 COPY frameworks/flutter/flutter_semantic.py /opt/safe-flutter/flutter_semantic.py
+COPY frameworks/flutter/flutter_program_model.py /opt/safe-flutter/flutter_program_model.py
 COPY frameworks/flutter/flutter_network.py /opt/safe-flutter/flutter_network.py
 COPY frameworks/flutter/flutter_artifact.py /opt/safe-flutter/flutter_artifact.py
 COPY frameworks/flutter/flutter_export.py /opt/safe-flutter/flutter_export.py
@@ -100,9 +104,13 @@ RUN set -eux; \
     test -n "$binary"; \
     "$binary" --help >/dev/null; \
     python3 -m py_compile \
+      /opt/safe-flutter/ownership_contract.py \
+      /opt/safe-flutter/program_model.py \
+      /opt/safe-flutter/peg_schema.py \
       /opt/safe-flutter/cache_identity.py \
       /opt/safe-flutter/safe_blutter_adapter.py \
       /opt/safe-flutter/flutter_semantic.py \
+      /opt/safe-flutter/flutter_program_model.py \
       /opt/safe-flutter/flutter_network.py \
       /opt/safe-flutter/flutter_artifact.py \
       /opt/safe-flutter/flutter_export.py \
@@ -110,6 +118,7 @@ RUN set -eux; \
       /opt/blutter/blutter.py \
       /opt/blutter/extract_dart_info.py \
       /opt/blutter/dartvm_fetch_build.py; \
+    PYTHONPATH=/opt/safe-flutter python3 -c 'import program_model as pm; import flutter_program_model as provider; import peg_schema as peg; assert pm.descriptor()["program_model_version"] == 1; assert pm.descriptor()["provider_continuation"] is True; assert provider.FlutterProgramProvider is not None; assert peg.PEG_SCHEMA_VERSION == 2'; \
     chmod 0555 /opt/safe-flutter/*.py; \
     chmod -R a-w /opt/blutter /opt/safe-flutter /opt/licenses
 
