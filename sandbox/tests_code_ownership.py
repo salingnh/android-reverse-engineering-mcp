@@ -47,6 +47,22 @@ class CodeOwnershipTests(unittest.TestCase):
         finally:
             tmp.cleanup()
 
+    def test_unsafe_manifest_dtd_is_rejected_before_xml_parsing(self):
+        unsafe = '''<?xml version="1.0"?>
+<!DOCTYPE manifest [<!ENTITY x "com.example.bad">]>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="&x;">
+  <application android:name=".App" />
+</manifest>
+'''
+        tmp, job = self.make_job(unsafe)
+        try:
+            context = ownership.ownership_context(job)
+            self.assertEqual(context.manifest_status, "unsafe_xml")
+            self.assertIsNone(context.application_package)
+            self.assertEqual(context.manifest_components, frozenset())
+        finally:
+            tmp.cleanup()
+
     def test_first_party_vendor_platform_generated_and_unknown_are_distinct(self):
         tmp, job = self.make_job()
         try:
