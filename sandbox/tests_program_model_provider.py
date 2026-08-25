@@ -111,6 +111,51 @@ class DexProgramProviderTests(unittest.TestCase):
             "third-party-sdk",
         )
 
+    def test_boundary_resolves_and_retains_crossing_after_provider_restart(self):
+        provider = pu_program_model.DexProgramProvider(
+            self.job,
+            self.workspace,
+            {"androguard": True},
+        )
+        repo = pm.ProgramRepository((provider,))
+        app_fn = repo.find_entities(
+            kind="FUNCTION",
+            text="login",
+            limit=10,
+        ).items[0]
+        original = next(
+            item
+            for item in repo.find_relationships(
+                entity_id=app_fn.entity_id,
+                direction="outgoing",
+                limit=20,
+            ).items
+            if item.kind == "CALLS_EXTERNAL"
+        )
+        original_boundary = provider.get_entity(original.target_entity_id)
+        self.assertIsNotNone(original_boundary)
+
+        restarted = pu_program_model.DexProgramProvider(
+            self.job,
+            self.workspace,
+            {"androguard": True},
+        )
+        self.assertNotIn(original.target_entity_id, restarted._boundary_entities)
+        rebuilt = restarted.get_entity(original.target_entity_id)
+        self.assertIsNotNone(rebuilt)
+        self.assertEqual(rebuilt.to_dict(), original_boundary.to_dict())
+
+        restarted_repo = pm.ProgramRepository((restarted,))
+        incoming = restarted_repo.find_relationships(
+            entity_id=original.target_entity_id,
+            direction="incoming",
+            limit=20,
+        )
+        self.assertEqual(
+            [item.relationship_id for item in incoming.items],
+            [original.relationship_id],
+        )
+
     def test_explicit_third_party_scope_exposes_sdk_function(self):
         provider = pu_program_model.DexProgramProvider(
             self.job,
@@ -200,6 +245,28 @@ class DexProgramProviderTests(unittest.TestCase):
         )
         self.assertEqual(len(second.items), 1)
         self.assertGreater(pm.entity_sort_key(second.items[0]), after)
+
+    def test_generic_continuation_skips_completed_class_domain(self):
+        provider = pu_program_model.DexProgramProvider(
+            self.job,
+            self.workspace,
+            {"androguard": True},
+        )
+        function_after = ("FUNCTION", "", "", "")
+        with mock.patch.object(
+            provider,
+            "_class_entity",
+            side_effect=AssertionError("completed class domain must be skipped"),
+        ):
+            page = provider.query_entities(
+                ownership_scope="all",
+                after=function_after,
+                limit=10,
+            )
+        self.assertTrue(page.items)
+        self.assertTrue(
+            all(pm.entity_sort_key(item) > function_after for item in page.items)
+        )
 
 
 if __name__ == "__main__":
