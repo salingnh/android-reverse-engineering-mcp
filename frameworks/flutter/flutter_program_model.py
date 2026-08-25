@@ -14,6 +14,15 @@ MAX_PROVIDER_SCAN_ROWS = 250_000
 MAX_PROVIDER_XREFS = 20_000
 MAX_PROVIDER_QUERY_SECONDS = 5
 REPRESENTATION = "flutter-dart-aot"
+_FUNCTION_SCAN_SQL = """
+SELECT f.*,
+       COUNT(*) OVER (
+         PARTITION BY library_url,class_name,name,signature
+       ) AS duplicate_count
+FROM functions f
+ORDER BY library_url,class_name,name,signature,native_offset
+LIMIT ?
+"""
 
 
 def flutter_ownership(library_url: str) -> dict[str, Any]:
@@ -132,6 +141,8 @@ class FlutterProgramProvider:
         self,
         conn: sqlite3.Connection,
         row: sqlite3.Row,
+        *,
+        duplicate_count: int | None = None,
     ) -> str:
         library_url = str(row["library_url"])
         class_name = str(row["class_name"])
@@ -141,12 +152,15 @@ class FlutterProgramProvider:
             f"function:v1:flutter-dart-aot:"
             f"{self.class_key(library_url, class_name)}:{name}:{signature}"
         )
-        duplicate = conn.execute(
-            "SELECT COUNT(*) n FROM functions "
-            "WHERE library_url=? AND class_name=? AND name=? AND signature=?",
-            (library_url, class_name, name, signature),
-        ).fetchone()["n"]
-        if int(duplicate) > 1:
+        if duplicate_count is None:
+            duplicate_count = int(
+                conn.execute(
+                    "SELECT COUNT(*) n FROM functions "
+                    "WHERE library_url=? AND class_name=? AND name=? AND signature=?",
+                    (library_url, class_name, name, signature),
+                ).fetchone()["n"]
+            )
+        if duplicate_count > 1:
             base += f"@0x{int(row['native_offset']):x}"
         return base
 
@@ -211,10 +225,18 @@ class FlutterProgramProvider:
         self,
         conn: sqlite3.Connection,
         row: sqlite3.Row,
+        *,
+        duplicate_count: int | None = None,
     ) -> pm.ProgramEntity:
         library_url = str(row["library_url"])
         ownership = flutter_ownership(library_url)
-        key = self._function_key(conn, row)
+        if duplicate_count is None and "duplicate_count" in row.keys():
+            duplicate_count = int(row["duplicate_count"])
+        key = self._function_key(
+            conn,
+            row,
+            duplicate_count=duplicate_count,
+        )
         evidence_ref = self._evidence_ref(
             {
                 "kind": "dart-function",
@@ -334,8 +356,7 @@ class FlutterProgramProvider:
 
             scanned = 0
             for row in conn.execute(
-                "SELECT * FROM functions "
-                "ORDER BY library_url,class_name,name,signature,native_offset LIMIT ?",
+                _FUNCTION_SCAN_SQL,
                 (MAX_PROVIDER_SCAN_ROWS + 1,),
             ):
                 scanned += 1
@@ -471,8 +492,7 @@ class FlutterProgramProvider:
 
             if kind in {None, "FUNCTION"} and self._kind_may_follow("FUNCTION", after):
                 rows = conn.execute(
-                    "SELECT * FROM functions "
-                    "ORDER BY library_url,class_name,name,signature,native_offset LIMIT ?",
+                    _FUNCTION_SCAN_SQL,
                     (MAX_PROVIDER_SCAN_ROWS + 1,),
                 )
                 scanned = 0
@@ -705,7 +725,10 @@ class FlutterProgramProvider:
                     consider(self._declares(self._module_entity(module_row), clazz))
                 if direction in {"outgoing", "both"} and len(accepted) <= limit:
                     rows = conn.execute(
-                        "SELECT * FROM functions WHERE class_id_ref=? "
+                        "SELECT f.*,COUNT(*) OVER ("
+                        "PARTITION BY library_url,class_name,name,signature"
+                        ") AS duplicate_count FROM functions f "
+                        "WHERE class_id_ref=? "
                         "ORDER BY name,signature,native_offset LIMIT ?",
                         (entity_row["id"], MAX_PROVIDER_SCAN_ROWS + 1),
                     )
