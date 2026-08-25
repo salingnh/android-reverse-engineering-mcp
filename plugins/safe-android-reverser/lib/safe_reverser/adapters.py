@@ -17,6 +17,8 @@ from .worker import McpContainerWorker, WorkerProtocolError
 
 MAX_ENABLED_CAPABILITIES = 64
 CONTROLLED_BUILD_PROVIDER_ENV = "SAFE_REVERSER_CONTROLLED_BUILD_PROVIDER"
+MAX_MAP_CURSOR_CHARS = 4096
+MAX_MAP_RELATIONSHIP_KINDS = 32
 
 
 class CapabilityAdapter(Protocol):
@@ -128,7 +130,48 @@ class FlutterAotAdapter:
     def program_model_call(
         self, name: str, args: dict[str, Any]
     ) -> dict[str, Any]:
-        return self.capability.program_model_call(name, args)
+        if name not in {"get_application_map", "expand_application_node"}:
+            raise ContractError(f"unsupported Program Model operation: {name}")
+        argv = [
+            "--ownership-scope",
+            str(args.get("ownership_scope", "application")),
+            "--node-limit",
+            str(args.get("node_limit", 40)),
+            "--edge-limit",
+            str(args.get("edge_limit", 100)),
+        ]
+        if name == "expand_application_node":
+            entity_id = str(args.get("entity_id") or "").strip()
+            if not entity_id or len(entity_id) > 256:
+                raise ContractError("invalid Application Map entity_id")
+            argv.extend(
+                [
+                    entity_id,
+                    "--direction",
+                    str(args.get("direction", "both")),
+                ]
+            )
+            kinds = args.get("relationship_kinds")
+            if kinds is not None:
+                if (
+                    not isinstance(kinds, list)
+                    or len(kinds) > MAX_MAP_RELATIONSHIP_KINDS
+                    or any(not isinstance(item, str) or not item for item in kinds)
+                ):
+                    raise ContractError("invalid Application Map relationship_kinds")
+                for kind in kinds:
+                    argv.extend(["--relationship-kind", kind])
+            cursor = str(args.get("cursor") or "").strip()
+            if cursor:
+                if len(cursor) > MAX_MAP_CURSOR_CHARS:
+                    raise ContractError("Application Map cursor exceeds size bound")
+                argv.extend(["--cursor", cursor])
+        return self.capability._semantic(
+            args.get("job_id"),
+            name,
+            argv,
+            timeout=300,
+        )
 
 
 def _env_suffix(capability_id: str) -> str:
