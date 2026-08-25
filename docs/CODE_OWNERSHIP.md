@@ -47,7 +47,7 @@ Classification results include scope, owner/SDK when known, reasons and evidence
 
 ## Rule registry
 
-`sandbox/ownership_rules.json` is data, not architecture. It contains known namespace ownership and narrowly defined generated-code patterns. Adding a new SDK means extending the registry; it must not require adding vendor-specific conditionals to symbol, XREF, network or future data-flow tools.
+`sandbox/ownership_rules.json` is data, not architecture. It contains known namespace ownership and narrowly defined generated-code patterns. Adding a new SDK means extending the registry; it must not require adding vendor-specific conditionals to symbol, XREF, API inventory, network reconstruction or future data-flow tools.
 
 Generated patterns must be conservative. Broad patterns such as generic `*_Impl` are prohibited because legitimate application implementations commonly use that naming convention.
 
@@ -68,11 +68,15 @@ The default view must not expand hundreds of Facebook implementation methods mer
 
 Boundary retention is structural evidence only. A `CALLS`/XREF edge must never be relabeled as true value/data flow.
 
-## Network reconstruction
+## API inventory and network reconstruction
 
-`extract_network_model` defaults to `scope=application`. Source files that are definitely `THIRD_PARTY`, `PLATFORM` or `GENERATED` are not scanned in that mode. `FIRST_PARTY` and `UNKNOWN` remain eligible. Endpoint/URL/auth evidence is annotated with ownership.
+Both `extract_api` and `extract_network_model` default to `scope=application`. Source files that are definitely `THIRD_PARTY`, `PLATFORM` or `GENERATED` are not scanned in that mode. `FIRST_PARTY` and `UNKNOWN` remain eligible. Returned API/network evidence is annotated with code ownership.
+
+`extract_api` remains the shallow lexical inventory: URLs, Retrofit annotations, endpoint-shaped literals and bounded network/auth signal counts. `extract_network_model` is the deeper semantic reconstruction that links source evidence to uniquely resolved symbols and XREF callers. Neither operation claims true value propagation.
 
 This reduces Firebase/Facebook/OkHttp/etc. implementation noise without deleting their existence from the program graph. Explicit scope expansion remains available.
+
+`search_source` and `read_source_file` intentionally remain raw, explicit forensic primitives. They do not silently apply ownership filtering because an analyst who explicitly requests a string or source path must not have matching evidence hidden. Ownership-aware semantic discovery should use the scoped operations above; raw forensic reads are deliberate expansion.
 
 ## Resource and safety rules
 
@@ -81,6 +85,7 @@ This reduces Firebase/Facebook/OkHttp/etc. implementation noise without deleting
 - DTD/entity declarations are rejected because ownership extraction never needs them and the manifest is attacker-controlled artifact data.
 - Manifest traversal has a component-count bound.
 - Symbol ownership filtering uses a bounded scan no larger than the program-index method ceiling; third-party rows cannot consume the response limit before an application row is considered.
+- Ownership-scoped API/network source traversal remains within the existing bounded source-file count and per-file byte ceilings and is additionally wall-clock bounded at the semantic worker boundary.
 - Ownership metadata does not include secret values.
 
 ## Long-term evolution
@@ -103,7 +108,7 @@ The consumers remain the same:
 ```text
 ownership
   -> symbol/XREF queries
-  -> network reconstruction
+  -> API/network reconstruction
   -> Canonical Program Model
   -> Application Map
   -> Context Retrieval
