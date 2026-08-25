@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 import os
 import shutil
@@ -15,6 +16,13 @@ from .flutter import FlutterCapabilityError
 from .paths import PathPolicyError, secure_directory_root
 from .registry import CapabilityRegistry
 from .runtime import ContainerRuntime, RuntimeErrorSafe
+from .semantic_operations import (
+    CONTROL_PLANE_CATALOG_OPERATIONS,
+    CONTROL_PLANE_SEMANTIC_OPERATIONS,
+    PROGRAM_MODEL_ROUTABLE_REPRESENTATIONS,
+)
+from .semantic_router import SemanticRoutingError, route_program_model_operation
+from .tool_catalog import load_named_tool_catalog
 from .worker import WorkerProtocolError
 
 SERVER_NAME = "safe-android-reverser"
@@ -75,6 +83,12 @@ class ControlPlane:
             version=self.version,
             project_dir=self.project_dir,
             data_dir=self.data_dir,
+        )
+        catalog_root = self.plugin_root / "tool-catalogs"
+        self._control_plane_tools = load_named_tool_catalog(
+            catalog_root,
+            "control-plane",
+            expected_operations=CONTROL_PLANE_CATALOG_OPERATIONS,
         )
         required = {
             capability_id
@@ -148,26 +162,9 @@ class ControlPlane:
         )
 
     def tools(self) -> list[dict[str, Any]]:
-        tools: list[dict[str, Any]] = [
-            {
-                "name": "health",
-                "description": "Check the Safe Reverser host control plane and discover actual readiness across isolated capability workers.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {},
-                    "additionalProperties": False,
-                },
-            },
-            {
-                "name": "list_capabilities",
-                "description": "Return the manifest-driven Capability SPI registry and current runtime readiness states.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {},
-                    "additionalProperties": False,
-                },
-            },
-        ]
+        # All control-plane-owned descriptors are host-local and canonicalized in
+        # tool-catalogs/control-plane.json. No worker is consulted during discovery.
+        tools: list[dict[str, Any]] = copy.deepcopy(self._control_plane_tools)
         for _capability_id, adapter in sorted(self.adapters.items()):
             try:
                 tools.extend(adapter.tools())
@@ -231,6 +228,11 @@ class ControlPlane:
                 "capability_api": CAPABILITY_API_VERSION,
                 "worker_abi": WORKER_ABI_VERSION,
                 "evidence_envelope": EVIDENCE_ENVELOPE_VERSION,
+                "semantic_operations": sorted(CONTROL_PLANE_SEMANTIC_OPERATIONS),
+                "program_model_routing": "job_id+representation",
+                "program_model_representations": sorted(
+                    PROGRAM_MODEL_ROUTABLE_REPRESENTATIONS
+                ),
             },
             "capabilities": {
                 "registry": self.registry.descriptor(),
@@ -252,6 +254,14 @@ class ControlPlane:
             return self.health()
         if name == "list_capabilities":
             return self.list_capabilities()
+        if name in CONTROL_PLANE_SEMANTIC_OPERATIONS:
+            capability_id, payload = route_program_model_operation(
+                operation=name,
+                arguments=arguments,
+                registry=self.registry,
+                adapters=self.adapters,
+            )
+            return self._normalize(capability_id, name, payload)
         owner = self.registry.owner_for_operation(name)
         adapter = self.adapters.get(owner.capability_id)
         if adapter is None:
@@ -356,6 +366,7 @@ def serve(plugin_root: Path) -> int:
                         ControlPlaneError,
                         ContractError,
                         FlutterCapabilityError,
+                        SemanticRoutingError,
                         RuntimeErrorSafe,
                         WorkerProtocolError,
                         ValueError,
