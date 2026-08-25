@@ -8,6 +8,7 @@ from pathlib import Path
 import program_understanding_v2 as pu
 import pu_index
 import pu_source
+import static_semantic_worker as static_worker
 from tests_code_ownership import CodeOwnershipTests  # imported for unittest discovery
 
 
@@ -89,6 +90,26 @@ class ProgramUnderstandingScopeTests(unittest.TestCase):
         (vendor / "FirebaseApi.java").write_text(VENDOR_SOURCE, encoding="utf-8")
         (resources / "AndroidManifest.xml").write_text(MANIFEST, encoding="utf-8")
         return tmp, workspace, job, artifact
+
+    def test_static_worker_extract_api_contract_uses_canonical_handler(self):
+        self.assertIs(
+            static_worker.core.TOOL_HANDLERS["extract_api"],
+            static_worker.extract_api,
+        )
+        tool = next(
+            item for item in static_worker.core.TOOLS if item.get("name") == "extract_api"
+        )
+        properties = tool["inputSchema"]["properties"]
+        self.assertEqual(
+            properties["scope"]["enum"],
+            list(pu.OWNERSHIP_QUERY_SCOPES),
+        )
+        self.assertEqual(properties["scope"]["default"], "application")
+        self.assertEqual(properties["timeout_seconds"]["default"], 600)
+        self.assertEqual(
+            static_worker.OWNERSHIP_QUERY_SCOPES,
+            list(pu.OWNERSHIP_QUERY_SCOPES),
+        )
 
     def test_declarations_preserve_top_level_and_nested_owners(self):
         items = pu_source.declarations(SOURCE, "Api")
