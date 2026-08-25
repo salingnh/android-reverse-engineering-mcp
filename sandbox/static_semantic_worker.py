@@ -7,9 +7,11 @@ evolution must not create version-suffixed server modules.
 """
 from __future__ import annotations
 
+import json
 import signal
 import sqlite3
 from contextlib import contextmanager
+from pathlib import Path
 
 import analysis_routing
 import flutter_analysis
@@ -18,24 +20,8 @@ import peg_schema
 import program_understanding_v2 as pu
 
 _baseline_fingerprint = core.fingerprint
-OWNERSHIP_QUERY_SCOPES = [
-    "application",
-    "all",
-    "first_party",
-    "third_party",
-    "platform",
-    "generated",
-    "unknown",
-]
-_SCOPE_PROPERTY = {
-    "type": "string",
-    "enum": OWNERSHIP_QUERY_SCOPES,
-    "default": "application",
-    "description": (
-        "Ownership scope. application includes FIRST_PARTY and UNKNOWN, suppresses definite "
-        "third-party/platform/generated internals, and retains direct SDK boundary XREFs."
-    ),
-}
+OWNERSHIP_QUERY_SCOPES = list(pu.OWNERSHIP_QUERY_SCOPES)
+MAX_STATIC_TOOL_CATALOG_BYTES = 256 * 1024
 
 
 @contextmanager
@@ -206,6 +192,11 @@ def health(args):
             "dart_aot_index": False,
         }
     }
+    result["tool_contract"] = {
+        "source": "static-core.json",
+        "public_operation_count": len(core.TOOLS) - 1,
+        "single_descriptor_source": True,
+    }
     return result
 
 
@@ -298,6 +289,72 @@ def extract_network_model(args):
     )
 
 
+def _catalog_candidates() -> tuple[Path, ...]:
+    module_root = Path(__file__).resolve().parent
+    return (
+        module_root / "tool-catalogs" / "static-core.json",
+        module_root.parent
+        / "plugins"
+        / "safe-android-reverser"
+        / "tool-catalogs"
+        / "static-core.json",
+    )
+
+
+def _load_public_tool_catalog() -> list[dict]:
+    path = next(
+        (
+            candidate
+            for candidate in _catalog_candidates()
+            if candidate.is_file() and not candidate.is_symlink()
+        ),
+        None,
+    )
+    if path is None:
+        raise RuntimeError("canonical static-core tool catalog is unavailable")
+    if path.stat().st_size > MAX_STATIC_TOOL_CATALOG_BYTES:
+        raise RuntimeError("canonical static-core tool catalog exceeds size bound")
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError("canonical static-core tool catalog is invalid") from exc
+    if not isinstance(raw, list) or not raw:
+        raise RuntimeError("canonical static-core tool catalog must be a non-empty array")
+
+    tools: list[dict] = []
+    names: list[str] = []
+    for index, value in enumerate(raw):
+        if not isinstance(value, dict) or set(value) != {
+            "name",
+            "description",
+            "inputSchema",
+        }:
+            raise RuntimeError(f"invalid static-core tool descriptor at index {index}")
+        name = value.get("name")
+        description = value.get("description")
+        schema = value.get("inputSchema")
+        if not isinstance(name, str) or not name:
+            raise RuntimeError(f"invalid static-core tool name at index {index}")
+        if not isinstance(description, str) or not description.strip():
+            raise RuntimeError(f"invalid static-core tool description at index {index}")
+        if not isinstance(schema, dict) or schema.get("type") != "object":
+            raise RuntimeError(f"invalid static-core input schema at index {index}")
+        tools.append(value)
+        names.append(name)
+
+    if len(names) != len(set(names)):
+        raise RuntimeError("canonical static-core tool catalog contains duplicate operations")
+
+    expected = set(core.TOOL_HANDLERS) - {"health"}
+    actual = set(names)
+    if actual != expected:
+        raise RuntimeError(
+            "static-core tool catalog/handler drift: "
+            f"missing={sorted(expected - actual)} extra={sorted(actual - expected)}"
+        )
+    return tools
+
+
 # Make the routed fingerprint the canonical function for callers importing the
 # semantic worker, while keeping the low-level function private above.
 core.fingerprint = fingerprint
@@ -319,269 +376,14 @@ core.TOOL_HANDLERS.update(
     }
 )
 
-for tool in core.TOOLS:
-    if tool.get("name") == "fingerprint":
-        tool["description"] = (
-            "Fingerprint an APK/bundle, detect framework/tooling signals, and return an explicit "
-            "framework-aware analysis route so non-Java business logic is not silently treated as JADX input."
-        )
-    elif tool.get("name") == "extract_api":
-        tool["description"] = (
-            "Extract an ownership-scoped lexical API inventory from a decompile job. "
-            "Application scope suppresses definite SDK/platform/generated source internals by default."
-        )
-        properties = tool["inputSchema"]["properties"]
-        properties["scope"] = dict(_SCOPE_PROPERTY)
-        properties["timeout_seconds"] = {
-            "type": "integer",
-            "minimum": 1,
-            "maximum": 3600,
-            "default": 600,
-        }
-
-core.TOOLS.extend(
-    [
-        {
-            "name": "route_analysis",
-            "description": "Select primary and secondary analyzer profiles for an APK/bundle without executing the analyzers.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {"artifact": {"type": "string"}},
-                "required": ["artifact"],
-                "additionalProperties": False,
-            },
-        },
-        {
-            "name": "inspect_flutter",
-            "description": "Inspect Flutter APK/XAPK structure, ABIs, libapp/libflutter, Flutter assets and bounded Dart VM version markers without generic native decompilation.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "artifact": {"type": "string"},
-                    "max_assets": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "maximum": 20000,
-                        "default": 5000,
-                    },
-                    "timeout_seconds": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "maximum": 3600,
-                        "default": 300,
-                    },
-                },
-                "required": ["artifact"],
-                "additionalProperties": False,
-            },
-        },
-        {
-            "name": "identify_dart_runtime",
-            "description": "Recover directly observable Dart VM version markers from libflutter.so with bounded streaming scans; snapshot-hash recovery is deferred to the ELF-aware Flutter AOT profile.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "artifact": {"type": "string"},
-                    "timeout_seconds": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "maximum": 3600,
-                        "default": 300,
-                    },
-                },
-                "required": ["artifact"],
-                "additionalProperties": False,
-            },
-        },
-        {
-            "name": "extract_flutter_assets",
-            "description": "Inventory Flutter packaged assets and return bounded previews of text-like manifests/configuration files with PEG provenance.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "artifact": {"type": "string"},
-                    "max_items": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "maximum": 20000,
-                        "default": 1000,
-                    },
-                    "max_previews": {
-                        "type": "integer",
-                        "minimum": 0,
-                        "maximum": 50,
-                        "default": 20,
-                    },
-                    "timeout_seconds": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "maximum": 3600,
-                        "default": 300,
-                    },
-                },
-                "required": ["artifact"],
-                "additionalProperties": False,
-            },
-        },
-        {
-            "name": "build_program_index",
-            "description": "Build or reuse a bounded semantic program index from DEX XREFs when Androguard is available, with a lower-confidence decompiled-source fallback and an ownership-model descriptor.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "job_id": {"type": "string"},
-                    "max_methods": {
-                        "type": "integer",
-                        "minimum": 100,
-                        "maximum": 200000,
-                        "default": 100000,
-                    },
-                    "max_edges": {
-                        "type": "integer",
-                        "minimum": 100,
-                        "maximum": 500000,
-                        "default": 250000,
-                    },
-                    "force": {"type": "boolean", "default": False},
-                    "timeout_seconds": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "maximum": 3600,
-                        "default": 900,
-                    },
-                },
-                "required": ["job_id"],
-                "additionalProperties": False,
-            },
-        },
-        {
-            "name": "find_symbols",
-            "description": "Search normalized symbols with durable code-ownership classification; defaults to application code plus conservatively UNKNOWN code instead of vendor/platform/generated internals.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "job_id": {"type": "string"},
-                    "query": {"type": "string"},
-                    "scope": dict(_SCOPE_PROPERTY),
-                    "limit": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "maximum": 500,
-                        "default": 100,
-                    },
-                    "timeout_seconds": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "maximum": 3600,
-                        "default": 300,
-                    },
-                },
-                "required": ["job_id", "query"],
-                "additionalProperties": False,
-            },
-        },
-        {
-            "name": "find_xrefs",
-            "description": "Find ownership-scoped incoming/outgoing XREF roots while retaining direct application-to-SDK/platform boundary edges as evidence.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "job_id": {"type": "string"},
-                    "query": {"type": "string"},
-                    "direction": {
-                        "type": "string",
-                        "enum": ["incoming", "outgoing", "both"],
-                        "default": "both",
-                    },
-                    "scope": dict(_SCOPE_PROPERTY),
-                    "limit": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "maximum": 1000,
-                        "default": 200,
-                    },
-                    "timeout_seconds": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "maximum": 3600,
-                        "default": 300,
-                    },
-                },
-                "required": ["job_id", "query"],
-                "additionalProperties": False,
-            },
-        },
-        {
-            "name": "get_cfg",
-            "description": "Return a bounded ownership-scoped control-flow graph for matching methods. Requires Androguard in the sandbox image.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "job_id": {"type": "string"},
-                    "query": {"type": "string"},
-                    "scope": dict(_SCOPE_PROPERTY),
-                    "max_blocks": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "maximum": 10000,
-                        "default": 500,
-                    },
-                    "timeout_seconds": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "maximum": 3600,
-                        "default": 300,
-                    },
-                },
-                "required": ["job_id", "query"],
-                "additionalProperties": False,
-            },
-        },
-        {
-            "name": "identify_protector",
-            "description": "Identify packer/protector/obfuscator/anti-analysis signals with APKiD when that optional analyzer is installed.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "artifact": {"type": "string"},
-                    "timeout_seconds": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "maximum": 60,
-                        "default": 10,
-                    },
-                },
-                "required": ["artifact"],
-                "additionalProperties": False,
-            },
-        },
-        {
-            "name": "extract_network_model",
-            "description": "Build an ownership-scoped network model linking endpoints to declaring methods, caller XREFs, model hints, auth/signature evidence and source provenance; application scope avoids scanning definite SDK/platform/generated source internals.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "job_id": {"type": "string"},
-                    "scope": dict(_SCOPE_PROPERTY),
-                    "max_items": {
-                        "type": "integer",
-                        "minimum": 20,
-                        "maximum": 2000,
-                        "default": 500,
-                    },
-                    "timeout_seconds": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "maximum": 3600,
-                        "default": 600,
-                    },
-                },
-                "required": ["job_id"],
-                "additionalProperties": False,
-            },
-        },
-    ]
-)
+# Public descriptors have exactly one repository source of truth: the trusted
+# host-side static-core.json. The same immutable file is copied into the worker
+# image and loaded here. The worker owns handlers only; it does not hand-maintain
+# a second public description/schema surface.
+_internal_tools = [item for item in core.TOOLS if item.get("name") == "health"]
+if len(_internal_tools) != 1:
+    raise RuntimeError("static-core internal health descriptor is invalid")
+core.TOOLS = _internal_tools + _load_public_tool_catalog()
 
 
 if __name__ == "__main__":
