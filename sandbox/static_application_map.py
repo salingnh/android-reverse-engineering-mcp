@@ -108,6 +108,12 @@ def _tool_descriptors() -> list[dict[str, Any]]:
                         "maxItems": 32,
                     },
                     "cursor": {"type": "string", "maxLength": pm.MAX_CURSOR_BYTES},
+                    "node_limit": {
+                        "type": "integer",
+                        "minimum": 2,
+                        "maximum": amap.MAX_NODE_LIMIT,
+                        "default": amap.DEFAULT_NODE_LIMIT,
+                    },
                 },
                 "required": ["job_id", "entity_id"],
                 "additionalProperties": False,
