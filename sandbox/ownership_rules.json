@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "namespaces": [
+    {"prefix": "android.", "scope": "PLATFORM", "owner": "Android Platform"},
+    {"prefix": "androidx.", "scope": "PLATFORM", "owner": "AndroidX"},
+    {"prefix": "java.", "scope": "PLATFORM", "owner": "Java Runtime"},
+    {"prefix": "javax.", "scope": "PLATFORM", "owner": "Java Runtime"},
+    {"prefix": "kotlin.", "scope": "PLATFORM", "owner": "Kotlin Runtime"},
+    {"prefix": "org.jetbrains.annotations.", "scope": "PLATFORM", "owner": "JetBrains Annotations"},
+
+    {"prefix": "com.google.firebase.", "scope": "THIRD_PARTY", "owner": "Google", "sdk": "Firebase"},
+    {"prefix": "com.google.android.gms.", "scope": "THIRD_PARTY", "owner": "Google", "sdk": "Google Play Services"},
+    {"prefix": "com.google.gson.", "scope": "THIRD_PARTY", "owner": "Google", "sdk": "Gson"},
+    {"prefix": "com.facebook.", "scope": "THIRD_PARTY", "owner": "Meta", "sdk": "Facebook SDK"},
+    {"prefix": "io.sentry.", "scope": "THIRD_PARTY", "owner": "Sentry", "sdk": "Sentry"},
+    {"prefix": "com.datadog.", "scope": "THIRD_PARTY", "owner": "Datadog", "sdk": "Datadog"},
+    {"prefix": "com.appsflyer.", "scope": "THIRD_PARTY", "owner": "AppsFlyer", "sdk": "AppsFlyer"},
+    {"prefix": "com.stripe.", "scope": "THIRD_PARTY", "owner": "Stripe", "sdk": "Stripe"},
+    {"prefix": "com.braintreepayments.", "scope": "THIRD_PARTY", "owner": "Braintree", "sdk": "Braintree"},
+    {"prefix": "io.intercom.", "scope": "THIRD_PARTY", "owner": "Intercom", "sdk": "Intercom"},
+    {"prefix": "com.intercom.", "scope": "THIRD_PARTY", "owner": "Intercom", "sdk": "Intercom"},
+    {"prefix": "com.onesignal.", "scope": "THIRD_PARTY", "owner": "OneSignal", "sdk": "OneSignal"},
+    {"prefix": "retrofit2.", "scope": "THIRD_PARTY", "owner": "Square", "sdk": "Retrofit"},
+    {"prefix": "okhttp3.", "scope": "THIRD_PARTY", "owner": "Square", "sdk": "OkHttp"},
+    {"prefix": "com.squareup.moshi.", "scope": "THIRD_PARTY", "owner": "Square", "sdk": "Moshi"},
+    {"prefix": "com.fasterxml.jackson.", "scope": "THIRD_PARTY", "owner": "FasterXML", "sdk": "Jackson"},
+    {"prefix": "org.koin.", "scope": "THIRD_PARTY", "owner": "Koin", "sdk": "Koin"},
+    {"prefix": "dagger.", "scope": "THIRD_PARTY", "owner": "Dagger", "sdk": "Dagger/Hilt"},
+    {"prefix": "com.android.volley.", "scope": "THIRD_PARTY", "owner": "Google", "sdk": "Volley"},
+    {"prefix": "com.apollographql.", "scope": "THIRD_PARTY", "owner": "Apollo", "sdk": "Apollo GraphQL"},
+    {"prefix": "io.ktor.", "scope": "THIRD_PARTY", "owner": "JetBrains", "sdk": "Ktor"},
+    {"prefix": "kotlinx.coroutines.", "scope": "THIRD_PARTY", "owner": "JetBrains", "sdk": "Kotlin Coroutines"},
+    {"prefix": "kotlinx.serialization.", "scope": "THIRD_PARTY", "owner": "JetBrains", "sdk": "Kotlin Serialization"}
+  ],
+  "generated_patterns": [
+    "(?:^|\\.)Hilt_[A-Za-z0-9_$]+$",
+    "(?:^|\\.)Dagger[A-Za-z0-9_$]+$",
+    "(?:^|\\.)[A-Za-z0-9_$]+_(?:Factory|MembersInjector|HiltModules)$",
+    "(?:^|\\.)DataBinderMapperImpl$",
+    "(?:^|\\.)BR$",
+    "(?:^|\\.)BuildConfig$",
+    "(?:^|\\.)R(?:\\$[A-Za-z0-9_$]+)?$"
+  ]
+}

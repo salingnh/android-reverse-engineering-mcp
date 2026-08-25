@@ -5,6 +5,8 @@ on:
     paths:
       - 'sandbox/**'
       - 'plugins/safe-android-reverser/VERSION'
+      - 'plugins/safe-android-reverser/tool-catalogs/static-core.json'
+      - 'plugins/safe-android-reverser/capabilities/static-core.json'
       - 'scripts/check_release_consistency.py'
       - '.claude-plugin/marketplace.json'
       - '.github/workflows/build-safe-sandbox.yml'
@@ -14,6 +16,8 @@ on:
     paths:
       - 'sandbox/**'
       - 'plugins/safe-android-reverser/VERSION'
+      - 'plugins/safe-android-reverser/tool-catalogs/static-core.json'
+      - 'plugins/safe-android-reverser/capabilities/static-core.json'
       - 'scripts/check_release_consistency.py'
       - '.claude-plugin/marketplace.json'
       - '.github/workflows/build-safe-sandbox.yml'
@@ -72,17 +76,21 @@ jobs:
           export SAFE_REVERSER_DATA_ROOT="$RUNNER_TEMP/safe-reverser-data"
           mkdir -p "$SAFE_REVERSER_WORKSPACE" "$SAFE_REVERSER_DATA_ROOT"
           PYTHONPATH=sandbox python3 - <<'PY'
+          import json
+          from pathlib import Path
           import mcp_entrypoint as entry
+
           server = entry.server
-          names = {tool['name'] for tool in server.core.TOOLS}
-          expected = {
-              'health', 'fingerprint', 'route_analysis', 'inspect_flutter',
-              'identify_dart_runtime', 'extract_flutter_assets', 'decompile',
-              'extract_api', 'build_program_index', 'find_symbols', 'find_xrefs',
-              'get_cfg', 'identify_protector', 'extract_network_model',
-              'search_source', 'read_source_file', 'recover_kotlin_names', 'list_jobs',
-          }
-          assert names == expected, (sorted(names), sorted(expected))
+          canonical = json.loads(
+              Path('plugins/safe-android-reverser/tool-catalogs/static-core.json').read_text(
+                  encoding='utf-8'
+              )
+          )
+          public = [tool for tool in server.core.TOOLS if tool.get('name') != 'health']
+          assert public == canonical, 'worker descriptors must be the canonical host catalog verbatim'
+          assert {tool['name'] for tool in public} == set(server.core.TOOL_HANDLERS) - {'health'}
+          assert [tool.get('name') for tool in server.core.TOOLS].count('health') == 1
+
           health = entry.health({})
           assert health['version'] == entry.RELEASE_VERSION, health
           assert health['release']['server_version'] == entry.RELEASE_VERSION, health
@@ -101,6 +109,9 @@ jobs:
           assert health['program_evidence_graph']['schema_version'] == 2, health
           assert health['framework_analysis']['flutter']['artifact_inspection'] is True, health
           assert health['framework_analysis']['flutter']['dart_aot_index'] is False, health
+          assert health['tool_contract']['source'] == 'static-core.json', health
+          assert health['tool_contract']['single_descriptor_source'] is True, health
+          assert health['tool_contract']['public_operation_count'] == len(canonical), health
           PY
 
       - name: Validate static-worker Python syntax
@@ -233,6 +244,7 @@ jobs:
           assert payload['capability_worker']['id'] == 'static-core', payload
           assert payload['capability_worker']['worker_abi'] == 1, payload
           assert payload['analysis_routing']['profiles']['framework-flutter']['status'] == 'declared', payload
+          assert payload['tool_contract']['single_descriptor_source'] is True, payload
           PY
 
       - name: Log in to GHCR

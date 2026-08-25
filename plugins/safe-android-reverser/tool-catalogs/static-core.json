@@ -19,9 +19,7 @@
     "description": "Select primary and secondary analyzer profiles for an APK/bundle without executing the analyzers.",
     "inputSchema": {
       "type": "object",
-      "properties": {
-        "artifact": {"type": "string"}
-      },
+      "properties": {"artifact": {"type": "string"}},
       "required": ["artifact"],
       "additionalProperties": false
     }
@@ -86,12 +84,14 @@
   },
   {
     "name": "extract_api",
-    "description": "Extract URLs, Retrofit endpoints, endpoint-shaped strings and network/auth signals from a decompile job.",
+    "description": "Extract an ownership-scoped lexical API inventory from a decompile job. Application scope suppresses definite SDK/platform/generated source internals by default.",
     "inputSchema": {
       "type": "object",
       "properties": {
         "job_id": {"type": "string"},
-        "max_items": {"type": "integer", "minimum": 20, "maximum": 2000, "default": 500}
+        "scope": {"type": "string", "enum": ["application", "all", "first_party", "third_party", "platform", "generated", "unknown"], "default": "application"},
+        "max_items": {"type": "integer", "minimum": 20, "maximum": 2000, "default": 500},
+        "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 3600, "default": 600}
       },
       "required": ["job_id"],
       "additionalProperties": false
@@ -99,7 +99,7 @@
   },
   {
     "name": "build_program_index",
-    "description": "Build or reuse a bounded semantic program index from DEX XREFs when Androguard is available, with a lower-confidence decompiled-source fallback.",
+    "description": "Build or reuse a bounded semantic program index from DEX XREFs when Androguard is available, with a lower-confidence decompiled-source fallback and an ownership-model descriptor.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -115,12 +115,13 @@
   },
   {
     "name": "find_symbols",
-    "description": "Search normalized class/method symbols in the program index without scanning the full decompiled tree.",
+    "description": "Search normalized symbols with durable code-ownership classification; defaults to application code plus conservatively UNKNOWN code instead of vendor/platform/generated internals.",
     "inputSchema": {
       "type": "object",
       "properties": {
         "job_id": {"type": "string"},
         "query": {"type": "string"},
+        "scope": {"type": "string", "enum": ["application", "all", "first_party", "third_party", "platform", "generated", "unknown"], "default": "application"},
         "limit": {"type": "integer", "minimum": 1, "maximum": 500, "default": 100},
         "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 3600, "default": 300}
       },
@@ -130,13 +131,14 @@
   },
   {
     "name": "find_xrefs",
-    "description": "Find incoming/outgoing method cross-references using DEX XREFs when available, returning normalized evidence edges.",
+    "description": "Find ownership-scoped incoming/outgoing method cross-references while retaining direct application-to-SDK/platform boundary edges as evidence.",
     "inputSchema": {
       "type": "object",
       "properties": {
         "job_id": {"type": "string"},
         "query": {"type": "string"},
         "direction": {"type": "string", "enum": ["incoming", "outgoing", "both"], "default": "both"},
+        "scope": {"type": "string", "enum": ["application", "all", "first_party", "third_party", "platform", "generated", "unknown"], "default": "application"},
         "limit": {"type": "integer", "minimum": 1, "maximum": 1000, "default": 200},
         "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 3600, "default": 300}
       },
@@ -146,12 +148,13 @@
   },
   {
     "name": "get_cfg",
-    "description": "Return a bounded control-flow graph for methods matching a query. Requires Androguard in the sandbox image.",
+    "description": "Return a bounded ownership-scoped control-flow graph for matching methods. Requires Androguard in the sandbox image.",
     "inputSchema": {
       "type": "object",
       "properties": {
         "job_id": {"type": "string"},
         "query": {"type": "string"},
+        "scope": {"type": "string", "enum": ["application", "all", "first_party", "third_party", "platform", "generated", "unknown"], "default": "application"},
         "max_blocks": {"type": "integer", "minimum": 1, "maximum": 10000, "default": 500},
         "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 3600, "default": 300}
       },
@@ -174,11 +177,12 @@
   },
   {
     "name": "extract_network_model",
-    "description": "Build a structured network model linking endpoints to uniquely resolved declaring methods, caller XREFs, model hints, auth/signature evidence and source provenance.",
+    "description": "Build an ownership-scoped network model linking endpoints to declaring methods, caller XREFs, model hints, auth/signature evidence and source provenance; application scope avoids scanning definite SDK/platform/generated source internals.",
     "inputSchema": {
       "type": "object",
       "properties": {
         "job_id": {"type": "string"},
+        "scope": {"type": "string", "enum": ["application", "all", "first_party", "third_party", "platform", "generated", "unknown"], "default": "application"},
         "max_items": {"type": "integer", "minimum": 20, "maximum": 2000, "default": 500},
         "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 3600, "default": 600}
       },
@@ -222,9 +226,7 @@
     "description": "Extract conservative Kotlin original-name candidates from surviving DebugMetadata/Metadata evidence, with confidence values.",
     "inputSchema": {
       "type": "object",
-      "properties": {
-        "job_id": {"type": "string"}
-      },
+      "properties": {"job_id": {"type": "string"}},
       "required": ["job_id"],
       "additionalProperties": false
     }

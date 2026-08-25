@@ -8,6 +8,8 @@ from pathlib import Path
 import program_understanding_v2 as pu
 import pu_index
 import pu_source
+import static_semantic_worker as static_worker
+from tests_code_ownership import CodeOwnershipTests  # imported for unittest discovery
 
 
 SOURCE = '''package com.example;
@@ -30,6 +32,39 @@ class SecondaryApi {
 }
 '''
 
+VENDOR_SOURCE = '''package com.google.firebase.auth;
+public class FirebaseApi {
+  @POST("/firebase/internal")
+  public void login() {}
+}
+'''
+
+GENERATED_SOURCE = '''package com.example;
+public class Hilt_MainActivity {
+  public void login() {}
+}
+'''
+
+MIXED_SOURCE = '''package com.example;
+class Hilt_MixedApi {
+  @POST("/generated/mixed")
+  public void generatedCall() {}
+}
+class RealMixedApi {
+  @POST("/v1/mixed")
+  public void businessCall() {}
+}
+'''
+
+MANIFEST = '''<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.example">
+  <application android:name=".App">
+    <activity android:name=".MainActivity" />
+    <provider android:name="com.google.firebase.provider.FirebaseInitProvider" />
+  </application>
+</manifest>
+'''
+
 
 class ProgramUnderstandingScopeTests(unittest.TestCase):
     def make_job(self):
@@ -38,15 +73,43 @@ class ProgramUnderstandingScopeTests(unittest.TestCase):
         workspace = root / "workspace"
         job = root / "job"
         source = job / "jadx" / "sources" / "com" / "example"
+        vendor = job / "jadx" / "sources" / "com" / "google" / "firebase" / "auth"
+        resources = job / "jadx" / "resources"
         workspace.mkdir()
         source.mkdir(parents=True)
+        vendor.mkdir(parents=True)
+        resources.mkdir(parents=True)
         artifact = workspace / "app.apk"
         artifact.write_bytes(b"invalid-apk-A")
         (job / "job.json").write_text(
             json.dumps({"artifact": "app.apk"}), encoding="utf-8"
         )
         (source / "Api.java").write_text(SOURCE, encoding="utf-8")
+        (source / "Hilt_MainActivity.java").write_text(GENERATED_SOURCE, encoding="utf-8")
+        (source / "MixedApi.java").write_text(MIXED_SOURCE, encoding="utf-8")
+        (vendor / "FirebaseApi.java").write_text(VENDOR_SOURCE, encoding="utf-8")
+        (resources / "AndroidManifest.xml").write_text(MANIFEST, encoding="utf-8")
         return tmp, workspace, job, artifact
+
+    def test_static_worker_extract_api_contract_uses_canonical_handler(self):
+        self.assertIs(
+            static_worker.core.TOOL_HANDLERS["extract_api"],
+            static_worker.extract_api,
+        )
+        tool = next(
+            item for item in static_worker.core.TOOLS if item.get("name") == "extract_api"
+        )
+        properties = tool["inputSchema"]["properties"]
+        self.assertEqual(
+            properties["scope"]["enum"],
+            list(pu.OWNERSHIP_QUERY_SCOPES),
+        )
+        self.assertEqual(properties["scope"]["default"], "application")
+        self.assertEqual(properties["timeout_seconds"]["default"], 600)
+        self.assertEqual(
+            static_worker.OWNERSHIP_QUERY_SCOPES,
+            list(pu.OWNERSHIP_QUERY_SCOPES),
+        )
 
     def test_declarations_preserve_top_level_and_nested_owners(self):
         items = pu_source.declarations(SOURCE, "Api")
@@ -62,8 +125,10 @@ class ProgramUnderstandingScopeTests(unittest.TestCase):
             result = pu.build_program_index(job, workspace, force=True)
             self.assertEqual(result["analysis_kind"], "source-fallback")
             self.assertEqual(result["builder_version"], pu_index.BUILDER_VERSION)
+            self.assertEqual(result["ownership_model"]["context"]["application_package"], "com.example")
             auth = pu.find_symbols(job, workspace, "authorization")["matches"]
             self.assertEqual(auth[0]["class"], "com.example.AuthHeaders")
+            self.assertEqual(auth[0]["ownership"]["scope"], "FIRST_PARTY")
             nested = pu.find_symbols(job, workspace, "inner")["matches"]
             self.assertTrue(
                 any(item["class"] == "com.example.AuthHeaders$InnerApi" for item in nested)
@@ -72,6 +137,181 @@ class ProgramUnderstandingScopeTests(unittest.TestCase):
             self.assertTrue(
                 any(item["class"] == "com.example.SecondaryApi" for item in secondary)
             )
+        finally:
+            tmp.cleanup()
+
+    def test_default_symbol_scope_suppresses_sdk_and_generated_internals(self):
+        tmp, workspace, job, _ = self.make_job()
+        try:
+            pu.build_program_index(job, workspace, force=True)
+            application = pu.find_symbols(job, workspace, "login")
+            self.assertEqual(application["scope"], "application")
+            self.assertEqual(
+                {item["class"] for item in application["matches"]},
+                {"com.example.Api"},
+            )
+            third_party = pu.find_symbols(job, workspace, "login", scope="third_party")
+            self.assertEqual(
+                {item["class"] for item in third_party["matches"]},
+                {"com.google.firebase.auth.FirebaseApi"},
+            )
+            generated = pu.find_symbols(job, workspace, "login", scope="generated")
+            self.assertEqual(
+                {item["class"] for item in generated["matches"]},
+                {"com.example.Hilt_MainActivity"},
+            )
+            all_results = pu.find_symbols(job, workspace, "login", scope="all")
+            self.assertEqual(len(all_results["matches"]), 3)
+        finally:
+            tmp.cleanup()
+
+    def test_extract_api_uses_same_ownership_scope_as_semantic_queries(self):
+        tmp, _, job, _ = self.make_job()
+        try:
+            application = pu.extract_api(job)
+            paths = {item["path"] for item in application["retrofit_endpoints"]}
+            self.assertIn("/v1/login", paths)
+            self.assertNotIn("/firebase/internal", paths)
+            self.assertEqual(application["scope"], "application")
+            self.assertGreaterEqual(application["source_files_skipped_by_scope"], 2)
+            self.assertTrue(
+                all(
+                    item["ownership"]["scope"] == "FIRST_PARTY"
+                    for item in application["retrofit_endpoints"]
+                )
+            )
+
+            vendor = pu.extract_api(job, scope="third_party")
+            vendor_paths = {item["path"] for item in vendor["retrofit_endpoints"]}
+            self.assertEqual(vendor_paths, {"/firebase/internal"})
+            self.assertTrue(
+                all(
+                    item["ownership"]["scope"] == "THIRD_PARTY"
+                    for item in vendor["retrofit_endpoints"]
+                )
+            )
+        finally:
+            tmp.cleanup()
+
+    def test_mixed_source_file_filters_per_lexical_owner(self):
+        tmp, workspace, job, _ = self.make_job()
+        try:
+            pu.build_program_index(job, workspace, force=True)
+
+            api = pu.extract_api(job)
+            api_paths = {item["path"] for item in api["retrofit_endpoints"]}
+            self.assertIn("/v1/mixed", api_paths)
+            self.assertNotIn("/generated/mixed", api_paths)
+            mixed_api = next(
+                item for item in api["retrofit_endpoints"] if item["path"] == "/v1/mixed"
+            )
+            self.assertEqual(mixed_api["declaring_class"], "com.example.RealMixedApi")
+            self.assertEqual(mixed_api["ownership"]["scope"], "FIRST_PARTY")
+            self.assertGreater(api["evidence_items_skipped_by_scope"], 0)
+
+            network = pu.extract_network_model(job, workspace)
+            network_paths = {item["path"] for item in network["endpoints"]}
+            self.assertIn("/v1/mixed", network_paths)
+            self.assertNotIn("/generated/mixed", network_paths)
+            mixed_network = next(
+                item for item in network["endpoints"] if item["path"] == "/v1/mixed"
+            )
+            self.assertEqual(
+                mixed_network["declaring_class"], "com.example.RealMixedApi"
+            )
+            self.assertEqual(mixed_network["ownership"]["scope"], "FIRST_PARTY")
+
+            generated_api = pu.extract_api(job, scope="generated")
+            generated_paths = {
+                item["path"] for item in generated_api["retrofit_endpoints"]
+            }
+            self.assertIn("/generated/mixed", generated_paths)
+            self.assertNotIn("/v1/mixed", generated_paths)
+        finally:
+            tmp.cleanup()
+
+    def test_default_network_scope_does_not_scan_vendor_source(self):
+        tmp, workspace, job, _ = self.make_job()
+        try:
+            pu.build_program_index(job, workspace, force=True)
+            application = pu.extract_network_model(job, workspace)
+            paths = {item["path"] for item in application["endpoints"]}
+            self.assertIn("/v1/login", paths)
+            self.assertNotIn("/firebase/internal", paths)
+            self.assertGreaterEqual(application["source_files_skipped_by_scope"], 2)
+            self.assertTrue(
+                all(item["ownership"]["scope"] == "FIRST_PARTY" for item in application["endpoints"])
+            )
+
+            vendor = pu.extract_network_model(job, workspace, scope="third_party")
+            vendor_paths = {item["path"] for item in vendor["endpoints"]}
+            self.assertEqual(vendor_paths, {"/firebase/internal"})
+            self.assertTrue(
+                all(item["ownership"]["scope"] == "THIRD_PARTY" for item in vendor["endpoints"])
+            )
+        finally:
+            tmp.cleanup()
+
+    def test_application_xref_retains_direct_sdk_boundary(self):
+        tmp, workspace, job, _ = self.make_job()
+        try:
+            pu.build_program_index(job, workspace, force=True)
+            with pu_index.connect(job) as conn:
+                app_id = conn.execute(
+                    "SELECT id FROM methods WHERE class=? AND name=?",
+                    ("com.example.Api", "login"),
+                ).fetchone()["id"]
+                vendor_id = conn.execute(
+                    "SELECT id FROM methods WHERE class=? AND name=?",
+                    ("com.google.firebase.auth.FirebaseApi", "login"),
+                ).fetchone()["id"]
+                conn.execute(
+                    "INSERT INTO call_edges(caller,callee,offset,confidence,kind) VALUES (?,?,?,?,?)",
+                    (app_id, vendor_id, 8, 0.98, "fixture-xref"),
+                )
+                conn.commit()
+            result = pu.find_xrefs(
+                job,
+                workspace,
+                "com.example.Api login",
+                direction="outgoing",
+            )
+            self.assertEqual(len(result["xrefs"]), 1)
+            edge = result["xrefs"][0]
+            self.assertTrue(edge["boundary"])
+            self.assertEqual(edge["from_ownership"]["scope"], "FIRST_PARTY")
+            self.assertEqual(edge["to_ownership"]["scope"], "THIRD_PARTY")
+            self.assertEqual(result["boundary_edge_count"], 1)
+        finally:
+            tmp.cleanup()
+
+    def test_vendor_noise_cannot_starve_application_symbol_results(self):
+        tmp, workspace, job, _ = self.make_job()
+        try:
+            pu.build_program_index(job, workspace, force=True)
+            with pu_index.connect(job) as conn:
+                conn.execute(
+                    "INSERT INTO methods(id,class,name,descriptor,parameter_count,external,source_json) VALUES (?,?,?,?,?,?,?)",
+                    ("app-noise", "com.example.Noise", "noise", "()V", 0, 0, "{}"),
+                )
+                for index in range(250):
+                    conn.execute(
+                        "INSERT INTO methods(id,class,name,descriptor,parameter_count,external,source_json) VALUES (?,?,?,?,?,?,?)",
+                        (
+                            f"vendor-noise-{index:04d}",
+                            f"com.facebook.internal.Noise{index:04d}",
+                            "noise",
+                            "()V",
+                            0,
+                            0,
+                            "{}",
+                        ),
+                    )
+                conn.commit()
+            result = pu.find_symbols(job, workspace, "noise", limit=1)
+            self.assertEqual([item["id"] for item in result["matches"]], ["app-noise"])
+            self.assertEqual(result["matched_count"], 1)
+            self.assertGreater(result["scanned_count"], 200)
         finally:
             tmp.cleanup()
 

@@ -8,6 +8,7 @@ Read these before changing code:
 4. `docs/DEVELOPMENT.md` — mandatory development/review/CI rules.
 5. `docs/ROADMAP.md` — release train, milestone scope and acceptance criteria.
 6. `docs/ROADMAP_0_4_EXECUTION.md` — mandatory staged execution plan for milestone 0.4.
+7. `docs/CODE_OWNERSHIP.md` — durable ownership scopes, evidence precedence and SDK-boundary semantics for program-understanding work.
 
 Mandatory invariants:
 
@@ -29,6 +30,7 @@ Mandatory invariants:
 - Feature coverage may be incomplete; architectural direction may not knowingly be temporary.
 - Analyzer, provider, registry, CI, or storage implementation details must not leak into durable public semantic contracts.
 - Do not add temporary fallback/compatibility paths merely to preserve a product model that project direction has rejected.
+- Code ownership must remain one shared semantic classifier; do not add vendor-specific skip logic or a second SDK-filtering path in later stages.
 
 Before implementing any non-trivial stage, perform the pre-implementation review in `docs/ARCHITECTURE_EVOLUTION_RULES.md`. If the design is already known to require replacement in a later milestone, stop and redesign before writing production code.
 

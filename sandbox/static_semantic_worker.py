@@ -7,9 +7,11 @@ evolution must not create version-suffixed server modules.
 """
 from __future__ import annotations
 
+import json
 import signal
 import sqlite3
 from contextlib import contextmanager
+from pathlib import Path
 
 import analysis_routing
 import flutter_analysis
@@ -18,6 +20,8 @@ import peg_schema
 import program_understanding_v2 as pu
 
 _baseline_fingerprint = core.fingerprint
+OWNERSHIP_QUERY_SCOPES = list(pu.OWNERSHIP_QUERY_SCOPES)
+MAX_STATIC_TOOL_CATALOG_BYTES = 256 * 1024
 
 
 @contextmanager
@@ -161,7 +165,12 @@ def health(args):
         "symbols": True,
         "xrefs": True,
         "cfg": caps["androguard"],
+        "api_inventory": True,
         "network_model": True,
+        "code_ownership": bool(caps.get("code_ownership")),
+        "ownership_model_version": caps.get("ownership_model_version"),
+        "ownership_query_scopes": caps.get("ownership_scopes", []),
+        "default_ownership_scope": "application",
         "protector_detection": caps["apkid"],
         "wall_clock_deadlines": True,
         "analyzer_versions": caps["versions"],
@@ -183,7 +192,23 @@ def health(args):
             "dart_aot_index": False,
         }
     }
+    result["tool_contract"] = {
+        "source": "static-core.json",
+        "public_operation_count": len(core.TOOLS) - 1,
+        "single_descriptor_source": True,
+    }
     return result
+
+
+def extract_api(args):
+    job = core._job_dir(str(args.get("job_id", "")))
+    return _pu_call(
+        pu.extract_api,
+        job,
+        scope=str(args.get("scope", "application")),
+        max_items=int(args.get("max_items", 500)),
+        timeout_seconds=_timeout(args, 600),
+    )
 
 
 def build_program_index(args):
@@ -206,6 +231,7 @@ def find_symbols(args):
         job,
         core.WORKSPACE,
         str(args.get("query", "")),
+        scope=str(args.get("scope", "application")),
         limit=int(args.get("limit", 100)),
         timeout_seconds=_timeout(args, 300),
     )
@@ -219,6 +245,7 @@ def find_xrefs(args):
         core.WORKSPACE,
         str(args.get("query", "")),
         direction=str(args.get("direction", "both")),
+        scope=str(args.get("scope", "application")),
         limit=int(args.get("limit", 200)),
         timeout_seconds=_timeout(args, 300),
     )
@@ -231,6 +258,7 @@ def get_cfg(args):
         job,
         core.WORKSPACE,
         str(args.get("query", "")),
+        scope=str(args.get("scope", "application")),
         max_blocks=int(args.get("max_blocks", 500)),
         timeout_seconds=_timeout(args, 300),
     )
@@ -255,9 +283,76 @@ def extract_network_model(args):
         pu.extract_network_model,
         job,
         core.WORKSPACE,
+        scope=str(args.get("scope", "application")),
         max_items=int(args.get("max_items", 500)),
         timeout_seconds=_timeout(args, 600),
     )
+
+
+def _catalog_candidates() -> tuple[Path, ...]:
+    module_root = Path(__file__).resolve().parent
+    return (
+        module_root / "tool-catalogs" / "static-core.json",
+        module_root.parent
+        / "plugins"
+        / "safe-android-reverser"
+        / "tool-catalogs"
+        / "static-core.json",
+    )
+
+
+def _load_public_tool_catalog() -> list[dict]:
+    path = next(
+        (
+            candidate
+            for candidate in _catalog_candidates()
+            if candidate.is_file() and not candidate.is_symlink()
+        ),
+        None,
+    )
+    if path is None:
+        raise RuntimeError("canonical static-core tool catalog is unavailable")
+    if path.stat().st_size > MAX_STATIC_TOOL_CATALOG_BYTES:
+        raise RuntimeError("canonical static-core tool catalog exceeds size bound")
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError("canonical static-core tool catalog is invalid") from exc
+    if not isinstance(raw, list) or not raw:
+        raise RuntimeError("canonical static-core tool catalog must be a non-empty array")
+
+    tools: list[dict] = []
+    names: list[str] = []
+    for index, value in enumerate(raw):
+        if not isinstance(value, dict) or set(value) != {
+            "name",
+            "description",
+            "inputSchema",
+        }:
+            raise RuntimeError(f"invalid static-core tool descriptor at index {index}")
+        name = value.get("name")
+        description = value.get("description")
+        schema = value.get("inputSchema")
+        if not isinstance(name, str) or not name:
+            raise RuntimeError(f"invalid static-core tool name at index {index}")
+        if not isinstance(description, str) or not description.strip():
+            raise RuntimeError(f"invalid static-core tool description at index {index}")
+        if not isinstance(schema, dict) or schema.get("type") != "object":
+            raise RuntimeError(f"invalid static-core input schema at index {index}")
+        tools.append(value)
+        names.append(name)
+
+    if len(names) != len(set(names)):
+        raise RuntimeError("canonical static-core tool catalog contains duplicate operations")
+
+    expected = set(core.TOOL_HANDLERS) - {"health"}
+    actual = set(names)
+    if actual != expected:
+        raise RuntimeError(
+            "static-core tool catalog/handler drift: "
+            f"missing={sorted(expected - actual)} extra={sorted(actual - expected)}"
+        )
+    return tools
 
 
 # Make the routed fingerprint the canonical function for callers importing the
@@ -271,6 +366,7 @@ core.TOOL_HANDLERS.update(
         "inspect_flutter": inspect_flutter,
         "identify_dart_runtime": identify_dart_runtime,
         "extract_flutter_assets": extract_flutter_assets,
+        "extract_api": extract_api,
         "build_program_index": build_program_index,
         "find_symbols": find_symbols,
         "find_xrefs": find_xrefs,
@@ -280,253 +376,14 @@ core.TOOL_HANDLERS.update(
     }
 )
 
-for tool in core.TOOLS:
-    if tool.get("name") == "fingerprint":
-        tool["description"] = (
-            "Fingerprint an APK/bundle, detect framework/tooling signals, and return an explicit "
-            "framework-aware analysis route so non-Java business logic is not silently treated as JADX input."
-        )
-        break
-
-core.TOOLS.extend(
-    [
-        {
-            "name": "route_analysis",
-            "description": "Select primary and secondary analyzer profiles for an APK/bundle without executing the analyzers.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {"artifact": {"type": "string"}},
-                "required": ["artifact"],
-                "additionalProperties": False,
-            },
-        },
-        {
-            "name": "inspect_flutter",
-            "description": "Inspect Flutter APK/XAPK structure, ABIs, libapp/libflutter, Flutter assets and bounded Dart VM version markers without generic native decompilation.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "artifact": {"type": "string"},
-                    "max_assets": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "maximum": 20000,
-                        "default": 5000,
-                    },
-                    "timeout_seconds": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "maximum": 3600,
-                        "default": 300,
-                    },
-                },
-                "required": ["artifact"],
-                "additionalProperties": False,
-            },
-        },
-        {
-            "name": "identify_dart_runtime",
-            "description": "Recover directly observable Dart VM version markers from libflutter.so with bounded streaming scans; snapshot-hash recovery is deferred to the ELF-aware Flutter AOT profile.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "artifact": {"type": "string"},
-                    "timeout_seconds": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "maximum": 3600,
-                        "default": 300,
-                    },
-                },
-                "required": ["artifact"],
-                "additionalProperties": False,
-            },
-        },
-        {
-            "name": "extract_flutter_assets",
-            "description": "Inventory Flutter packaged assets and return bounded previews of text-like manifests/configuration files with PEG provenance.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "artifact": {"type": "string"},
-                    "max_items": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "maximum": 20000,
-                        "default": 1000,
-                    },
-                    "max_previews": {
-                        "type": "integer",
-                        "minimum": 0,
-                        "maximum": 50,
-                        "default": 20,
-                    },
-                    "timeout_seconds": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "maximum": 3600,
-                        "default": 300,
-                    },
-                },
-                "required": ["artifact"],
-                "additionalProperties": False,
-            },
-        },
-        {
-            "name": "build_program_index",
-            "description": "Build or reuse a bounded semantic program index from DEX XREFs when Androguard is available, with a lower-confidence decompiled-source fallback.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "job_id": {"type": "string"},
-                    "max_methods": {
-                        "type": "integer",
-                        "minimum": 100,
-                        "maximum": 200000,
-                        "default": 100000,
-                    },
-                    "max_edges": {
-                        "type": "integer",
-                        "minimum": 100,
-                        "maximum": 500000,
-                        "default": 250000,
-                    },
-                    "force": {"type": "boolean", "default": False},
-                    "timeout_seconds": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "maximum": 3600,
-                        "default": 900,
-                    },
-                },
-                "required": ["job_id"],
-                "additionalProperties": False,
-            },
-        },
-        {
-            "name": "find_symbols",
-            "description": "Search normalized class/method symbols in the program index without scanning the full decompiled tree.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "job_id": {"type": "string"},
-                    "query": {"type": "string"},
-                    "limit": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "maximum": 500,
-                        "default": 100,
-                    },
-                    "timeout_seconds": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "maximum": 3600,
-                        "default": 300,
-                    },
-                },
-                "required": ["job_id", "query"],
-                "additionalProperties": False,
-            },
-        },
-        {
-            "name": "find_xrefs",
-            "description": "Find incoming/outgoing method cross-references using DEX XREFs when available, returning normalized evidence edges.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "job_id": {"type": "string"},
-                    "query": {"type": "string"},
-                    "direction": {
-                        "type": "string",
-                        "enum": ["incoming", "outgoing", "both"],
-                        "default": "both",
-                    },
-                    "limit": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "maximum": 1000,
-                        "default": 200,
-                    },
-                    "timeout_seconds": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "maximum": 3600,
-                        "default": 300,
-                    },
-                },
-                "required": ["job_id", "query"],
-                "additionalProperties": False,
-            },
-        },
-        {
-            "name": "get_cfg",
-            "description": "Return a bounded control-flow graph for methods matching a query. Requires Androguard in the sandbox image.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "job_id": {"type": "string"},
-                    "query": {"type": "string"},
-                    "max_blocks": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "maximum": 10000,
-                        "default": 500,
-                    },
-                    "timeout_seconds": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "maximum": 3600,
-                        "default": 300,
-                    },
-                },
-                "required": ["job_id", "query"],
-                "additionalProperties": False,
-            },
-        },
-        {
-            "name": "identify_protector",
-            "description": "Identify packer/protector/obfuscator/anti-analysis signals with APKiD when that optional analyzer is installed.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "artifact": {"type": "string"},
-                    "timeout_seconds": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "maximum": 60,
-                        "default": 10,
-                    },
-                },
-                "required": ["artifact"],
-                "additionalProperties": False,
-            },
-        },
-        {
-            "name": "extract_network_model",
-            "description": "Build a structured network model linking endpoints to uniquely resolved declaring methods, caller XREFs, model hints, auth/signature evidence and source provenance.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "job_id": {"type": "string"},
-                    "max_items": {
-                        "type": "integer",
-                        "minimum": 20,
-                        "maximum": 2000,
-                        "default": 500,
-                    },
-                    "timeout_seconds": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "maximum": 3600,
-                        "default": 600,
-                    },
-                },
-                "required": ["job_id"],
-                "additionalProperties": False,
-            },
-        },
-    ]
-)
+# Public descriptors have exactly one repository source of truth: the trusted
+# host-side static-core.json. The same immutable file is copied into the worker
+# image and loaded here. The worker owns handlers only; it does not hand-maintain
+# a second public description/schema surface.
+_internal_tools = [item for item in core.TOOLS if item.get("name") == "health"]
+if len(_internal_tools) != 1:
+    raise RuntimeError("static-core internal health descriptor is invalid")
+core.TOOLS = _internal_tools + _load_public_tool_catalog()
 
 
 if __name__ == "__main__":
