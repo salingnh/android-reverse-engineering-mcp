@@ -132,6 +132,34 @@ class ProgramUnderstandingScopeTests(unittest.TestCase):
         finally:
             tmp.cleanup()
 
+    def test_extract_api_uses_same_ownership_scope_as_semantic_queries(self):
+        tmp, _, job, _ = self.make_job()
+        try:
+            application = pu.extract_api(job)
+            paths = {item["path"] for item in application["retrofit_endpoints"]}
+            self.assertIn("/v1/login", paths)
+            self.assertNotIn("/firebase/internal", paths)
+            self.assertEqual(application["scope"], "application")
+            self.assertGreaterEqual(application["source_files_skipped_by_scope"], 2)
+            self.assertTrue(
+                all(
+                    item["ownership"]["scope"] == "FIRST_PARTY"
+                    for item in application["retrofit_endpoints"]
+                )
+            )
+
+            vendor = pu.extract_api(job, scope="third_party")
+            vendor_paths = {item["path"] for item in vendor["retrofit_endpoints"]}
+            self.assertEqual(vendor_paths, {"/firebase/internal"})
+            self.assertTrue(
+                all(
+                    item["ownership"]["scope"] == "THIRD_PARTY"
+                    for item in vendor["retrofit_endpoints"]
+                )
+            )
+        finally:
+            tmp.cleanup()
+
     def test_default_network_scope_does_not_scan_vendor_source(self):
         tmp, workspace, job, _ = self.make_job()
         try:
