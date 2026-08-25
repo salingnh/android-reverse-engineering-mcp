@@ -9,8 +9,12 @@ from .runtime import ContainerRuntime, VerifiedImage
 
 PROTOCOL_VERSION = "2025-06-18"
 MAX_MCP_RESPONSE_BYTES = 2 * 1024 * 1024
-INTERNAL_MCP_OPERATIONS = frozenset(
-    {"health", "get_application_map", "expand_application_node"}
+REQUIRED_INTERNAL_MCP_OPERATIONS = frozenset({"health"})
+PROGRAM_MODEL_INTERNAL_OPERATIONS = frozenset(
+    {"get_application_map", "expand_application_node"}
+)
+INTERNAL_MCP_OPERATIONS = (
+    REQUIRED_INTERNAL_MCP_OPERATIONS | PROGRAM_MODEL_INTERNAL_OPERATIONS
 )
 
 
@@ -44,6 +48,7 @@ class McpContainerWorker:
         self.data_dir = data_dir.resolve()
         self.version = version
         self._tools: list[dict[str, Any]] | None = None
+        self._actual_tool_names: frozenset[str] | None = None
         self._verified: VerifiedImage | None = None
 
     def required_labels(self) -> dict[str, str]:
@@ -153,6 +158,12 @@ class McpContainerWorker:
             raise WorkerProtocolError("capability tool payload must be an object")
         return payload
 
+    def _required_internal_operations(self) -> frozenset[str]:
+        required = set(REQUIRED_INTERNAL_MCP_OPERATIONS)
+        if "dex" in {item.lower() for item in self.manifest.representation}:
+            required.update(PROGRAM_MODEL_INTERNAL_OPERATIONS)
+        return frozenset(required)
+
     def tools(self) -> list[dict[str, Any]]:
         if self._tools is None:
             result = self._exchange(
@@ -169,7 +180,9 @@ class McpContainerWorker:
                 raise WorkerProtocolError("capability returned invalid tool list")
             declared = set(self.manifest.operations)
             actual = {str(item.get("name") or "") for item in tools}
-            missing_internal = INTERNAL_MCP_OPERATIONS - actual
+            self._actual_tool_names = frozenset(actual)
+            required_internal = self._required_internal_operations()
+            missing_internal = required_internal - actual
             public_actual = actual - INTERNAL_MCP_OPERATIONS
             if missing_internal or public_actual != declared:
                 missing = sorted(declared - public_actual)
@@ -185,6 +198,10 @@ class McpContainerWorker:
                 if str(item.get("name") or "") not in INTERNAL_MCP_OPERATIONS
             ]
         return list(self._tools)
+
+    def supports_internal(self, name: str) -> bool:
+        self.tools()
+        return bool(self._actual_tool_names and name in self._actual_tool_names)
 
     def _call_tool(
         self, name: str, arguments: dict[str, Any], *, timeout: int
@@ -214,4 +231,6 @@ class McpContainerWorker:
     ) -> dict[str, Any]:
         if name not in INTERNAL_MCP_OPERATIONS:
             raise WorkerProtocolError(f"unsupported internal worker operation: {name}")
+        if not self.supports_internal(name):
+            raise WorkerProtocolError(f"worker does not support internal operation: {name}")
         return self._call_tool(name, arguments, timeout=timeout)
