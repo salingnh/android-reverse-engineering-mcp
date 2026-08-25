@@ -174,9 +174,15 @@ class FlutterProgramProvider:
             (evidence_ref,),
         )
 
-    def _class_entity(self, row: sqlite3.Row) -> pm.ProgramEntity:
-        module = self._module_row_by_id(str(row["library_id"]))
-        library_url = str(module["url"] if module is not None else "")
+    def _class_entity(
+        self,
+        row: sqlite3.Row,
+        *,
+        library_url: str | None = None,
+    ) -> pm.ProgramEntity:
+        if library_url is None:
+            module = self._module_row_by_id(str(row["library_id"]))
+            library_url = str(module["url"] if module is not None else "")
         ownership = flutter_ownership(library_url)
         class_name = str(row["name"])
         evidence_ref = self._evidence_ref(
@@ -310,7 +316,8 @@ class FlutterProgramProvider:
 
             scanned = 0
             for row in conn.execute(
-                "SELECT c.* FROM classes c JOIN libraries l ON l.id=c.library_id "
+                "SELECT c.*,l.url AS library_url FROM classes c "
+                "JOIN libraries l ON l.id=c.library_id "
                 "ORDER BY l.url,c.name,c.id LIMIT ?",
                 (MAX_PROVIDER_SCAN_ROWS + 1,),
             ):
@@ -319,7 +326,10 @@ class FlutterProgramProvider:
                     return None, None, True
                 if time.monotonic() - started > MAX_PROVIDER_QUERY_SECONDS:
                     return None, None, True
-                if self._class_entity(row).entity_id == identifier:
+                if self._class_entity(
+                    row,
+                    library_url=str(row["library_url"]),
+                ).entity_id == identifier:
                     return "CLASS", row, False
 
             scanned = 0
@@ -351,7 +361,8 @@ class FlutterProgramProvider:
         if kind == "MODULE":
             return self._module_entity(row)
         if kind == "CLASS":
-            return self._class_entity(row)
+            library_url = str(row["library_url"]) if "library_url" in row.keys() else None
+            return self._class_entity(row, library_url=library_url)
         if kind == "FUNCTION":
             conn = semantic._open_db(self.index_path)
             try:
@@ -380,6 +391,13 @@ class FlutterProgramProvider:
             has_more=has_more,
             truncated=truncated,
         )
+
+    @staticmethod
+    def _kind_may_follow(
+        kind: str,
+        after: tuple[str, str, str, str] | None,
+    ) -> bool:
+        return after is None or kind >= after[0]
 
     def query_entities(
         self,
@@ -417,16 +435,16 @@ class FlutterProgramProvider:
             accepted.append(item)
             return len(accepted) > limit
 
-        if kind in {None, "APPLICATION"}:
+        if kind in {None, "APPLICATION"} and self._kind_may_follow("APPLICATION", after):
             if consider(self._application()):
                 return self._finish_page(accepted, limit=limit, truncated=False)
 
         conn = semantic._open_db(self.index_path)
         try:
-            # Canonical entity sort order places CLASS and FUNCTION before MODULE.
-            if kind in {None, "CLASS"}:
+            if kind in {None, "CLASS"} and self._kind_may_follow("CLASS", after):
                 rows = conn.execute(
-                    "SELECT c.* FROM classes c JOIN libraries l ON l.id=c.library_id "
+                    "SELECT c.*,l.url AS library_url FROM classes c "
+                    "JOIN libraries l ON l.id=c.library_id "
                     "ORDER BY l.url,c.name,c.id LIMIT ?",
                     (MAX_PROVIDER_SCAN_ROWS + 1,),
                 )
@@ -439,14 +457,19 @@ class FlutterProgramProvider:
                     if time.monotonic() - started > MAX_PROVIDER_QUERY_SECONDS:
                         truncated = True
                         break
-                    if consider(self._class_entity(row)):
+                    if consider(
+                        self._class_entity(
+                            row,
+                            library_url=str(row["library_url"]),
+                        )
+                    ):
                         return self._finish_page(
                             accepted,
                             limit=limit,
                             truncated=truncated,
                         )
 
-            if kind in {None, "FUNCTION"}:
+            if kind in {None, "FUNCTION"} and self._kind_may_follow("FUNCTION", after):
                 rows = conn.execute(
                     "SELECT * FROM functions "
                     "ORDER BY library_url,class_name,name,signature,native_offset LIMIT ?",
@@ -468,7 +491,7 @@ class FlutterProgramProvider:
                             truncated=truncated,
                         )
 
-            if kind in {None, "MODULE"}:
+            if kind in {None, "MODULE"} and self._kind_may_follow("MODULE", after):
                 rows = conn.execute(
                     "SELECT * FROM libraries ORDER BY url LIMIT ?",
                     (MAX_PROVIDER_SCAN_ROWS + 1,),
@@ -641,8 +664,9 @@ class FlutterProgramProvider:
                     consider(self._declares(app, module))
                 if direction in {"outgoing", "both"} and len(accepted) <= limit:
                     rows = conn.execute(
-                        "SELECT c.* FROM classes c WHERE c.library_id=? "
-                        "ORDER BY c.name,c.id LIMIT ?",
+                        "SELECT c.*,l.url AS library_url FROM classes c "
+                        "JOIN libraries l ON l.id=c.library_id "
+                        "WHERE c.library_id=? ORDER BY c.name,c.id LIMIT ?",
                         (entity_row["id"], MAX_PROVIDER_SCAN_ROWS + 1),
                     )
                     scanned = 0
@@ -654,14 +678,25 @@ class FlutterProgramProvider:
                         if time.monotonic() - started > MAX_PROVIDER_QUERY_SECONDS:
                             truncated = True
                             break
-                        target = self._class_entity(row)
+                        target = self._class_entity(
+                            row,
+                            library_url=str(row["library_url"]),
+                        )
                         if not ownership_scope_accepts(target.ownership, scope):
                             continue
                         if consider(self._declares(module, target)):
                             break
 
             if entity_kind == "CLASS" and entity_row is not None:
-                clazz = self._class_entity(entity_row)
+                class_library_url = (
+                    str(entity_row["library_url"])
+                    if "library_url" in entity_row.keys()
+                    else None
+                )
+                clazz = self._class_entity(
+                    entity_row,
+                    library_url=class_library_url,
+                )
                 module_row = conn.execute(
                     "SELECT * FROM libraries WHERE id=?",
                     (entity_row["library_id"],),
@@ -692,11 +727,20 @@ class FlutterProgramProvider:
             if entity_kind == "FUNCTION" and entity_row is not None:
                 function = self._function_entity(conn, entity_row)
                 class_row = conn.execute(
-                    "SELECT * FROM classes WHERE id=?",
+                    "SELECT c.*,l.url AS library_url FROM classes c "
+                    "JOIN libraries l ON l.id=c.library_id WHERE c.id=?",
                     (entity_row["class_id_ref"],),
                 ).fetchone()
                 if class_row is not None and direction in {"incoming", "both"}:
-                    consider(self._declares(self._class_entity(class_row), function))
+                    consider(
+                        self._declares(
+                            self._class_entity(
+                                class_row,
+                                library_url=str(class_row["library_url"]),
+                            ),
+                            function,
+                        )
+                    )
 
                 if len(accepted) <= limit:
                     clauses = []
