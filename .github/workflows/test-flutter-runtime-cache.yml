@@ -6,7 +6,12 @@ on:
       - 'frameworks/flutter/Dockerfile.runtime'
       - 'frameworks/flutter/build_runtime.py'
       - 'frameworks/flutter/cache_identity.py'
+      - 'frameworks/flutter/flutter_program_model.py'
+      - 'frameworks/flutter/flutter_semantic.py'
       - 'frameworks/flutter/tools.lock.env'
+      - 'program_model.py'
+      - 'ownership_contract.py'
+      - 'sandbox/peg_schema.py'
       - 'plugins/safe-android-reverser/VERSION'
       - '.github/workflows/test-flutter-runtime-cache.yml'
   workflow_dispatch:
@@ -101,6 +106,17 @@ jobs:
               assert labels.get(key) == value, (key, labels.get(key), value)
           assert os.environ['CACHE_TAG'].startswith('dart-3.5.4-arm64-cp-')
           PY
+
+      - name: Verify Program Model package in runtime cache
+        run: |
+          docker run --rm \
+            --network=none --read-only --cap-drop=ALL \
+            --security-opt=no-new-privileges \
+            --tmpfs=/tmp:rw,nosuid,nodev,size=256m \
+            --tmpfs=/work:rw,nosuid,nodev,size=256m \
+            --entrypoint=python3 \
+            safe-android-reverser-flutter-runtime:release-smoke \
+            -c 'import program_model as pm, flutter_program_model as fp, peg_schema as peg; assert pm.descriptor()["program_model_version"] == 1; assert pm.descriptor()["provider_continuation"] is True; assert fp.FlutterProgramProvider is not None; assert peg.PEG_SCHEMA_VERSION == 2'
 
       - name: Verify cached analyzer is offline-safe
         env:

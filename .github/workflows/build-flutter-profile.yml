@@ -4,6 +4,11 @@ on:
   pull_request:
     paths:
       - 'frameworks/flutter/**'
+      - 'program_model.py'
+      - 'ownership_contract.py'
+      - 'tests_program_model_contract.py'
+      - 'sandbox/peg_schema.py'
+      - 'docs/PROGRAM_MODEL.md'
       - 'plugins/safe-android-reverser/VERSION'
       - 'plugins/safe-android-reverser/capabilities/framework-flutter.json'
       - 'scripts/check_release_consistency.py'
@@ -13,6 +18,11 @@ on:
     tags: ['safe-v*']
     paths:
       - 'frameworks/flutter/**'
+      - 'program_model.py'
+      - 'ownership_contract.py'
+      - 'tests_program_model_contract.py'
+      - 'sandbox/peg_schema.py'
+      - 'docs/PROGRAM_MODEL.md'
       - 'plugins/safe-android-reverser/VERSION'
       - 'plugins/safe-android-reverser/capabilities/framework-flutter.json'
       - 'scripts/check_release_consistency.py'
@@ -47,6 +57,12 @@ jobs:
       - name: Check release and capability consistency
         run: python3 scripts/check_release_consistency.py
 
+      - name: Test Canonical Program Model contract
+        run: PYTHONPATH=.:frameworks/flutter:sandbox python3 tests_program_model_contract.py
+
+      - name: Test Flutter Program Model provider
+        run: PYTHONPATH=.:frameworks/flutter:sandbox python3 frameworks/flutter/tests_flutter_program_model.py
+
       - name: Test offline-safe Blutter adapter
         run: PYTHONPATH=frameworks/flutter python3 frameworks/flutter/tests_safe_blutter_adapter.py
 
@@ -62,16 +78,22 @@ jobs:
       - name: Validate Python syntax
         run: |
           python3 -m py_compile \
+            ownership_contract.py \
+            program_model.py \
+            tests_program_model_contract.py \
+            sandbox/peg_schema.py \
             frameworks/flutter/cache_identity.py \
             frameworks/flutter/build_runtime.py \
             frameworks/flutter/safe_blutter_adapter.py \
             frameworks/flutter/flutter_semantic.py \
+            frameworks/flutter/flutter_program_model.py \
             frameworks/flutter/flutter_network.py \
             frameworks/flutter/flutter_artifact.py \
             frameworks/flutter/flutter_export.py \
             frameworks/flutter/flutter_entrypoint.py \
             frameworks/flutter/tests_safe_blutter_adapter.py \
             frameworks/flutter/tests_flutter_semantic.py \
+            frameworks/flutter/tests_flutter_program_model.py \
             frameworks/flutter/tests_flutter_network.py \
             frameworks/flutter/tests_flutter_orchestration.py
 
@@ -111,6 +133,17 @@ jobs:
           assert labels['io.safe-reverser.worker.abi'] == '1', labels
           assert labels['io.safe-reverser.blutter.commit'] == sys.argv[2], labels
           PY
+
+      - name: Verify Program Model package inside locked image
+        run: |
+          docker run --rm \
+            --network=none --read-only --cap-drop=ALL \
+            --security-opt=no-new-privileges \
+            --tmpfs=/tmp:rw,nosuid,nodev,size=256m \
+            --tmpfs=/work:rw,nosuid,nodev,size=256m \
+            --entrypoint=python3 \
+            safe-android-reverser-flutter:ci \
+            -c 'import program_model as pm, flutter_program_model as fp, peg_schema as peg; assert pm.descriptor()["program_model_version"] == 1; assert pm.descriptor()["provider_continuation"] is True; assert fp.FlutterProgramProvider is not None; assert peg.PEG_SCHEMA_VERSION == 2'
 
       - name: Verify locked offline runtime and semantic surface
         env:

@@ -8,6 +8,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ownership_contract import (
+    OWNERSHIP_QUERY_SCOPE_MAP,
+    OWNERSHIP_QUERY_SCOPES,
+    OWNERSHIP_SCOPES,
+    OwnershipContractError,
+    ownership_scope_accepts,
+    validate_ownership_scope,
+)
+
 OWNERSHIP_MODEL_VERSION = 1
 OWNERSHIP_RULES_SCHEMA = 1
 MAX_RULES_BYTES = 256 * 1024
@@ -16,25 +25,11 @@ MAX_GENERATED_PATTERNS = 128
 MAX_MANIFEST_BYTES = 2 * 1024 * 1024
 MAX_MANIFEST_COMPONENTS = 5000
 
-SCOPES = ("FIRST_PARTY", "THIRD_PARTY", "PLATFORM", "GENERATED", "UNKNOWN")
-QUERY_SCOPES = (
-    "application",
-    "all",
-    "first_party",
-    "third_party",
-    "platform",
-    "generated",
-    "unknown",
-)
-QUERY_SCOPE_MAP = {
-    "application": frozenset({"FIRST_PARTY", "UNKNOWN"}),
-    "all": frozenset(SCOPES),
-    "first_party": frozenset({"FIRST_PARTY"}),
-    "third_party": frozenset({"THIRD_PARTY"}),
-    "platform": frozenset({"PLATFORM"}),
-    "generated": frozenset({"GENERATED"}),
-    "unknown": frozenset({"UNKNOWN"}),
-}
+# Compatibility aliases preserve the accepted Stage B API while the canonical
+# category/query-scope source now lives in ownership_contract.py for all workers.
+SCOPES = OWNERSHIP_SCOPES
+QUERY_SCOPES = OWNERSHIP_QUERY_SCOPES
+QUERY_SCOPE_MAP = OWNERSHIP_QUERY_SCOPE_MAP
 ANDROID_NAME = "{http://schemas.android.com/apk/res/android}name"
 RULES_PATH = Path(__file__).with_name("ownership_rules.json")
 MANIFEST_CANDIDATES = (
@@ -115,15 +110,17 @@ def normalize_class_name(value: Any) -> str:
 
 
 def validate_query_scope(value: str) -> str:
-    scope = str(value or "application").strip().lower()
-    if scope not in QUERY_SCOPE_MAP:
-        raise OwnershipModelError("invalid ownership query scope")
-    return scope
+    try:
+        return validate_ownership_scope(value)
+    except OwnershipContractError as exc:
+        raise OwnershipModelError(str(exc)) from exc
 
 
 def scope_accepts(decision: dict[str, Any], query_scope: str) -> bool:
-    scope = validate_query_scope(query_scope)
-    return str(decision.get("scope")) in QUERY_SCOPE_MAP[scope]
+    try:
+        return ownership_scope_accepts(decision.get("scope"), query_scope)
+    except OwnershipContractError as exc:
+        raise OwnershipModelError(str(exc)) from exc
 
 
 def load_rules(path: Path = RULES_PATH) -> OwnershipRules:
@@ -162,12 +159,21 @@ def load_rules(path: Path = RULES_PATH) -> OwnershipRules:
             raise OwnershipModelError("namespace rules may classify only third-party/platform code")
         if not owner or len(owner) > 128:
             raise OwnershipModelError("ownership rule owner is invalid")
-        if sdk is not None and (not isinstance(sdk, str) or not sdk.strip() or len(sdk) > 128):
+        if sdk is not None and (
+            not isinstance(sdk, str) or not sdk.strip() or len(sdk) > 128
+        ):
             raise OwnershipModelError("ownership rule SDK is invalid")
         if prefix in seen_prefixes:
             raise OwnershipModelError("ownership namespace rule is duplicated")
         seen_prefixes.add(prefix)
-        namespaces.append(NamespaceRule(prefix, scope, owner, sdk.strip() if isinstance(sdk, str) else None))
+        namespaces.append(
+            NamespaceRule(
+                prefix,
+                scope,
+                owner,
+                sdk.strip() if isinstance(sdk, str) else None,
+            )
+        )
 
     compiled: list[re.Pattern[str]] = []
     for value in pattern_rows:
@@ -178,7 +184,9 @@ def load_rules(path: Path = RULES_PATH) -> OwnershipRules:
         except re.error as exc:
             raise OwnershipModelError("generated-code pattern cannot be compiled") from exc
 
-    namespaces.sort(key=lambda item: (-len(item.prefix), item.prefix, item.scope, item.owner))
+    namespaces.sort(
+        key=lambda item: (-len(item.prefix), item.prefix, item.scope, item.owner)
+    )
     return OwnershipRules(
         schema_version=OWNERSHIP_RULES_SCHEMA,
         digest=digest,
@@ -187,7 +195,9 @@ def load_rules(path: Path = RULES_PATH) -> OwnershipRules:
     )
 
 
-def _resolve_component_name(application_package: str | None, value: str) -> str | None:
+def _resolve_component_name(
+    application_package: str | None, value: str
+) -> str | None:
     value = str(value or "").strip()
     if not value:
         return None
@@ -232,7 +242,9 @@ def ownership_context(job: Path) -> OwnershipContext:
 
     raw_package = str(root.attrib.get("package") or "").strip()
     try:
-        application_package = _validate_namespace(raw_package) if raw_package else None
+        application_package = (
+            _validate_namespace(raw_package) if raw_package else None
+        )
     except OwnershipModelError:
         application_package = None
 
@@ -248,7 +260,9 @@ def ownership_context(job: Path) -> OwnershipContext:
             "instrumentation",
         }:
             continue
-        resolved = _resolve_component_name(application_package, element.attrib.get(ANDROID_NAME, ""))
+        resolved = _resolve_component_name(
+            application_package, element.attrib.get(ANDROID_NAME, "")
+        )
         if resolved:
             components.add(resolved)
             if len(components) >= MAX_MANIFEST_COMPONENTS:
@@ -262,7 +276,9 @@ def ownership_context(job: Path) -> OwnershipContext:
 
 
 def _under_package(class_name: str, package: str | None) -> bool:
-    return bool(package) and (class_name == package or class_name.startswith(package + "."))
+    return bool(package) and (
+        class_name == package or class_name.startswith(package + ".")
+    )
 
 
 class CodeOwnershipClassifier:
@@ -292,7 +308,9 @@ class CodeOwnershipClassifier:
         return None
 
     def _generated(self, class_name: str) -> bool:
-        return any(pattern.search(class_name) for pattern in self.rules.generated_patterns)
+        return any(
+            pattern.search(class_name) for pattern in self.rules.generated_patterns
+        )
 
     @staticmethod
     def _result(
@@ -319,7 +337,9 @@ class CodeOwnershipClassifier:
             "relevance": relevance,
         }
 
-    def classify(self, class_name: Any, *, external: bool = False) -> dict[str, Any]:
+    def classify(
+        self, class_name: Any, *, external: bool = False
+    ) -> dict[str, Any]:
         normalized = normalize_class_name(class_name)
         if not normalized:
             return self._result(
@@ -332,26 +352,42 @@ class CodeOwnershipClassifier:
 
         app_package = self.context.application_package
         app_match = _under_package(normalized, app_package)
-        app_prefix_len = len(app_package) + 1 if app_match and app_package else 0
+        app_prefix_len = (
+            len(app_package) + 1 if app_match and app_package else 0
+        )
         exact_component = normalized in self.context.manifest_components
         rule = self._namespace_rule(normalized)
 
         # A known vendor/platform namespace is stronger than a merged manifest
         # component. A genuinely more-specific application namespace remains
         # first-party, e.g. com.google.firebase.demo.* versus com.google.firebase.*.
-        if rule is not None and (not app_match or len(rule.prefix) >= app_prefix_len):
+        if rule is not None and (
+            not app_match or len(rule.prefix) >= app_prefix_len
+        ):
             return self._result(
                 rule.scope,
                 owner=rule.owner,
                 sdk=rule.sdk,
                 reasons=["known_namespace_rule"],
-                evidence=[{"kind": "namespace_prefix", "value": rule.prefix.rstrip(".")}],
+                evidence=[
+                    {
+                        "kind": "namespace_prefix",
+                        "value": rule.prefix.rstrip("."),
+                    }
+                ],
             )
 
         if self._generated(normalized):
-            evidence: list[dict[str, str]] = [{"kind": "generated_name_pattern", "value": normalized.rsplit(".", 1)[-1]}]
+            evidence: list[dict[str, str]] = [
+                {
+                    "kind": "generated_name_pattern",
+                    "value": normalized.rsplit(".", 1)[-1],
+                }
+            ]
             if app_match and app_package:
-                evidence.append({"kind": "application_package", "value": app_package})
+                evidence.append(
+                    {"kind": "application_package", "value": app_package}
+                )
             return self._result(
                 "GENERATED",
                 owner=app_package if app_match else None,
@@ -366,13 +402,17 @@ class CodeOwnershipClassifier:
                 owner=app_package,
                 sdk=None,
                 reasons=["application_package_namespace"],
-                evidence=[{"kind": "application_package", "value": app_package}],
+                evidence=[
+                    {"kind": "application_package", "value": app_package}
+                ],
             )
 
         if exact_component:
             evidence = [{"kind": "manifest_component", "value": normalized}]
             if app_package:
-                evidence.append({"kind": "application_package", "value": app_package})
+                evidence.append(
+                    {"kind": "application_package", "value": app_package}
+                )
             return self._result(
                 "FIRST_PARTY",
                 owner=app_package,
@@ -394,8 +434,12 @@ class CodeOwnershipClassifier:
             evidence=evidence,
         )
 
-    def accepts(self, class_name: Any, query_scope: str, *, external: bool = False) -> bool:
-        return scope_accepts(self.classify(class_name, external=external), query_scope)
+    def accepts(
+        self, class_name: Any, query_scope: str, *, external: bool = False
+    ) -> bool:
+        return scope_accepts(
+            self.classify(class_name, external=external), query_scope
+        )
 
 
 def ownership_model(job: Path) -> dict[str, Any]:

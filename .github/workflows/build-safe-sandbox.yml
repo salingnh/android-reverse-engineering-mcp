@@ -4,6 +4,10 @@ on:
   pull_request:
     paths:
       - 'sandbox/**'
+      - 'program_model.py'
+      - 'ownership_contract.py'
+      - 'tests_program_model_contract.py'
+      - 'docs/PROGRAM_MODEL.md'
       - 'plugins/safe-android-reverser/VERSION'
       - 'plugins/safe-android-reverser/tool-catalogs/static-core.json'
       - 'plugins/safe-android-reverser/capabilities/static-core.json'
@@ -15,6 +19,10 @@ on:
     tags: ['safe-v*']
     paths:
       - 'sandbox/**'
+      - 'program_model.py'
+      - 'ownership_contract.py'
+      - 'tests_program_model_contract.py'
+      - 'docs/PROGRAM_MODEL.md'
       - 'plugins/safe-android-reverser/VERSION'
       - 'plugins/safe-android-reverser/tool-catalogs/static-core.json'
       - 'plugins/safe-android-reverser/capabilities/static-core.json'
@@ -46,25 +54,31 @@ jobs:
         run: python3 scripts/check_release_consistency.py
 
       - name: Test MCP worker
-        run: python3 sandbox/tests.py
+        run: PYTHONPATH=.:sandbox python3 sandbox/tests.py
 
       - name: Test framework-aware routing topology
-        run: PYTHONPATH=sandbox python3 sandbox/tests_analysis_routing.py
+        run: PYTHONPATH=.:sandbox python3 sandbox/tests_analysis_routing.py
 
       - name: Test archive safety budgets
-        run: PYTHONPATH=sandbox python3 sandbox/tests_archive_safety.py
+        run: PYTHONPATH=.:sandbox python3 sandbox/tests_archive_safety.py
 
       - name: Test Program Evidence Graph schema
-        run: PYTHONPATH=sandbox python3 sandbox/tests_peg_schema.py
+        run: PYTHONPATH=.:sandbox python3 sandbox/tests_peg_schema.py
+
+      - name: Test Canonical Program Model contract
+        run: PYTHONPATH=.:sandbox python3 tests_program_model_contract.py
+
+      - name: Test DEX Program Model provider
+        run: PYTHONPATH=.:sandbox python3 sandbox/tests_program_model_provider.py
 
       - name: Test bounded Flutter artifact inspection
-        run: PYTHONPATH=sandbox python3 sandbox/tests_flutter_analysis.py
+        run: PYTHONPATH=.:sandbox python3 sandbox/tests_flutter_analysis.py
 
       - name: Test program understanding
-        run: python3 sandbox/tests_program_understanding.py
+        run: PYTHONPATH=.:sandbox python3 sandbox/tests_program_understanding.py
 
       - name: Test program understanding source scopes and cache integrity
-        run: PYTHONPATH=sandbox python3 sandbox/tests_program_understanding_scopes.py
+        run: PYTHONPATH=.:sandbox python3 sandbox/tests_program_understanding_scopes.py
 
       - name: Test static worker registration and release metadata
         env:
@@ -75,10 +89,11 @@ jobs:
           export SAFE_REVERSER_WORKSPACE="$RUNNER_TEMP/safe-reverser-workspace"
           export SAFE_REVERSER_DATA_ROOT="$RUNNER_TEMP/safe-reverser-data"
           mkdir -p "$SAFE_REVERSER_WORKSPACE" "$SAFE_REVERSER_DATA_ROOT"
-          PYTHONPATH=sandbox python3 - <<'PY'
+          PYTHONPATH=.:sandbox python3 - <<'PY'
           import json
           from pathlib import Path
           import mcp_entrypoint as entry
+          import program_model as pm
 
           server = entry.server
           canonical = json.loads(
@@ -90,6 +105,8 @@ jobs:
           assert public == canonical, 'worker descriptors must be the canonical host catalog verbatim'
           assert {tool['name'] for tool in public} == set(server.core.TOOL_HANDLERS) - {'health'}
           assert [tool.get('name') for tool in server.core.TOOLS].count('health') == 1
+          assert pm.descriptor()['program_model_version'] == 1
+          assert pm.descriptor()['provider_continuation'] is True
 
           health = entry.health({})
           assert health['version'] == entry.RELEASE_VERSION, health
@@ -117,6 +134,9 @@ jobs:
       - name: Validate static-worker Python syntax
         run: |
           python3 -m py_compile \
+            ownership_contract.py \
+            program_model.py \
+            tests_program_model_contract.py \
             sandbox/mcp_server.py \
             sandbox/static_semantic_worker.py \
             sandbox/mcp_entrypoint.py \
@@ -129,12 +149,14 @@ jobs:
             sandbox/pu_source.py \
             sandbox/pu_index.py \
             sandbox/pu_network.py \
+            sandbox/pu_program_model.py \
             sandbox/tests_analysis_routing.py \
             sandbox/tests_archive_safety.py \
             sandbox/tests_peg_schema.py \
             sandbox/tests_flutter_analysis.py \
             sandbox/tests_program_understanding.py \
-            sandbox/tests_program_understanding_scopes.py
+            sandbox/tests_program_understanding_scopes.py \
+            sandbox/tests_program_model_provider.py
 
   image:
     needs: test
@@ -200,7 +222,7 @@ jobs:
       - name: Run semantic integration tests inside worker
         run: |
           mkdir -p "$RUNNER_TEMP/semantic-data"
-          for test in tests_archive_safety.py tests_flutter_analysis.py tests_program_understanding.py tests_program_understanding_scopes.py; do
+          for test in tests_archive_safety.py tests_flutter_analysis.py tests_program_understanding.py tests_program_understanding_scopes.py tests_program_model_provider.py; do
             docker run --rm \
               --network=none --read-only --cap-drop=ALL \
               --security-opt=no-new-privileges \
@@ -213,6 +235,17 @@ jobs:
               safe-android-reverser:ci \
               "/workspace/sandbox/$test"
           done
+          docker run --rm \
+            --network=none --read-only --cap-drop=ALL \
+            --security-opt=no-new-privileges \
+            --tmpfs=/tmp:rw,nosuid,nodev,size=1g \
+            --tmpfs=/work:rw,nosuid,nodev,size=1g \
+            --user="$(id -u):$(id -g)" \
+            --volume="$PWD:/workspace:ro" \
+            --volume="$RUNNER_TEMP/semantic-data:/data:rw" \
+            --entrypoint=python3 \
+            safe-android-reverser:ci \
+            /workspace/tests_program_model_contract.py
 
       - name: Run static worker MCP health smoke test
         env:
