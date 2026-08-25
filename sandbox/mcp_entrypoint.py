@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 import archive_safety
+import static_application_map
 import static_semantic_worker as server
 
 SEMVER_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
@@ -31,6 +32,7 @@ def _release_version() -> str:
 
 RELEASE_VERSION = _release_version()
 server.core.SERVER_VERSION = RELEASE_VERSION
+static_application_map.install(server)
 _original_health = server.health
 
 
