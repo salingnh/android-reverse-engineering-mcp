@@ -10,6 +10,8 @@ import pu_network
 import pu_ownership
 import pu_ownership_queries
 
+OWNERSHIP_QUERY_SCOPES = tuple(pu_ownership.QUERY_SCOPES)
+
 
 def capabilities() -> dict[str, Any]:
     apkid = shutil.which("apkid")
@@ -21,7 +23,7 @@ def capabilities() -> dict[str, Any]:
         "index_storage": "sqlite",
         "code_ownership": True,
         "ownership_model_version": pu_ownership.OWNERSHIP_MODEL_VERSION,
-        "ownership_scopes": list(pu_ownership.QUERY_SCOPES),
+        "ownership_scopes": list(OWNERSHIP_QUERY_SCOPES),
     }
     try:
         import androguard  # type: ignore
