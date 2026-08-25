@@ -170,6 +170,43 @@ class FlutterProgramModelTests(unittest.TestCase):
         self.assertEqual(boundary.kind, "EXTERNAL_BOUNDARY")
         self.assertEqual(boundary.ownership, "PLATFORM")
 
+    def test_boundary_resolves_and_retains_xref_after_provider_restart(self):
+        provider = fpm.FlutterProgramProvider(self.index)
+        repo = pm.ProgramRepository((provider,))
+        fn = repo.find_entities(
+            kind="FUNCTION",
+            text="login",
+            limit=10,
+        ).items[0]
+        original = next(
+            item
+            for item in repo.find_relationships(
+                entity_id=fn.entity_id,
+                direction="outgoing",
+                limit=20,
+            ).items
+            if item.kind == "XREF"
+        )
+        original_boundary = provider.get_entity(original.target_entity_id)
+        self.assertIsNotNone(original_boundary)
+
+        restarted = fpm.FlutterProgramProvider(self.index)
+        self.assertNotIn(original.target_entity_id, restarted._boundary_entities)
+        rebuilt = restarted.get_entity(original.target_entity_id)
+        self.assertIsNotNone(rebuilt)
+        self.assertEqual(rebuilt.to_dict(), original_boundary.to_dict())
+
+        restarted_repo = pm.ProgramRepository((restarted,))
+        incoming = restarted_repo.find_relationships(
+            entity_id=original.target_entity_id,
+            direction="incoming",
+            limit=20,
+        )
+        self.assertEqual(
+            [item.relationship_id for item in incoming.items],
+            [original.relationship_id],
+        )
+
     def test_declares_hierarchy_is_application_module_class_function(self):
         provider = fpm.FlutterProgramProvider(self.index)
         repo = pm.ProgramRepository((provider,))
@@ -271,8 +308,6 @@ class FlutterProgramModelTests(unittest.TestCase):
             limit=10,
         )
         after = max(pm.entity_sort_key(item) for item in first.items)
-        # Move the continuation into the FUNCTION domain; generic query must not
-        # call class materialization again just to discard it by cursor.
         function = provider.query_entities(
             kind="FUNCTION",
             ownership_scope="all",
