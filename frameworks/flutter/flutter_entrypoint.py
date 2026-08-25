@@ -431,8 +431,8 @@ def main() -> int:
                 "max_query_results": semantic.MAX_QUERY_LIMIT,
                 "max_scan_bytes": semantic.MAX_SCAN_BYTES,
                 "network_model_max_items": network.MAX_MODEL_ITEMS,
-                "application_map": amap.descriptor(),
             }
+            payload["application_map"] = amap.descriptor()
             payload["orchestration"] = {
                 "prepare_artifact": True,
                 "analyze_export": True,
