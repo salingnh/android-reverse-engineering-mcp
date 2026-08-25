@@ -258,8 +258,14 @@ def get_cfg(
     remaining = max(1, min(int(max_blocks), 10_000))
     needle = query.lower()
     matches: list[dict[str, Any]] = []
+    method_scan_count = 0
+    method_scan_truncated = False
     with pu_index.androguard_analysis(input_artifact) as (analysis, class_members):
         for method in analysis.get_methods():
+            if method_scan_count >= MAX_QUERY_SCAN:
+                method_scan_truncated = True
+                break
+            method_scan_count += 1
             record = pu_index.method_record(method, class_members)
             haystack = (
                 f"{record['class']} {record['name']} "
@@ -302,6 +308,7 @@ def get_cfg(
             )
             if remaining <= 0 or len(matches) >= 20:
                 break
+    block_truncated = remaining <= 0
     return {
         "job_id": job.name,
         "query": query,
@@ -309,6 +316,9 @@ def get_cfg(
         "matches": matches,
         "analyzer": "androguard",
         "confidence": 0.98,
-        "truncated": remaining <= 0,
+        "method_scan_count": method_scan_count,
+        "method_scan_truncated": method_scan_truncated,
+        "has_more": method_scan_truncated or block_truncated or len(matches) >= 20,
+        "truncated": method_scan_truncated or block_truncated,
         "ownership_model": classifier.descriptor(),
     }
