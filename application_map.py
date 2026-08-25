@@ -140,11 +140,37 @@ def _payload_size(payload: dict[str, Any]) -> int:
         raise ApplicationMapError("application map is not canonical JSON") from exc
 
 
+def _response_candidate(
+    payload: dict[str, Any],
+    nodes: list[dict[str, Any]],
+    edges: list[dict[str, Any]],
+    *,
+    trimmed: bool,
+) -> dict[str, Any]:
+    result = {**payload, "nodes": nodes, "edges": edges}
+    result["returned_nodes"] = len(nodes)
+    result["returned_edges"] = len(edges)
+    warnings = list(payload.get("warnings") or [])
+    if trimmed:
+        result["truncated"] = True
+        result["has_more"] = True
+        if "response_size_budget_reached" not in warnings:
+            warnings.append("response_size_budget_reached")
+    result["warnings"] = warnings
+    # Reserve the full five-digit budget value while deciding fit so adding the
+    # final serialized byte count can never push a previously fitting response over.
+    result["serialized_bytes"] = MAX_RESPONSE_BYTES
+    return result
+
+
 def _fit_response(payload: dict[str, Any]) -> dict[str, Any]:
     nodes = list(payload.get("nodes") or [])
     edges = list(payload.get("edges") or [])
     trimmed = False
-    while _payload_size({**payload, "nodes": nodes, "edges": edges}) > MAX_RESPONSE_BYTES:
+    while True:
+        result = _response_candidate(payload, nodes, edges, trimmed=trimmed)
+        if _payload_size(result) <= MAX_RESPONSE_BYTES:
+            break
         if edges:
             edges.pop()
             trimmed = True
@@ -161,14 +187,12 @@ def _fit_response(payload: dict[str, Any]) -> dict[str, Any]:
             trimmed = True
             continue
         raise ApplicationMapError("application map minimum response exceeds size bound")
-    result = {**payload, "nodes": nodes, "edges": edges}
-    result["returned_nodes"] = len(nodes)
-    result["returned_edges"] = len(edges)
-    if trimmed:
-        result["truncated"] = True
-        result["has_more"] = True
-        result.setdefault("warnings", []).append("response_size_budget_reached")
-    result["serialized_bytes"] = _payload_size(result)
+    # The reserved value above has the maximum digit width of any valid final
+    # byte count. Two iterations make the reported count equal the serialized form.
+    for _ in range(2):
+        result["serialized_bytes"] = _payload_size(result)
+    if _payload_size(result) > MAX_RESPONSE_BYTES:
+        raise ApplicationMapError("application map final response exceeds size bound")
     return result
 
 
@@ -218,8 +242,12 @@ class ApplicationMapProjector:
         edge_limit: int = DEFAULT_EDGE_LIMIT,
     ) -> dict[str, Any]:
         scope = validate_ownership_scope(ownership_scope)
-        node_limit = _bounded_limit(node_limit, DEFAULT_NODE_LIMIT, MAX_NODE_LIMIT, "node_limit")
-        edge_limit = _bounded_limit(edge_limit, DEFAULT_EDGE_LIMIT, MAX_EDGE_LIMIT, "edge_limit")
+        node_limit = _bounded_limit(
+            node_limit, DEFAULT_NODE_LIMIT, MAX_NODE_LIMIT, "node_limit"
+        )
+        edge_limit = _bounded_limit(
+            edge_limit, DEFAULT_EDGE_LIMIT, MAX_EDGE_LIMIT, "edge_limit"
+        )
         started = time.monotonic()
         candidates: dict[str, pm.ProgramEntity] = {}
         truncated = False
@@ -357,7 +385,9 @@ class ApplicationMapProjector:
         edge_limit = _bounded_limit(edge_limit, 100, MAX_EDGE_LIMIT, "edge_limit")
         root = self.repository.get_entity(str(entity_id or ""))
         if root is None:
-            raise ApplicationMapError("application map entity was not found in this Program Snapshot")
+            raise ApplicationMapError(
+                "application map entity was not found in this Program Snapshot"
+            )
         page = self.repository.find_relationships(
             entity_id=root.entity_id,
             kinds=relationship_kinds,
