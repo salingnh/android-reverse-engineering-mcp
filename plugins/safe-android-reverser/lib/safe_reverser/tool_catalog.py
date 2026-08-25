@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -10,7 +11,7 @@ from .contracts import CapabilityManifest, ContractError, OPERATION_RE
 MAX_TOOL_CATALOG_BYTES = 256 * 1024
 MAX_TOOL_DESCRIPTION_CHARS = 4096
 MAX_TOOL_SCHEMA_BYTES = 64 * 1024
-CATALOG_NAME_RE = OPERATION_RE
+CATALOG_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,127}$")
 
 
 def _validate_tool_descriptor(value: Any, *, index: int) -> dict[str, Any]:
