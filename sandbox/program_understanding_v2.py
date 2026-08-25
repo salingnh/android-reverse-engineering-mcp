@@ -4,6 +4,7 @@ import shutil
 from typing import Any
 
 import program_understanding as legacy
+import pu_api
 import pu_index
 import pu_network
 import pu_ownership
@@ -39,6 +40,10 @@ def build_program_index(job, workspace, *, max_methods=100_000, max_edges=250_00
     )
     result["ownership_model"] = pu_ownership.ownership_model(job)
     return result
+
+
+def extract_api(job, *, scope="application", max_items=500):
+    return pu_api.extract_api(job, scope=scope, max_items=max_items)
 
 
 def find_symbols(job, workspace, query, *, scope="application", limit=100):
