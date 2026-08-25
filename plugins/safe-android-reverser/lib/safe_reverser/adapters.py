@@ -30,6 +30,10 @@ class CapabilityAdapter(Protocol):
 
     def call(self, name: str, args: dict[str, Any]) -> dict[str, Any]: ...
 
+    def program_model_call(
+        self, name: str, args: dict[str, Any]
+    ) -> dict[str, Any]: ...
+
 
 class McpWorkerAdapter:
     """Generic adapter for an MCP-over-stdio capability worker image.
@@ -90,6 +94,11 @@ class McpWorkerAdapter:
     def call(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
         return self.worker.call(name, args)
 
+    def program_model_call(
+        self, name: str, args: dict[str, Any]
+    ) -> dict[str, Any]:
+        return self.worker.call_internal(name, args, timeout=360)
+
 
 class FlutterAotAdapter:
     """Control-plane adapter around the Flutter domain capability."""
@@ -115,6 +124,11 @@ class FlutterAotAdapter:
 
     def call(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
         return self.capability.call(name, args)
+
+    def program_model_call(
+        self, name: str, args: dict[str, Any]
+    ) -> dict[str, Any]:
+        return self.capability.program_model_call(name, args)
 
 
 def _env_suffix(capability_id: str) -> str:
