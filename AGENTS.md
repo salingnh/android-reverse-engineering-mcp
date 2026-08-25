@@ -9,6 +9,7 @@ Read these before changing code:
 5. `docs/ROADMAP.md` — release train, milestone scope and acceptance criteria.
 6. `docs/ROADMAP_0_4_EXECUTION.md` — mandatory staged execution plan for milestone 0.4.
 7. `docs/CODE_OWNERSHIP.md` — durable ownership scopes, evidence precedence and SDK-boundary semantics for program-understanding work.
+8. `docs/PROGRAM_MODEL.md` — canonical Program Snapshot, semantic entity/relationship IDs, provider normalization, continuation and query-layer contract for Stage C and later stages.
 
 Mandatory invariants:
 
@@ -31,6 +32,9 @@ Mandatory invariants:
 - Analyzer, provider, registry, CI, or storage implementation details must not leak into durable public semantic contracts.
 - Do not add temporary fallback/compatibility paths merely to preserve a product model that project direction has rejected.
 - Code ownership must remain one shared semantic classifier; do not add vendor-specific skip logic or a second SDK-filtering path in later stages.
+- The Canonical Program Model must remain one shared semantic vocabulary above private indexes. Do not create framework-specific competing graph models, raw public SQL/graph consoles, or public contracts based on private DEX/Flutter schemas.
+- Program Snapshot identity is the SHA-256 of the exact artifact a provider analyzed. Derived child artifacts must not be silently treated as the same snapshot as a parent APK/XAPK; cross-artifact composition requires explicit lineage/correlation evidence.
+- Provider pagination must use canonical continuation semantics and report hard-budget truncation explicitly; never paginate by repeatedly slicing a fixed private-index prefix.
 
 Before implementing any non-trivial stage, perform the pre-implementation review in `docs/ARCHITECTURE_EVOLUTION_RULES.md`. If the design is already known to require replacement in a later milestone, stop and redesign before writing production code.
 
