@@ -18,6 +18,15 @@ import peg_schema
 import program_understanding_v2 as pu
 
 _baseline_fingerprint = core.fingerprint
+OWNERSHIP_QUERY_SCOPES = [
+    "application",
+    "all",
+    "first_party",
+    "third_party",
+    "platform",
+    "generated",
+    "unknown",
+]
 
 
 @contextmanager
@@ -162,6 +171,10 @@ def health(args):
         "xrefs": True,
         "cfg": caps["androguard"],
         "network_model": True,
+        "code_ownership": bool(caps.get("code_ownership")),
+        "ownership_model_version": caps.get("ownership_model_version"),
+        "ownership_query_scopes": caps.get("ownership_scopes", []),
+        "default_ownership_scope": "application",
         "protector_detection": caps["apkid"],
         "wall_clock_deadlines": True,
         "analyzer_versions": caps["versions"],
@@ -206,6 +219,7 @@ def find_symbols(args):
         job,
         core.WORKSPACE,
         str(args.get("query", "")),
+        scope=str(args.get("scope", "application")),
         limit=int(args.get("limit", 100)),
         timeout_seconds=_timeout(args, 300),
     )
@@ -219,6 +233,7 @@ def find_xrefs(args):
         core.WORKSPACE,
         str(args.get("query", "")),
         direction=str(args.get("direction", "both")),
+        scope=str(args.get("scope", "application")),
         limit=int(args.get("limit", 200)),
         timeout_seconds=_timeout(args, 300),
     )
@@ -231,6 +246,7 @@ def get_cfg(args):
         job,
         core.WORKSPACE,
         str(args.get("query", "")),
+        scope=str(args.get("scope", "application")),
         max_blocks=int(args.get("max_blocks", 500)),
         timeout_seconds=_timeout(args, 300),
     )
@@ -255,6 +271,7 @@ def extract_network_model(args):
         pu.extract_network_model,
         job,
         core.WORKSPACE,
+        scope=str(args.get("scope", "application")),
         max_items=int(args.get("max_items", 500)),
         timeout_seconds=_timeout(args, 600),
     )
@@ -287,6 +304,16 @@ for tool in core.TOOLS:
             "framework-aware analysis route so non-Java business logic is not silently treated as JADX input."
         )
         break
+
+_SCOPE_PROPERTY = {
+    "type": "string",
+    "enum": OWNERSHIP_QUERY_SCOPES,
+    "default": "application",
+    "description": (
+        "Ownership scope. application includes FIRST_PARTY and UNKNOWN, suppresses definite "
+        "third-party/platform/generated internals, and retains direct SDK boundary XREFs."
+    ),
+}
 
 core.TOOLS.extend(
     [
@@ -374,7 +401,7 @@ core.TOOLS.extend(
         },
         {
             "name": "build_program_index",
-            "description": "Build or reuse a bounded semantic program index from DEX XREFs when Androguard is available, with a lower-confidence decompiled-source fallback.",
+            "description": "Build or reuse a bounded semantic program index from DEX XREFs when Androguard is available, with a lower-confidence decompiled-source fallback and an ownership-model descriptor.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -405,12 +432,13 @@ core.TOOLS.extend(
         },
         {
             "name": "find_symbols",
-            "description": "Search normalized class/method symbols in the program index without scanning the full decompiled tree.",
+            "description": "Search normalized symbols with durable code-ownership classification; defaults to application code plus conservatively UNKNOWN code instead of vendor/platform/generated internals.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "job_id": {"type": "string"},
                     "query": {"type": "string"},
+                    "scope": dict(_SCOPE_PROPERTY),
                     "limit": {
                         "type": "integer",
                         "minimum": 1,
@@ -430,7 +458,7 @@ core.TOOLS.extend(
         },
         {
             "name": "find_xrefs",
-            "description": "Find incoming/outgoing method cross-references using DEX XREFs when available, returning normalized evidence edges.",
+            "description": "Find ownership-scoped incoming/outgoing XREF roots while retaining direct application-to-SDK/platform boundary edges as evidence.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -441,6 +469,7 @@ core.TOOLS.extend(
                         "enum": ["incoming", "outgoing", "both"],
                         "default": "both",
                     },
+                    "scope": dict(_SCOPE_PROPERTY),
                     "limit": {
                         "type": "integer",
                         "minimum": 1,
@@ -460,12 +489,13 @@ core.TOOLS.extend(
         },
         {
             "name": "get_cfg",
-            "description": "Return a bounded control-flow graph for methods matching a query. Requires Androguard in the sandbox image.",
+            "description": "Return a bounded ownership-scoped control-flow graph for matching methods. Requires Androguard in the sandbox image.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "job_id": {"type": "string"},
                     "query": {"type": "string"},
+                    "scope": dict(_SCOPE_PROPERTY),
                     "max_blocks": {
                         "type": "integer",
                         "minimum": 1,
@@ -503,11 +533,12 @@ core.TOOLS.extend(
         },
         {
             "name": "extract_network_model",
-            "description": "Build a structured network model linking endpoints to uniquely resolved declaring methods, caller XREFs, model hints, auth/signature evidence and source provenance.",
+            "description": "Build an ownership-scoped network model linking endpoints to declaring methods, caller XREFs, model hints, auth/signature evidence and source provenance; application scope avoids scanning definite SDK/platform/generated source internals.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "job_id": {"type": "string"},
+                    "scope": dict(_SCOPE_PROPERTY),
                     "max_items": {
                         "type": "integer",
                         "minimum": 20,
