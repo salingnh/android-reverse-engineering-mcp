@@ -215,12 +215,20 @@ def ownership_context(job: Path) -> OwnershipContext:
     manifest = _manifest_path(job)
     if manifest is None:
         return OwnershipContext(None, frozenset(), "missing", None)
+    source = str(manifest.relative_to(job))
     try:
         if manifest.stat().st_size > MAX_MANIFEST_BYTES:
-            return OwnershipContext(None, frozenset(), "oversized", str(manifest.relative_to(job)))
-        root = ET.fromstring(manifest.read_bytes())
-    except (OSError, ET.ParseError):
-        return OwnershipContext(None, frozenset(), "invalid", str(manifest.relative_to(job)))
+            return OwnershipContext(None, frozenset(), "oversized", source)
+        raw = manifest.read_bytes()
+        upper = raw.upper()
+        # Decompiled manifests are attacker-controlled artifact data. Ownership
+        # extraction needs only elements/attributes, so DTD/entity declarations
+        # are never required and are rejected before XML parsing.
+        if b"<!DOCTYPE" in upper or b"<!ENTITY" in upper:
+            return OwnershipContext(None, frozenset(), "unsafe_xml", source)
+        root = ET.fromstring(raw)
+    except (OSError, ET.ParseError, ValueError, RecursionError):
+        return OwnershipContext(None, frozenset(), "invalid", source)
 
     raw_package = str(root.attrib.get("package") or "").strip()
     try:
@@ -249,7 +257,7 @@ def ownership_context(job: Path) -> OwnershipContext:
         application_package,
         frozenset(sorted(components)),
         "parsed",
-        str(manifest.relative_to(job)),
+        source,
     )
 
 
