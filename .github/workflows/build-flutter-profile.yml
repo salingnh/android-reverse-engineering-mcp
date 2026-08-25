@@ -78,16 +78,16 @@ jobs:
         run: PYTHONPATH=.:frameworks/flutter:sandbox python3 frameworks/flutter/tests_application_map.py
 
       - name: Test offline-safe Blutter adapter
-        run: PYTHONPATH=frameworks/flutter python3 frameworks/flutter/tests_safe_blutter_adapter.py
+        run: PYTHONPATH=.:frameworks/flutter python3 frameworks/flutter/tests_safe_blutter_adapter.py
 
       - name: Test Flutter semantic index
-        run: PYTHONPATH=frameworks/flutter python3 frameworks/flutter/tests_flutter_semantic.py
+        run: PYTHONPATH=.:frameworks/flutter python3 frameworks/flutter/tests_flutter_semantic.py
 
       - name: Test Flutter network model
-        run: PYTHONPATH=frameworks/flutter python3 frameworks/flutter/tests_flutter_network.py
+        run: PYTHONPATH=.:frameworks/flutter python3 frameworks/flutter/tests_flutter_network.py
 
       - name: Test Flutter worker orchestration primitives
-        run: PYTHONPATH=frameworks/flutter python3 frameworks/flutter/tests_flutter_orchestration.py
+        run: PYTHONPATH=.:frameworks/flutter python3 frameworks/flutter/tests_flutter_orchestration.py
 
       - name: Validate Python syntax
         run: |
