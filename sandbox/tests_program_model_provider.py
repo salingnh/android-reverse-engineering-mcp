@@ -31,10 +31,30 @@ class DexProgramProviderTests(unittest.TestCase):
             pu_index.init_db(conn)
             pu_index.meta_set(conn, "artifact_sha256", "a" * 64)
             pu_index.meta_set(conn, "analysis_kind", "dex-xref")
-            pu_index.meta_set(conn, "analyzer", {"name": "androguard", "version": "4.1.4"})
+            pu_index.meta_set(
+                conn,
+                "analyzer",
+                {"name": "androguard", "version": "4.1.4"},
+            )
             rows = [
-                ("Lcom/example/App; login ()V", "com.example.App", "login", "()V", 0, 0, json.dumps({"apk_member": "base.apk"})),
-                ("Lcom/google/firebase/auth/Auth; sign ()V", "com.google.firebase.auth.Auth", "sign", "()V", 0, 1, json.dumps({"apk_member": "external-or-unknown"})),
+                (
+                    "Lcom/example/App; login ()V",
+                    "com.example.App",
+                    "login",
+                    "()V",
+                    0,
+                    0,
+                    json.dumps({"apk_member": "base.apk"}),
+                ),
+                (
+                    "Lcom/google/firebase/auth/Auth; sign ()V",
+                    "com.google.firebase.auth.Auth",
+                    "sign",
+                    "()V",
+                    0,
+                    1,
+                    json.dumps({"apk_member": "external-or-unknown"}),
+                ),
             ]
             conn.executemany("INSERT INTO methods VALUES (?,?,?,?,?,?,?)", rows)
             conn.execute(
@@ -42,8 +62,16 @@ class DexProgramProviderTests(unittest.TestCase):
                 (rows[0][0], rows[1][0], 12, 0.98, "dex-xref"),
             )
             conn.commit()
-        self.ensure_patch = mock.patch.object(pu_index, "ensure_index", lambda *args, **kwargs: None)
-        self.artifact_patch = mock.patch.object(pu_index, "artifact", lambda *args, **kwargs: self.artifact)
+        self.ensure_patch = mock.patch.object(
+            pu_index,
+            "ensure_index",
+            lambda *args, **kwargs: None,
+        )
+        self.artifact_patch = mock.patch.object(
+            pu_index,
+            "artifact",
+            lambda *args, **kwargs: self.artifact,
+        )
         self.ensure_patch.start()
         self.artifact_patch.start()
 
@@ -53,31 +81,64 @@ class DexProgramProviderTests(unittest.TestCase):
         self.tmp.cleanup()
 
     def test_default_application_scope_suppresses_sdk_roots_and_retains_boundary(self):
-        provider = pu_program_model.DexProgramProvider(self.job, self.workspace, {"androguard": True})
+        provider = pu_program_model.DexProgramProvider(
+            self.job,
+            self.workspace,
+            {"androguard": True},
+        )
         repo = pm.ProgramRepository((provider,))
         functions = repo.find_entities(kind="FUNCTION", limit=20)
-        self.assertEqual([item.display_name for item in functions.items], ["com.example.App.login"])
+        self.assertEqual(
+            [item.display_name for item in functions.items],
+            ["com.example.App.login"],
+        )
         app_fn = functions.items[0]
-        relations = repo.find_relationships(entity_id=app_fn.entity_id, direction="outgoing", limit=20)
-        calls = [item for item in relations.items if item.kind == "CALLS_EXTERNAL"]
+        relations = repo.find_relationships(
+            entity_id=app_fn.entity_id,
+            direction="outgoing",
+            limit=20,
+        )
+        calls = [
+            item for item in relations.items if item.kind == "CALLS_EXTERNAL"
+        ]
         self.assertEqual(len(calls), 1)
         boundary = provider.get_entity(calls[0].target_entity_id)
         self.assertIsNotNone(boundary)
         self.assertEqual(boundary.kind, "EXTERNAL_BOUNDARY")
         self.assertEqual(boundary.ownership, "THIRD_PARTY")
-        self.assertEqual(boundary.properties["boundary_kind"], "third-party-sdk")
+        self.assertEqual(
+            boundary.properties["boundary_kind"],
+            "third-party-sdk",
+        )
 
     def test_explicit_third_party_scope_exposes_sdk_function(self):
-        provider = pu_program_model.DexProgramProvider(self.job, self.workspace, {"androguard": True})
-        functions = pm.ProgramRepository((provider,)).find_entities(
-            kind="FUNCTION", ownership_scope="third_party", limit=20
+        provider = pu_program_model.DexProgramProvider(
+            self.job,
+            self.workspace,
+            {"androguard": True},
         )
-        self.assertEqual([item.display_name for item in functions.items], ["com.google.firebase.auth.Auth.sign"])
+        functions = pm.ProgramRepository((provider,)).find_entities(
+            kind="FUNCTION",
+            ownership_scope="third_party",
+            limit=20,
+        )
+        self.assertEqual(
+            [item.display_name for item in functions.items],
+            ["com.google.firebase.auth.Auth.sign"],
+        )
 
     def test_declares_is_structural_and_private_ids_do_not_leak(self):
-        provider = pu_program_model.DexProgramProvider(self.job, self.workspace, {"androguard": True})
+        provider = pu_program_model.DexProgramProvider(
+            self.job,
+            self.workspace,
+            {"androguard": True},
+        )
         repo = pm.ProgramRepository((provider,))
-        clazz = repo.find_entities(kind="CLASS", text="com.example.App", limit=10).items[0]
+        clazz = repo.find_entities(
+            kind="CLASS",
+            text="com.example.App",
+            limit=10,
+        ).items[0]
         relations = repo.find_relationships(
             entity_id=clazz.entity_id,
             direction="outgoing",
@@ -97,17 +158,48 @@ class DexProgramProviderTests(unittest.TestCase):
             pu_index.meta_set(conn, "analysis_kind", "source-fallback")
             conn.execute("UPDATE call_edges SET kind='source-xref'")
             conn.commit()
-        provider = pu_program_model.DexProgramProvider(self.job, self.workspace, {"androguard": False})
-        fn = pm.ProgramRepository((provider,)).find_entities(kind="FUNCTION", text="login", limit=10).items[0]
-        relations = list(
-            provider.iter_relationships(
-                entity_id=fn.entity_id,
-                direction="outgoing",
-                ownership_scope="all",
-                limit=10,
-            )
+        provider = pu_program_model.DexProgramProvider(
+            self.job,
+            self.workspace,
+            {"androguard": False},
         )
-        self.assertEqual([item.kind for item in relations if item.kind != "DECLARES"], ["XREF"])
+        fn = pm.ProgramRepository((provider,)).find_entities(
+            kind="FUNCTION",
+            text="login",
+            limit=10,
+        ).items[0]
+        page = provider.query_relationships(
+            entity_id=fn.entity_id,
+            direction="outgoing",
+            ownership_scope="all",
+            limit=10,
+        )
+        self.assertEqual(
+            [item.kind for item in page.items if item.kind != "DECLARES"],
+            ["XREF"],
+        )
+
+    def test_provider_continuation_does_not_repeat_previous_page(self):
+        provider = pu_program_model.DexProgramProvider(
+            self.job,
+            self.workspace,
+            {"androguard": True},
+        )
+        first = provider.query_entities(
+            kind="FUNCTION",
+            ownership_scope="all",
+            limit=1,
+        )
+        self.assertTrue(first.has_more)
+        after = pm.entity_sort_key(first.items[-1])
+        second = provider.query_entities(
+            kind="FUNCTION",
+            ownership_scope="all",
+            after=after,
+            limit=1,
+        )
+        self.assertEqual(len(second.items), 1)
+        self.assertGreater(pm.entity_sort_key(second.items[0]), after)
 
 
 if __name__ == "__main__":
