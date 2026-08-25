@@ -221,6 +221,139 @@ class ApplicationMapContractTests(unittest.TestCase):
         self.assertEqual(expanded["root_entity_id"], login.entity_id)
         self.assertIn(boundary.entity_id, {item["entity_id"] for item in expanded["nodes"]})
 
+    def test_expansion_cursor_never_skips_edges_when_node_limit_is_tighter(self):
+        snapshot = pm.ProgramSnapshot("a" * 64, "apk")
+        root = entity(
+            snapshot,
+            "FUNCTION",
+            "function:v1:dex:root",
+            "com.example.Root.run",
+            properties={"signature": "()V", "implementation": "present"},
+        )
+        neighbors = [
+            entity(
+                snapshot,
+                "FUNCTION",
+                f"function:v1:dex:neighbor-{index}",
+                f"com.example.Neighbor{index}.run",
+                properties={"signature": "()V", "implementation": "present"},
+            )
+            for index in range(6)
+        ]
+        relations = [
+            relationship(snapshot, "CALLS", root, item, str(index))
+            for index, item in enumerate(neighbors)
+        ]
+        projector = amap.ApplicationMapProjector(
+            pm.ProgramRepository((FakeProvider([root, *neighbors], relations),))
+        )
+
+        seen: list[str] = []
+        cursor = None
+        for _ in range(4):
+            result = projector.expand_application_node(
+                entity_id=root.entity_id,
+                node_limit=3,
+                edge_limit=6,
+                cursor=cursor,
+            )
+            seen.extend(item["relationship_id"] for item in result["edges"])
+            if not result["has_more"]:
+                break
+            self.assertIsNotNone(result["cursor"])
+            cursor = result["cursor"]
+        self.assertEqual(seen, [item.relationship_id for item in sorted(relations, key=pm.relationship_sort_key)])
+        self.assertEqual(len(set(seen)), len(relations))
+
+    def test_response_size_retry_keeps_cursor_aligned_with_returned_edges(self):
+        snapshot = pm.ProgramSnapshot("a" * 64, "apk")
+        root = entity(
+            snapshot,
+            "FUNCTION",
+            "function:v1:dex:large-root",
+            "com.example.LargeRoot.run",
+            properties={"signature": "()V", "implementation": "present"},
+        )
+        neighbors = []
+        for index in range(20):
+            name = f"com.example.Big{index}." + ("x" * 1800)
+            neighbors.append(
+                entity(
+                    snapshot,
+                    "CLASS",
+                    f"class:v1:dex:big-{index}",
+                    name,
+                    properties={"qualified_name": name},
+                )
+            )
+        relations = [
+            relationship(snapshot, "CALLS", root, item, str(index))
+            for index, item in enumerate(neighbors)
+        ]
+        projector = amap.ApplicationMapProjector(
+            pm.ProgramRepository((FakeProvider([root, *neighbors], relations),))
+        )
+
+        first = projector.expand_application_node(
+            entity_id=root.entity_id,
+            node_limit=21,
+            edge_limit=20,
+        )
+        encoded = json.dumps(
+            first,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        self.assertLessEqual(len(encoded), amap.MAX_RESPONSE_BYTES)
+        self.assertEqual(first["serialized_bytes"], len(encoded))
+        self.assertTrue(first["truncated"])
+        self.assertTrue(first["has_more"])
+        self.assertIsNotNone(first["cursor"])
+        self.assertIn("response_size_budget_reached", first["warnings"])
+
+        second = projector.expand_application_node(
+            entity_id=root.entity_id,
+            node_limit=21,
+            edge_limit=20,
+            cursor=first["cursor"],
+        )
+        seen = [item["relationship_id"] for item in first["edges"] + second["edges"]]
+        expected = [item.relationship_id for item in sorted(relations, key=pm.relationship_sort_key)]
+        self.assertEqual(seen, expected)
+        self.assertEqual(len(set(seen)), len(relations))
+
+    def test_application_scope_rejects_direct_third_party_implementation_root(self):
+        snapshot, entities, relations, _, _, _, boundary = self.fixture()
+        sdk = entity(
+            snapshot,
+            "FUNCTION",
+            "function:v1:dex:sdk-direct",
+            "com.google.firebase.auth.Auth.signIn",
+            ownership="THIRD_PARTY",
+            properties={"signature": "()V", "implementation": "external"},
+        )
+        projector = amap.ApplicationMapProjector(
+            pm.ProgramRepository((FakeProvider([*entities, sdk], relations),))
+        )
+        with self.assertRaises(amap.ApplicationMapError):
+            projector.expand_application_node(entity_id=sdk.entity_id)
+        expanded_boundary = projector.expand_application_node(entity_id=boundary.entity_id)
+        self.assertEqual(expanded_boundary["root_entity_id"], boundary.entity_id)
+        explicit = projector.expand_application_node(
+            entity_id=sdk.entity_id,
+            ownership_scope="third_party",
+        )
+        self.assertEqual(explicit["root_entity_id"], sdk.entity_id)
+
+    def test_expansion_requires_capacity_for_root_and_neighbor(self):
+        _, entities, relations, _, _, login, _ = self.fixture()
+        projector = amap.ApplicationMapProjector(
+            pm.ProgramRepository((FakeProvider(entities, relations),))
+        )
+        with self.assertRaises(amap.ApplicationMapError):
+            projector.expand_application_node(entity_id=login.entity_id, node_limit=1)
+
     def test_xref_is_never_promoted(self):
         snapshot, entities, _, app, _, login, boundary = self.fixture()
         xref = relationship(snapshot, "XREF", login, boundary, "xref")
