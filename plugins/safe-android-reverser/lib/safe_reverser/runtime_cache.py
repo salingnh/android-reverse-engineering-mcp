@@ -43,6 +43,7 @@ from .runtime import (
 RUNTIME_CACHE_STATE_SCHEMA = 2
 MAX_RUNTIME_CACHE_STATE_BYTES = 64 * 1024
 MAX_STATE_ENTRIES = 10_000
+DEFAULT_LOCK_STRIPES = 256
 DART_VERSION_RE = re.compile(
     r"^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][A-Za-z0-9._-]{1,24})?$"
 )
@@ -51,6 +52,7 @@ COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 PLATFORM_TOKEN_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,31}$")
 IMAGE_ID_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 FAILURE_CODE_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+STATE_FILENAME_RE = re.compile(r"^[0-9a-f]{64}\.json$")
 
 
 def _new_attempt_identity() -> str:
@@ -62,6 +64,10 @@ class RuntimeCacheError(RuntimeError):
 
 
 class RuntimeCacheStoreError(RuntimeCacheError):
+    pass
+
+
+class RuntimeCacheCapacityError(RuntimeCacheStoreError):
     pass
 
 
@@ -250,13 +256,33 @@ class RuntimeCacheResolution:
 
 
 class RuntimeCacheStateStore:
-    def __init__(self, data_root: Path) -> None:
+    def __init__(
+        self,
+        data_root: Path,
+        *,
+        max_entries: int = MAX_STATE_ENTRIES,
+        lock_stripes: int | None = None,
+    ) -> None:
+        if type(max_entries) is not int or max_entries < 1 or max_entries > MAX_STATE_ENTRIES:
+            raise RuntimeCacheStoreError("invalid runtime-cache state capacity")
+        if lock_stripes is None:
+            lock_stripes = min(DEFAULT_LOCK_STRIPES, max_entries)
+        if (
+            type(lock_stripes) is not int
+            or lock_stripes < 1
+            or lock_stripes > DEFAULT_LOCK_STRIPES
+            or lock_stripes > max_entries
+        ):
+            raise RuntimeCacheStoreError("invalid runtime-cache lock stripe count")
+        self.max_entries = max_entries
+        self.lock_stripes = lock_stripes
         try:
             self.root = ensure_private_child(data_root.resolve(), "runtime-cache-resolver")
             self.states = ensure_private_child(self.root, "states-v2")
-            self.locks = ensure_private_child(self.root, "locks-v1")
+            self.locks = ensure_private_child(self.root, "locks-v2")
         except PathPolicyError as exc:
             raise RuntimeCacheStoreError(str(exc)) from exc
+        self.admission_lock = self.root / "admission-v1.lock"
 
     @staticmethod
     def _filename(request_identity: str, suffix: str) -> str:
@@ -264,33 +290,23 @@ class RuntimeCacheStateStore:
             raise RuntimeCacheStoreError("invalid runtime-cache request identity")
         return request_identity + suffix
 
-    def _bounded_entry_count(self, directory: Path) -> None:
-        count = 0
-        for _entry in directory.iterdir():
-            count += 1
-            if count > MAX_STATE_ENTRIES:
-                raise RuntimeCacheStoreError(
-                    "runtime-cache state directory exceeds entry bound"
-                )
-
     @contextmanager
-    def lock(self, request_identity: str) -> Iterator[None]:
-        filename = self._filename(request_identity, ".lock")
-        path = self.locks / filename
+    def _exclusive_file_lock(self, path: Path, *, label: str) -> Iterator[None]:
         if path.is_symlink():
-            raise RuntimeCacheStoreError("runtime-cache lock must not be a symlink")
-        self._bounded_entry_count(self.locks)
+            raise RuntimeCacheStoreError(f"runtime-cache {label} must not be a symlink")
         flags = os.O_CREAT | os.O_RDWR
         if hasattr(os, "O_NOFOLLOW"):
             flags |= os.O_NOFOLLOW
         try:
             descriptor = os.open(path, flags, 0o600)
         except OSError as exc:
-            raise RuntimeCacheStoreError("cannot open runtime-cache lock") from exc
+            raise RuntimeCacheStoreError(f"cannot open runtime-cache {label}") from exc
         try:
             info = os.fstat(descriptor)
             if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
-                raise RuntimeCacheStoreError("runtime-cache lock is not a regular file")
+                raise RuntimeCacheStoreError(
+                    f"runtime-cache {label} is not a regular file"
+                )
             os.fchmod(descriptor, 0o600)
             fcntl.flock(descriptor, fcntl.LOCK_EX)
             yield
@@ -299,6 +315,32 @@ class RuntimeCacheStateStore:
                 fcntl.flock(descriptor, fcntl.LOCK_UN)
             finally:
                 os.close(descriptor)
+
+    def _state_path(self, request_identity: str) -> Path:
+        return self.states / self._filename(request_identity, ".json")
+
+    def _state_entry_count(self) -> int:
+        count = 0
+        for entry in self.states.iterdir():
+            if STATE_FILENAME_RE.fullmatch(entry.name):
+                count += 1
+        return count
+
+    def admitted_count(self) -> int:
+        """Return the number of durable state admissions for tests/diagnostics."""
+        return self._state_entry_count()
+
+    def _lock_path(self, request_identity: str) -> Path:
+        self._filename(request_identity, ".lock")
+        slot = int(request_identity[:16], 16) % self.lock_stripes
+        return self.locks / f"slot-{slot:04x}.lock"
+
+    @contextmanager
+    def lock(self, request_identity: str) -> Iterator[None]:
+        with self._exclusive_file_lock(
+            self._lock_path(request_identity), label="request lock"
+        ):
+            yield
 
     def read(self, identity: RuntimeIdentity) -> dict[str, Any] | None:
         filename = self._filename(identity.request_identity, ".json")
@@ -321,24 +363,64 @@ class RuntimeCacheStateStore:
             raise RuntimeCacheStoreError("runtime-cache state identity mismatch")
         return payload
 
+    def _write_existing_or_new(
+        self,
+        identity: RuntimeIdentity,
+        filename: str,
+        path: Path,
+        value: dict[str, Any],
+    ) -> None:
+        if path.is_symlink():
+            raise RuntimeCacheStoreError("runtime-cache state must not be a symlink")
+        if path.exists():
+            if not path.is_file() or path.resolve().parent != self.states.resolve():
+                raise RuntimeCacheStoreError("runtime-cache state is unavailable or unsafe")
+            try:
+                atomic_write_json(
+                    self.states,
+                    filename,
+                    value,
+                    max_bytes=MAX_RUNTIME_CACHE_STATE_BYTES,
+                )
+            except PathPolicyError as exc:
+                raise RuntimeCacheStoreError(str(exc)) from exc
+            return
+
+        with self._exclusive_file_lock(
+            self.admission_lock, label="admission lock"
+        ):
+            if path.is_symlink():
+                raise RuntimeCacheStoreError("runtime-cache state must not be a symlink")
+            if path.exists():
+                if not path.is_file() or path.resolve().parent != self.states.resolve():
+                    raise RuntimeCacheStoreError(
+                        "runtime-cache state is unavailable or unsafe"
+                    )
+            else:
+                if self._state_entry_count() >= self.max_entries:
+                    raise RuntimeCacheCapacityError(
+                        "runtime-cache state capacity is exhausted"
+                    )
+            try:
+                atomic_write_json(
+                    self.states,
+                    filename,
+                    value,
+                    max_bytes=MAX_RUNTIME_CACHE_STATE_BYTES,
+                )
+            except PathPolicyError as exc:
+                raise RuntimeCacheStoreError(str(exc)) from exc
+
     def write(self, identity: RuntimeIdentity, payload: dict[str, Any]) -> None:
         filename = self._filename(identity.request_identity, ".json")
-        self._bounded_entry_count(self.states)
+        path = self._state_path(identity.request_identity)
         value = {
             **payload,
             "schema_version": RUNTIME_CACHE_STATE_SCHEMA,
             "request_identity": identity.request_identity,
             "identity": identity.to_dict(),
         }
-        try:
-            atomic_write_json(
-                self.states,
-                filename,
-                value,
-                max_bytes=MAX_RUNTIME_CACHE_STATE_BYTES,
-            )
-        except PathPolicyError as exc:
-            raise RuntimeCacheStoreError(str(exc)) from exc
+        self._write_existing_or_new(identity, filename, path, value)
 
 
 class RuntimeCacheResolver:
@@ -352,10 +434,13 @@ class RuntimeCacheResolver:
         retry_delay_seconds: int = 300,
         clock: Callable[[], float] = time.time,
         attempt_identity_factory: Callable[[], str] = _new_attempt_identity,
+        state_store_max_entries: int = MAX_STATE_ENTRIES,
     ) -> None:
         self.runtime = runtime
         self.provider = provider
-        self.store = RuntimeCacheStateStore(data_root)
+        self.store = RuntimeCacheStateStore(
+            data_root, max_entries=state_store_max_entries
+        )
         self.build_timeout_seconds = max(60, min(int(build_timeout_seconds), 24 * 60 * 60))
         self.retry_delay_seconds = max(1, min(int(retry_delay_seconds), 24 * 60 * 60))
         self._clock = clock
@@ -796,71 +881,85 @@ class RuntimeCacheResolver:
             image=verified,
         )
 
+    def _resolve_locked(
+        self, identity: RuntimeIdentity, cache_ref: str
+    ) -> RuntimeCacheResolution:
+        try:
+            verified = self._verify_image(identity, cache_ref)
+        except ImageUnavailableError:
+            verified = None
+        except ImageVerificationError:
+            return self._failed(
+                identity,
+                cache_ref,
+                "image_verification_failed",
+                "runtime-cache image failed immutable verification",
+                retryable=False,
+            )
+        except RuntimeErrorSafe:
+            return self._failed(
+                identity,
+                cache_ref,
+                "runtime_lookup_failed",
+                "container runtime could not inspect the runtime cache",
+            )
+        if verified is not None:
+            self._write(
+                identity,
+                cache_ref,
+                RuntimeCacheState.READY,
+                image_id=verified.immutable_ref,
+                source_revision=verified.get("org.opencontainers.image.revision"),
+            )
+            return RuntimeCacheResolution(
+                RuntimeCacheState.READY,
+                identity.request_identity,
+                cache_ref,
+                image=verified,
+            )
+        payload = self.store.read(identity)
+        state = self._state_value(payload)
+        if payload is not None and payload.get("cache_ref") != cache_ref:
+            raise RuntimeCacheStoreError("runtime-cache reference changed for identity")
+        if state is RuntimeCacheState.BUILDING:
+            return self._resume_build(identity, cache_ref, payload or {})
+        if state is RuntimeCacheState.FAILED:
+            retryable = bool((payload or {}).get("retryable"))
+            retry_after = int((payload or {}).get("retry_after_epoch") or 0)
+            if not retryable or self._now() < retry_after:
+                return RuntimeCacheResolution(
+                    RuntimeCacheState.FAILED,
+                    identity.request_identity,
+                    cache_ref,
+                    failure_code=str((payload or {}).get("failure_code") or "runtime_cache_failed"),
+                    detail=str((payload or {}).get("detail") or "runtime cache resolution failed"),
+                    retry_after_epoch=retry_after or None,
+                )
+            previous_attempt = self._attempt_from_payload(
+                payload, required=False
+            )
+            return self._start_build(
+                identity,
+                cache_ref,
+                previous_attempt_identity=(
+                    previous_attempt.attempt_identity
+                    if previous_attempt is not None
+                    else None
+                ),
+            )
+        return self._start_build(identity, cache_ref)
+
     def resolve(
         self, identity: RuntimeIdentity, cache_ref: str
     ) -> RuntimeCacheResolution:
-        with self.store.lock(identity.request_identity):
-            try:
-                verified = self._verify_image(identity, cache_ref)
-            except ImageUnavailableError:
-                verified = None
-            except ImageVerificationError:
-                return self._failed(
-                    identity,
-                    cache_ref,
-                    "image_verification_failed",
-                    "runtime-cache image failed immutable verification",
-                    retryable=False,
-                )
-            except RuntimeErrorSafe:
-                return self._failed(
-                    identity,
-                    cache_ref,
-                    "runtime_lookup_failed",
-                    "container runtime could not inspect the runtime cache",
-                )
-            if verified is not None:
-                self._write(
-                    identity,
-                    cache_ref,
-                    RuntimeCacheState.READY,
-                    image_id=verified.immutable_ref,
-                    source_revision=verified.get("org.opencontainers.image.revision"),
-                )
-                return RuntimeCacheResolution(
-                    RuntimeCacheState.READY,
-                    identity.request_identity,
-                    cache_ref,
-                    image=verified,
-                )
-            payload = self.store.read(identity)
-            state = self._state_value(payload)
-            if payload is not None and payload.get("cache_ref") != cache_ref:
-                raise RuntimeCacheStoreError("runtime-cache reference changed for identity")
-            if state is RuntimeCacheState.BUILDING:
-                return self._resume_build(identity, cache_ref, payload or {})
-            if state is RuntimeCacheState.FAILED:
-                retryable = bool((payload or {}).get("retryable"))
-                retry_after = int((payload or {}).get("retry_after_epoch") or 0)
-                if not retryable or self._now() < retry_after:
-                    return RuntimeCacheResolution(
-                        RuntimeCacheState.FAILED,
-                        identity.request_identity,
-                        cache_ref,
-                        failure_code=str((payload or {}).get("failure_code") or "runtime_cache_failed"),
-                        detail=str((payload or {}).get("detail") or "runtime cache resolution failed"),
-                        retry_after_epoch=retry_after or None,
-                    )
-                previous_attempt = self._attempt_from_payload(
-                    payload, required=False
-                )
-                return self._start_build(
-                    identity,
-                    cache_ref,
-                    previous_attempt_identity=(
-                        previous_attempt.attempt_identity
-                        if previous_attempt is not None
-                        else None
-                    ),
-                )
-            return self._start_build(identity, cache_ref)
+        try:
+            with self.store.lock(identity.request_identity):
+                return self._resolve_locked(identity, cache_ref)
+        except RuntimeCacheCapacityError:
+            return RuntimeCacheResolution(
+                RuntimeCacheState.FAILED,
+                identity.request_identity,
+                cache_ref,
+                failure_code="runtime_cache_capacity_exhausted",
+                detail="runtime-cache capacity is exhausted",
+            )
