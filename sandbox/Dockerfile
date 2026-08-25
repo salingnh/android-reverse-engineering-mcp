@@ -72,14 +72,17 @@ COPY sandbox/program_understanding_v2.py /opt/safe-reverser/program_understandin
 COPY sandbox/pu_source.py /opt/safe-reverser/pu_source.py
 COPY sandbox/pu_index.py /opt/safe-reverser/pu_index.py
 COPY sandbox/pu_network.py /opt/safe-reverser/pu_network.py
+COPY sandbox/pu_ownership.py /opt/safe-reverser/pu_ownership.py
+COPY sandbox/pu_ownership_queries.py /opt/safe-reverser/pu_ownership_queries.py
+COPY sandbox/ownership_rules.json /opt/safe-reverser/ownership_rules.json
 
 RUN set -eux; \
     test -n "$SAFE_REVERSER_VERSION"; \
     test "$(tr -d '[:space:]' < /opt/safe-reverser/VERSION)" = "$SAFE_REVERSER_VERSION"; \
     ln -s /opt/jadx/bin/jadx /usr/local/bin/jadx; \
-    PYTHONPATH=/opt/python-site:/opt/safe-reverser python3 -c 'import program_understanding_v2 as pu; import analysis_routing as routing; import peg_schema as peg; import flutter_analysis as flutter; import archive_safety as archive; caps=pu.capabilities(); assert caps["androguard"], caps; assert routing.PROFILE_REGISTRY["static-core"]["status"] == "available"; assert routing.PROFILE_REGISTRY["framework-flutter"]["status"] == "declared"; assert peg.PEG_SCHEMA_VERSION == 2; assert flutter.MAX_ASSET_COUNT == 20000; assert archive.MAX_NESTED_APKS == 128'; \
-    chmod 0444 /opt/safe-reverser/VERSION; \
-    chmod 0555 /opt/safe-reverser/mcp_server.py /opt/safe-reverser/static_semantic_worker.py /opt/safe-reverser/mcp_entrypoint.py /opt/safe-reverser/archive_safety.py /opt/safe-reverser/analysis_routing.py /opt/safe-reverser/peg_schema.py /opt/safe-reverser/flutter_analysis.py /opt/safe-reverser/program_understanding.py /opt/safe-reverser/program_understanding_v2.py /opt/safe-reverser/pu_source.py /opt/safe-reverser/pu_index.py /opt/safe-reverser/pu_network.py; \
+    PYTHONPATH=/opt/python-site:/opt/safe-reverser python3 -c 'import program_understanding_v2 as pu; import pu_ownership as ownership; import analysis_routing as routing; import peg_schema as peg; import flutter_analysis as flutter; import archive_safety as archive; caps=pu.capabilities(); assert caps["androguard"], caps; assert caps["code_ownership"], caps; assert ownership.load_rules().schema_version == 1; assert routing.PROFILE_REGISTRY["static-core"]["status"] == "available"; assert routing.PROFILE_REGISTRY["framework-flutter"]["status"] == "declared"; assert peg.PEG_SCHEMA_VERSION == 2; assert flutter.MAX_ASSET_COUNT == 20000; assert archive.MAX_NESTED_APKS == 128'; \
+    chmod 0444 /opt/safe-reverser/VERSION /opt/safe-reverser/ownership_rules.json; \
+    chmod 0555 /opt/safe-reverser/mcp_server.py /opt/safe-reverser/static_semantic_worker.py /opt/safe-reverser/mcp_entrypoint.py /opt/safe-reverser/archive_safety.py /opt/safe-reverser/analysis_routing.py /opt/safe-reverser/peg_schema.py /opt/safe-reverser/flutter_analysis.py /opt/safe-reverser/program_understanding.py /opt/safe-reverser/program_understanding_v2.py /opt/safe-reverser/pu_source.py /opt/safe-reverser/pu_index.py /opt/safe-reverser/pu_network.py /opt/safe-reverser/pu_ownership.py /opt/safe-reverser/pu_ownership_queries.py; \
     chmod -R a-w /opt/jadx /opt/vineflower /opt/python-site /opt/safe-reverser
 
 ENV SAFE_REVERSER_WORKSPACE=/workspace \
