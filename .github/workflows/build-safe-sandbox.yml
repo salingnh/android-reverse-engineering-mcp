@@ -54,16 +54,16 @@ jobs:
         run: python3 scripts/check_release_consistency.py
 
       - name: Test MCP worker
-        run: python3 sandbox/tests.py
+        run: PYTHONPATH=.:sandbox python3 sandbox/tests.py
 
       - name: Test framework-aware routing topology
-        run: PYTHONPATH=sandbox python3 sandbox/tests_analysis_routing.py
+        run: PYTHONPATH=.:sandbox python3 sandbox/tests_analysis_routing.py
 
       - name: Test archive safety budgets
-        run: PYTHONPATH=sandbox python3 sandbox/tests_archive_safety.py
+        run: PYTHONPATH=.:sandbox python3 sandbox/tests_archive_safety.py
 
       - name: Test Program Evidence Graph schema
-        run: PYTHONPATH=sandbox python3 sandbox/tests_peg_schema.py
+        run: PYTHONPATH=.:sandbox python3 sandbox/tests_peg_schema.py
 
       - name: Test Canonical Program Model contract
         run: PYTHONPATH=.:sandbox python3 tests_program_model_contract.py
@@ -72,13 +72,13 @@ jobs:
         run: PYTHONPATH=.:sandbox python3 sandbox/tests_program_model_provider.py
 
       - name: Test bounded Flutter artifact inspection
-        run: PYTHONPATH=sandbox python3 sandbox/tests_flutter_analysis.py
+        run: PYTHONPATH=.:sandbox python3 sandbox/tests_flutter_analysis.py
 
       - name: Test program understanding
-        run: python3 sandbox/tests_program_understanding.py
+        run: PYTHONPATH=.:sandbox python3 sandbox/tests_program_understanding.py
 
       - name: Test program understanding source scopes and cache integrity
-        run: PYTHONPATH=sandbox python3 sandbox/tests_program_understanding_scopes.py
+        run: PYTHONPATH=.:sandbox python3 sandbox/tests_program_understanding_scopes.py
 
       - name: Test static worker registration and release metadata
         env:
