@@ -14,6 +14,8 @@ MAX_PROVIDER_SCAN_ROWS = 250_000
 MAX_PROVIDER_XREFS = 20_000
 MAX_PROVIDER_QUERY_SECONDS = 5
 REPRESENTATION = "flutter-dart-aot"
+EXTERNAL_SCOPES = frozenset({"THIRD_PARTY", "PLATFORM", "GENERATED"})
+_BOUNDARY_ID_PREFIX = f"pm:v{pm.PROGRAM_MODEL_VERSION}:external_boundary:"
 _FUNCTION_SCAN_SQL = """
 SELECT f.*,
        COUNT(*) OVER (
@@ -282,7 +284,6 @@ class FlutterProgramProvider:
         class_name: str,
         name: str,
         ownership: dict[str, Any],
-        evidence_refs: tuple[str, ...],
     ) -> pm.ProgramEntity:
         scope = str(ownership.get("scope") or "UNKNOWN")
         boundary_kind = (
@@ -290,6 +291,8 @@ class FlutterProgramProvider:
             if scope == "PLATFORM"
             else "third-party-sdk"
             if scope == "THIRD_PARTY"
+            else "generated"
+            if scope == "GENERATED"
             else "external-unresolved"
         )
         target = f"{library_url}::{class_name}::{name}"
@@ -302,6 +305,16 @@ class FlutterProgramProvider:
             props["owner"] = str(ownership["owner"])
         if ownership.get("sdk"):
             props["sdk"] = str(ownership["sdk"])
+        evidence_ref = self._evidence_ref(
+            {
+                "kind": "external-boundary",
+                "target_library_url": library_url,
+                "target_class_name": class_name,
+                "target_name": name,
+                "scope": scope,
+                "boundary_kind": boundary_kind,
+            }
+        )
         item = pm.ProgramEntity(
             self.snapshot.snapshot_id,
             pm.entity_id(self.snapshot, "EXTERNAL_BOUNDARY", key),
@@ -311,7 +324,7 @@ class FlutterProgramProvider:
             REPRESENTATION,
             scope,
             props,
-            evidence_refs,
+            (evidence_ref,),
         )
         self._boundary_entities[item.entity_id] = item
         return item
@@ -370,12 +383,53 @@ class FlutterProgramProvider:
             conn.close()
         return None, None, False
 
+    def _find_boundary(
+        self,
+        identifier: str,
+    ) -> tuple[pm.ProgramEntity | None, bool]:
+        if identifier in self._boundary_entities:
+            return self._boundary_entities[identifier], False
+        started = time.monotonic()
+        conn = semantic._open_db(self.index_path)
+        try:
+            rows = conn.execute(
+                "SELECT x.*,t.id AS resolved_target_id FROM xrefs x "
+                "LEFT JOIN functions t ON t.id=x.target_id "
+                "ORDER BY x.target_library_url,x.target_class_name,x.target_name,"
+                "x.source_file,x.line,x.id LIMIT ?",
+                (MAX_PROVIDER_XREFS + 1,),
+            )
+            scanned = 0
+            for row in rows:
+                scanned += 1
+                if scanned > MAX_PROVIDER_XREFS:
+                    return None, True
+                if time.monotonic() - started > MAX_PROVIDER_QUERY_SECONDS:
+                    return None, True
+                ownership = flutter_ownership(str(row["target_library_url"]))
+                if row["resolved_target_id"] is not None and ownership["scope"] not in EXTERNAL_SCOPES:
+                    continue
+                boundary = self._boundary(
+                    library_url=str(row["target_library_url"]),
+                    class_name=str(row["target_class_name"]),
+                    name=str(row["target_name"]),
+                    ownership=ownership,
+                )
+                if boundary.entity_id == identifier:
+                    return boundary, False
+        finally:
+            conn.close()
+        return None, False
+
     def get_entity(self, entity_id: str) -> pm.ProgramEntity | None:
         app = self._application()
         if app.entity_id == entity_id:
             return app
         if entity_id in self._boundary_entities:
             return self._boundary_entities[entity_id]
+        if str(entity_id).startswith(_BOUNDARY_ID_PREFIX):
+            boundary, _ = self._find_boundary(entity_id)
+            return boundary
         kind, row, _ = self._find_entity_rows(entity_id)
         if row is None:
             return None
@@ -587,17 +641,12 @@ class FlutterProgramProvider:
             ).fetchone()
             if target_row is not None:
                 target = self._function_entity(conn, target_row)
-        if target is None or ownership["scope"] in {
-            "THIRD_PARTY",
-            "PLATFORM",
-            "GENERATED",
-        }:
+        if target is None or ownership["scope"] in EXTERNAL_SCOPES:
             target = self._boundary(
                 library_url=library_url,
                 class_name=class_name,
                 name=name,
                 ownership=ownership,
-                evidence_refs=(evidence_ref,),
             )
         return pm.ProgramRelationship(
             self.snapshot.snapshot_id,
@@ -654,10 +703,47 @@ class FlutterProgramProvider:
             accepted.append(item)
             return len(accepted) > limit
 
-        entity_kind, entity_row, scan_truncated = self._find_entity_rows(entity_id)
-        truncated = truncated or scan_truncated
+        is_boundary = str(entity_id).startswith(_BOUNDARY_ID_PREFIX)
+        entity_kind: str | None = None
+        entity_row: sqlite3.Row | None = None
+        if not is_boundary:
+            entity_kind, entity_row, scan_truncated = self._find_entity_rows(entity_id)
+            truncated = truncated or scan_truncated
+
         conn = semantic._open_db(self.index_path)
         try:
+            if is_boundary:
+                rows = conn.execute(
+                    "SELECT * FROM xrefs ORDER BY source_file,line,id LIMIT ?",
+                    (MAX_PROVIDER_XREFS + 1,),
+                )
+                scanned = 0
+                for row in rows:
+                    scanned += 1
+                    if scanned > MAX_PROVIDER_XREFS:
+                        truncated = True
+                        break
+                    if time.monotonic() - started > MAX_PROVIDER_QUERY_SECONDS:
+                        truncated = True
+                        break
+                    caller_row = conn.execute(
+                        "SELECT * FROM functions WHERE id=?",
+                        (row["caller_id"],),
+                    ).fetchone()
+                    if caller_row is None:
+                        continue
+                    relation = self._xref_relationship(
+                        conn,
+                        self._function_entity(conn, caller_row),
+                        row,
+                    )
+                    consider(relation)
+                return self._finish_page(
+                    accepted,
+                    limit=limit,
+                    truncated=truncated,
+                )
+
             if entity_id == app.entity_id and direction in {"outgoing", "both"}:
                 rows = conn.execute(
                     "SELECT * FROM libraries ORDER BY url LIMIT ?",
