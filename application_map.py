@@ -5,7 +5,7 @@ import time
 from typing import Any, Iterable
 
 import program_model as pm
-from ownership_contract import validate_ownership_scope
+from ownership_contract import ownership_scope_accepts, validate_ownership_scope
 
 APPLICATION_MAP_VERSION = 1
 DEFAULT_NODE_LIMIT = 40
@@ -98,6 +98,12 @@ def _rank_key(item: pm.ProgramEntity) -> tuple[int, str, str]:
     return (-_importance(item), item.display_name.lower(), item.entity_id)
 
 
+def _visible_in_scope(item: pm.ProgramEntity, ownership_scope: str) -> bool:
+    if ownership_scope_accepts(item.ownership, ownership_scope):
+        return True
+    return ownership_scope == "application" and item.kind == "EXTERNAL_BOUNDARY"
+
+
 def _node(item: pm.ProgramEntity) -> dict[str, Any]:
     return {
         "entity_id": item.entity_id,
@@ -163,6 +169,14 @@ def _response_candidate(
     return result
 
 
+def _set_serialized_bytes(result: dict[str, Any]) -> dict[str, Any]:
+    # The reserved value uses the maximum digit width of a valid final byte count.
+    # Two iterations make the reported count equal the serialized form.
+    for _ in range(2):
+        result["serialized_bytes"] = _payload_size(result)
+    return result
+
+
 def _fit_response(payload: dict[str, Any]) -> dict[str, Any]:
     nodes = list(payload.get("nodes") or [])
     edges = list(payload.get("edges") or [])
@@ -187,12 +201,31 @@ def _fit_response(payload: dict[str, Any]) -> dict[str, Any]:
             trimmed = True
             continue
         raise ApplicationMapError("application map minimum response exceeds size bound")
-    # The reserved value above has the maximum digit width of any valid final
-    # byte count. Two iterations make the reported count equal the serialized form.
-    for _ in range(2):
-        result["serialized_bytes"] = _payload_size(result)
+    result = _set_serialized_bytes(result)
     if _payload_size(result) > MAX_RESPONSE_BYTES:
         raise ApplicationMapError("application map final response exceeds size bound")
+    return result
+
+
+def _finalize_exact_response(payload: dict[str, Any]) -> dict[str, Any] | None:
+    """Finalize a response without dropping nodes/edges behind its continuation.
+
+    Expansion pagination must never trim an already-consumed repository page because
+    its opaque cursor identifies the last consumed canonical relationship. Callers
+    reduce the repository page size and retry instead.
+    """
+
+    result = _response_candidate(
+        payload,
+        list(payload.get("nodes") or []),
+        list(payload.get("edges") or []),
+        trimmed=False,
+    )
+    if _payload_size(result) > MAX_RESPONSE_BYTES:
+        return None
+    result = _set_serialized_bytes(result)
+    if _payload_size(result) > MAX_RESPONSE_BYTES:
+        return None
     return result
 
 
@@ -224,13 +257,16 @@ class ApplicationMapProjector:
             items.extend(page.items)
             pages += 1
             truncated = truncated or page.truncated
+            if page.has_more and len(items) >= maximum:
+                truncated = True
+                break
             if not page.has_more:
                 break
             if not page.cursor:
                 truncated = True
                 break
             cursor = page.cursor
-        if pages >= MAX_QUERY_PAGES and len(items) >= maximum:
+        if pages >= MAX_QUERY_PAGES and len(items) < maximum:
             truncated = True
         return items[:maximum], truncated
 
@@ -320,7 +356,9 @@ class ApplicationMapProjector:
                 neighbor = self.repository.get_entity(neighbor_id)
                 if neighbor is None:
                     continue
-                if neighbor.kind == "EXTERNAL_BOUNDARY":
+                if neighbor.kind == "EXTERNAL_BOUNDARY" and _visible_in_scope(
+                    neighbor, scope
+                ):
                     discovered[neighbor.entity_id] = neighbor
 
         for item in sorted(discovered.values(), key=_rank_key):
@@ -383,71 +421,96 @@ class ApplicationMapProjector:
         scope = validate_ownership_scope(ownership_scope)
         node_limit = _bounded_limit(node_limit, 40, MAX_NODE_LIMIT, "node_limit")
         edge_limit = _bounded_limit(edge_limit, 100, MAX_EDGE_LIMIT, "edge_limit")
+        if node_limit < 2:
+            raise ApplicationMapError(
+                "node_limit must be at least 2 for Application Map expansion"
+            )
         root = self.repository.get_entity(str(entity_id or ""))
         if root is None:
             raise ApplicationMapError(
                 "application map entity was not found in this Program Snapshot"
             )
-        page = self.repository.find_relationships(
-            entity_id=root.entity_id,
-            kinds=relationship_kinds,
-            direction=direction,
-            ownership_scope=scope,
-            limit=edge_limit,
-            cursor=cursor,
-        )
-        nodes: dict[str, pm.ProgramEntity] = {root.entity_id: root}
-        edges: list[pm.ProgramRelationship] = []
-        truncated = page.truncated
-        for relation in page.items:
-            if len(edges) >= edge_limit:
-                truncated = True
-                break
-            other_id = (
-                relation.target_entity_id
-                if relation.source_entity_id == root.entity_id
-                else relation.source_entity_id
+        if not _visible_in_scope(root, scope):
+            raise ApplicationMapError(
+                "application map entity is outside the requested ownership_scope"
             )
-            if other_id not in nodes:
-                if len(nodes) >= node_limit:
-                    truncated = True
-                    continue
-                item = self.repository.get_entity(other_id)
-                if item is None:
-                    continue
-                nodes[item.entity_id] = item
-            edges.append(relation)
 
-        ordered_nodes = [root] + sorted(
-            (item for key, item in nodes.items() if key != root.entity_id),
-            key=_rank_key,
-        )
-        edges.sort(key=pm.relationship_sort_key)
-        payload = {
-            "status": "ok",
-            "application_map_version": APPLICATION_MAP_VERSION,
-            "program_model_version": pm.PROGRAM_MODEL_VERSION,
-            "snapshot_id": self.repository.snapshot.snapshot_id,
-            "artifact_sha256": self.repository.snapshot.artifact_sha256,
-            "ownership_scope": scope,
-            "root_entity_id": root.entity_id,
-            "nodes": [_node(item) for item in ordered_nodes[:node_limit]],
-            "edges": [_edge(item) for item in edges[:edge_limit]],
-            "returned_nodes": min(len(ordered_nodes), node_limit),
-            "returned_edges": min(len(edges), edge_limit),
-            "has_more": page.has_more or truncated,
-            "truncated": truncated,
-            "cursor": page.cursor,
-            "projection_version": APPLICATION_MAP_VERSION,
-            "limits": {
-                "node_limit": node_limit,
-                "edge_limit": edge_limit,
-                "wall_clock_seconds": pm.MAX_QUERY_SECONDS,
-                "response_bytes": MAX_RESPONSE_BYTES,
-            },
-            "warnings": [],
-        }
-        return _fit_response(payload)
+        initial_page_limit = min(edge_limit, node_limit - 1)
+        page_limit = initial_page_limit
+        size_limited = False
+        while True:
+            page = self.repository.find_relationships(
+                entity_id=root.entity_id,
+                kinds=relationship_kinds,
+                direction=direction,
+                ownership_scope=scope,
+                limit=page_limit,
+                cursor=cursor,
+            )
+            nodes: dict[str, pm.ProgramEntity] = {root.entity_id: root}
+            edges: list[pm.ProgramRelationship] = []
+            scope_filtered = False
+            for relation in page.items:
+                other_id = (
+                    relation.target_entity_id
+                    if relation.source_entity_id == root.entity_id
+                    else relation.source_entity_id
+                )
+                if other_id not in nodes:
+                    item = self.repository.get_entity(other_id)
+                    if item is None:
+                        raise ApplicationMapError(
+                            "application map relationship references an unresolved entity"
+                        )
+                    if not _visible_in_scope(item, scope):
+                        scope_filtered = True
+                        continue
+                    nodes[item.entity_id] = item
+                edges.append(relation)
+
+            ordered_nodes = [root] + sorted(
+                (item for key, item in nodes.items() if key != root.entity_id),
+                key=_rank_key,
+            )
+            warnings: list[str] = []
+            if size_limited:
+                warnings.append("response_size_budget_reached")
+            if scope_filtered:
+                warnings.append("ownership_scope_filtered_relationships")
+            payload = {
+                "status": "ok",
+                "application_map_version": APPLICATION_MAP_VERSION,
+                "program_model_version": pm.PROGRAM_MODEL_VERSION,
+                "snapshot_id": self.repository.snapshot.snapshot_id,
+                "artifact_sha256": self.repository.snapshot.artifact_sha256,
+                "ownership_scope": scope,
+                "root_entity_id": root.entity_id,
+                "nodes": [_node(item) for item in ordered_nodes],
+                "edges": [_edge(item) for item in edges],
+                "returned_nodes": len(ordered_nodes),
+                "returned_edges": len(edges),
+                "has_more": page.has_more or page.truncated,
+                "truncated": page.truncated or size_limited,
+                "cursor": page.cursor,
+                "projection_version": APPLICATION_MAP_VERSION,
+                "limits": {
+                    "node_limit": node_limit,
+                    "edge_limit": edge_limit,
+                    "relationship_page_limit": page_limit,
+                    "wall_clock_seconds": pm.MAX_QUERY_SECONDS,
+                    "response_bytes": MAX_RESPONSE_BYTES,
+                },
+                "warnings": warnings,
+            }
+            result = _finalize_exact_response(payload)
+            if result is not None:
+                return result
+            if page_limit <= 1:
+                raise ApplicationMapError(
+                    "application map minimum expansion page exceeds size bound"
+                )
+            page_limit = max(1, page_limit // 2)
+            size_limited = True
 
 
 def descriptor() -> dict[str, Any]:
