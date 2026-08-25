@@ -35,7 +35,7 @@
   "generated_patterns": [
     "(?:^|\\.)Hilt_[A-Za-z0-9_$]+$",
     "(?:^|\\.)Dagger[A-Za-z0-9_$]+$",
-    "(?:^|\\.)[A-Za-z0-9_$]+_(?:Factory|MembersInjector|HiltModules|Impl)$",
+    "(?:^|\\.)[A-Za-z0-9_$]+_(?:Factory|MembersInjector|HiltModules)$",
     "(?:^|\\.)DataBinderMapperImpl$",
     "(?:^|\\.)BR$",
     "(?:^|\\.)BuildConfig$",
