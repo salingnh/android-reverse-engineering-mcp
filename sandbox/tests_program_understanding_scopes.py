@@ -44,6 +44,17 @@ public class Hilt_MainActivity {
 }
 '''
 
+MIXED_SOURCE = '''package com.example;
+class Hilt_MixedApi {
+  @POST("/generated/mixed")
+  public void generatedCall() {}
+}
+class RealMixedApi {
+  @POST("/v1/mixed")
+  public void businessCall() {}
+}
+'''
+
 MANIFEST = '''<?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.example">
   <application android:name=".App">
@@ -74,6 +85,7 @@ class ProgramUnderstandingScopeTests(unittest.TestCase):
         )
         (source / "Api.java").write_text(SOURCE, encoding="utf-8")
         (source / "Hilt_MainActivity.java").write_text(GENERATED_SOURCE, encoding="utf-8")
+        (source / "MixedApi.java").write_text(MIXED_SOURCE, encoding="utf-8")
         (vendor / "FirebaseApi.java").write_text(VENDOR_SOURCE, encoding="utf-8")
         (resources / "AndroidManifest.xml").write_text(MANIFEST, encoding="utf-8")
         return tmp, workspace, job, artifact
@@ -157,6 +169,43 @@ class ProgramUnderstandingScopeTests(unittest.TestCase):
                     for item in vendor["retrofit_endpoints"]
                 )
             )
+        finally:
+            tmp.cleanup()
+
+    def test_mixed_source_file_filters_per_lexical_owner(self):
+        tmp, workspace, job, _ = self.make_job()
+        try:
+            pu.build_program_index(job, workspace, force=True)
+
+            api = pu.extract_api(job)
+            api_paths = {item["path"] for item in api["retrofit_endpoints"]}
+            self.assertIn("/v1/mixed", api_paths)
+            self.assertNotIn("/generated/mixed", api_paths)
+            mixed_api = next(
+                item for item in api["retrofit_endpoints"] if item["path"] == "/v1/mixed"
+            )
+            self.assertEqual(mixed_api["declaring_class"], "com.example.RealMixedApi")
+            self.assertEqual(mixed_api["ownership"]["scope"], "FIRST_PARTY")
+            self.assertGreater(api["evidence_items_skipped_by_scope"], 0)
+
+            network = pu.extract_network_model(job, workspace)
+            network_paths = {item["path"] for item in network["endpoints"]}
+            self.assertIn("/v1/mixed", network_paths)
+            self.assertNotIn("/generated/mixed", network_paths)
+            mixed_network = next(
+                item for item in network["endpoints"] if item["path"] == "/v1/mixed"
+            )
+            self.assertEqual(
+                mixed_network["declaring_class"], "com.example.RealMixedApi"
+            )
+            self.assertEqual(mixed_network["ownership"]["scope"], "FIRST_PARTY")
+
+            generated_api = pu.extract_api(job, scope="generated")
+            generated_paths = {
+                item["path"] for item in generated_api["retrofit_endpoints"]
+            }
+            self.assertIn("/generated/mixed", generated_paths)
+            self.assertNotIn("/v1/mixed", generated_paths)
         finally:
             tmp.cleanup()
 
