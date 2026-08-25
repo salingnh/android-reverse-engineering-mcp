@@ -9,7 +9,9 @@ from .runtime import ContainerRuntime, VerifiedImage
 
 PROTOCOL_VERSION = "2025-06-18"
 MAX_MCP_RESPONSE_BYTES = 2 * 1024 * 1024
-INTERNAL_MCP_OPERATIONS = frozenset({"health"})
+INTERNAL_MCP_OPERATIONS = frozenset(
+    {"health", "get_application_map", "expand_application_node"}
+)
 
 
 class WorkerProtocolError(RuntimeError):
