@@ -17,7 +17,7 @@ SEMVER_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
 CAPABILITY_API = 1
 WORKER_ABI = 1
 EVIDENCE_ENVELOPE = 1
-FLUTTER_CACHE_SCHEMA = 2
+FLUTTER_CACHE_SCHEMA = 3
 RESERVED_PUBLIC_OPERATIONS = {"health", "list_capabilities"}
 
 # A release can require a baseline subset without making it the forever-complete
@@ -255,7 +255,8 @@ image_checks = {
         'io.safe-reverser.capability.id="framework-flutter"',
         'io.safe-reverser.capability.api="1"',
         'io.safe-reverser.worker.abi="1"',
-        'io.safe-reverser.runtime-cache.schema="2"',
+        'io.safe-reverser.runtime-cache.schema="3"',
+        'io.safe-reverser.dart.os="${TARGET_OS}"',
     ],
 }
 for path, fragments in image_checks.items():

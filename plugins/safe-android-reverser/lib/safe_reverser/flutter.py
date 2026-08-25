@@ -7,11 +7,19 @@ from .contracts import CapabilityManifest
 from .jobs import AnalysisJobStore, JobStoreError
 from .paths import PathPolicyError, remove_direct_child, secure_child
 from .runtime import ContainerRuntime, RuntimeErrorSafe, VerifiedImage
+from .runtime_cache import (
+    RuntimeCacheError,
+    RuntimeCacheResolver,
+    RuntimeCacheResolution,
+    RuntimeCacheState,
+    RUNTIME_CACHE_STATE_SCHEMA,
+    RuntimeIdentity,
+)
 
 MAX_QUERY_TEXT = 512
 MAX_SYMBOL_TEXT = 1024
 MAX_QUERY_LIMIT = 200
-RUNTIME_CACHE_SCHEMA = 2
+RUNTIME_CACHE_SCHEMA = 3
 COMMIT_CHARS = set("0123456789abcdef")
 SNAPSHOT_CHARS = COMMIT_CHARS
 
@@ -60,6 +68,7 @@ class FlutterCapability:
         version: str,
         project_dir: Path,
         data_dir: Path,
+        runtime_cache_resolver: RuntimeCacheResolver | None = None,
         output_tmpfs: str = "4g",
     ) -> None:
         self.runtime = runtime
@@ -73,6 +82,9 @@ class FlutterCapability:
             f"/output:rw,nosuid,nodev,size={self.output_tmpfs}"
         )
         self.jobs = AnalysisJobStore(self.data_dir, manifest.capability_id)
+        self.runtime_cache_resolver = runtime_cache_resolver or RuntimeCacheResolver(
+            runtime, data_root=self.data_dir
+        )
         self._verified_base: VerifiedImage | None = None
         self._base_probe: dict[str, Any] | None = None
 
@@ -123,6 +135,15 @@ class FlutterCapability:
 
     def diagnostics(self) -> dict[str, Any]:
         return self._probe_base_worker()
+
+    def runtime_cache_diagnostics(self) -> dict[str, Any]:
+        return {
+            "state_model": [state.value for state in RuntimeCacheState],
+            "controlled_build_available": (
+                self.runtime_cache_resolver.provider is not None
+            ),
+            "persistent_state_schema": RUNTIME_CACHE_STATE_SCHEMA,
+        }
 
     def status(self) -> dict[str, Any]:
         try:
@@ -242,29 +263,33 @@ class FlutterCapability:
         image = f"{self.manifest.image_repository}:{tag}"
         return image, runtime, blutter_commit
 
-    def _ensure_runtime_ready(
+    def _resolve_runtime_cache(
         self, image: str, runtime: dict[str, Any], blutter_commit: str
-    ) -> tuple[VerifiedImage | None, str]:
-        required = {
-            "io.safe-reverser.capability.id": self.manifest.capability_id,
-            "io.safe-reverser.capability.api": str(self.manifest.capability_api),
-            "io.safe-reverser.worker.abi": str(self.manifest.worker_abi),
-            "io.safe-reverser.runtime-cache.schema": str(RUNTIME_CACHE_SCHEMA),
-            "io.safe-reverser.blutter.commit": blutter_commit,
-            "io.safe-reverser.dart.version": str(runtime.get("dart_version") or ""),
-            "io.safe-reverser.dart.snapshot": str(
-                runtime.get("snapshot_hash") or ""
-            ),
-            "io.safe-reverser.dart.arch": "arm64",
-            "io.safe-reverser.dart.compressed-pointers": (
-                "true" if bool(runtime.get("compressed_pointers")) else "false"
-            ),
-        }
+    ) -> RuntimeCacheResolution:
+        if type(runtime.get("compressed_pointers")) is not bool:
+            raise FlutterCapabilityError(
+                "Flutter compressed-pointers identity must be boolean"
+            )
         try:
-            verified = self.runtime.ensure_image(image, required_labels=required)
-        except RuntimeErrorSafe as exc:
-            return None, str(exc)
-        return verified, "ready"
+            identity = RuntimeIdentity(
+                dart_version=str(runtime.get("dart_version") or ""),
+                snapshot_hash=str(runtime.get("snapshot_hash") or "").lower(),
+                arch=str(runtime.get("arch") or "").lower(),
+                os=str(runtime.get("os") or "").lower(),
+                compressed_pointers=runtime["compressed_pointers"],
+                blutter_commit=blutter_commit,
+                runtime_cache_schema=RUNTIME_CACHE_SCHEMA,
+                capability_api=self.manifest.capability_api,
+                worker_abi=self.manifest.worker_abi,
+            )
+            expected_image = f"{self.manifest.image_repository}:{identity.cache_tag}"
+            if image != expected_image:
+                raise RuntimeCacheError(
+                    "worker runtime-cache tag does not match exact host identity"
+                )
+            return self.runtime_cache_resolver.resolve(identity, image)
+        except RuntimeCacheError as exc:
+            raise FlutterCapabilityError(str(exc)) from exc
 
     def _execute(self, job: Path, image: str, timeout: int) -> dict[str, Any]:
         input_dir = job / "input"
@@ -349,27 +374,38 @@ class FlutterCapability:
                     ),
                 }
             image, runtime, blutter_commit = self._runtime_image(prepared)
-            verified_runtime, reason = self._ensure_runtime_ready(
+            resolution = self._resolve_runtime_cache(
                 image, runtime, blutter_commit
             )
-            if verified_runtime is None:
-                meta["status"] = "runtime_cache_unavailable"
+            if resolution.state is not RuntimeCacheState.READY:
+                status = {
+                    RuntimeCacheState.BUILD_REQUIRED: "runtime_cache_build_required",
+                    RuntimeCacheState.BUILDING: "runtime_cache_building",
+                    RuntimeCacheState.FAILED: "runtime_cache_failed",
+                }[resolution.state]
+                semantic_status = resolution.public_status()
+                meta["status"] = status
                 meta["runtime_image"] = image
-                meta["runtime_cache_reason"] = reason[-4000:]
+                meta["runtime_cache"] = semantic_status
                 self.jobs.write(job, meta)
                 return {
                     "job_id": job_id,
-                    "status": "runtime_cache_unavailable",
+                    "status": status,
                     "executed": False,
                     "runtime": runtime,
                     "runtime_image": image,
                     "cache_tag": runtime.get("cache_tag"),
-                    "reason": reason[-4000:],
+                    "runtime_cache": semantic_status,
                     "next_action": (
-                        "build/publish the exact runtime cache through the controlled "
-                        "GitHub workflow; analysis stays offline"
+                        "retry analysis after the exact controlled runtime cache "
+                        "reaches READY; analyzer workers remain offline"
                     ),
                 }
+            verified_runtime = resolution.image
+            if verified_runtime is None:
+                raise FlutterCapabilityError(
+                    "READY runtime-cache resolution omitted immutable image evidence"
+                )
             runtime_image_id = _immutable_ref(verified_runtime, image)
             result = self._execute(job, runtime_image_id, timeout)
             meta["runtime_image"] = image

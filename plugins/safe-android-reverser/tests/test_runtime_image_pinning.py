@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 LIB_ROOT = PLUGIN_ROOT / "lib"
@@ -51,6 +53,7 @@ class FakeWorkerRuntime:
 
     def run_container(self, *, image, stdin_lines, **_kwargs):
         self.images.append(image)
+        self.last_worker_env = dict(_kwargs.get("env") or {})
         request = stdin_lines[-1]
         request_id = request["id"]
         if request["method"] == "tools/list":
@@ -93,6 +96,7 @@ class FakeFlutterRuntime:
 
     def run_container(self, *, image, **_kwargs):
         self.images.append(image)
+        self.last_worker_env = _kwargs.get("env")
         return RunResult(
             exit_code=0,
             timed_out=False,
@@ -164,6 +168,55 @@ class RuntimeImagePinningTests(unittest.TestCase):
             result = capability._prepare(job, "app.apk")
         self.assertEqual(result["status"], "unsupported")
         self.assertEqual(runtime.images, ["sha256:" + "c" * 64])
+
+    def test_builder_credentials_are_absent_from_worker_environments(self) -> None:
+        secret = "stage-a-builder-secret"
+        private_attempt = "8" * 32
+        static_manifest = self.registry.get("static-core")
+        static_runtime = FakeWorkerRuntime(static_manifest)
+        flutter_manifest = self.registry.get("framework-flutter")
+        flutter_runtime = FakeFlutterRuntime(flutter_manifest)
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ,
+            {
+                "SAFE_REVERSER_CONTROLLED_BUILD_TOKEN": secret,
+                "GITHUB_TOKEN": secret,
+                "GH_TOKEN": secret,
+                "SAFE_REVERSER_PRIVATE_BUILD_ATTEMPT": private_attempt,
+            },
+            clear=False,
+        ):
+            root = Path(tmp)
+            project = root / "project"
+            data = root / "data"
+            job = root / "job"
+            project.mkdir()
+            data.mkdir()
+            job.mkdir()
+            worker = McpContainerWorker(
+                static_runtime,
+                static_manifest,
+                image="example.invalid/static:test",
+                project_dir=project,
+                data_dir=data,
+                version="0.3.0",
+            )
+            worker.tools()
+            flutter = FlutterCapability(
+                flutter_runtime,
+                flutter_manifest,
+                version="0.3.0",
+                project_dir=project,
+                data_dir=data,
+            )
+            flutter.base_image = "example.invalid/flutter:test"
+            flutter._prepare(job, "fixture.apk")
+
+        serialized = json.dumps(static_runtime.last_worker_env)
+        self.assertNotIn(secret, serialized)
+        self.assertNotIn(private_attempt, serialized)
+        self.assertNotIn("TOKEN", serialized)
+        self.assertIsNone(flutter_runtime.last_worker_env)
 
 
 if __name__ == "__main__":

@@ -87,7 +87,10 @@ Required behavior:
 
 - exact cache lookup and immutable provenance verification;
 - provider-independent build request/status abstraction;
-- deduplicate concurrent requests for one identity;
+- a deterministic request identity for the exact cache plus a distinct,
+  persisted, private provider-neutral identity for each genuine build attempt;
+- reconcile only the current attempt, never a historical retry, and deduplicate
+  concurrent requests for one identity across threads and processes;
 - timeout/failure/resume behavior;
 - never put builder credentials in worker environment, job metadata, MCP result or evidence;
 - analysis workers remain offline and never build/download runtime dependencies.

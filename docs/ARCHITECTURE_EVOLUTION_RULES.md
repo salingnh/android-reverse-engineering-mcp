@@ -208,6 +208,13 @@ prebuilt cache service
 
 Runtime identity, state transitions, provenance verification, deduplication, and immutable image semantics remain provider-independent.
 
+The deterministic request identity names one exact runtime cache and remains
+stable across retries. Each controlled build retry has a distinct, private,
+provider-neutral build-attempt identity with persisted time bounds. Providers
+translate that attempt metadata into their own run model so reconciliation can
+select the current attempt instead of a historical run. Build-attempt and
+provider-handle details are never part of the public MCP contract.
+
 Analysis workers remain offline. A cache miss must never justify network/build privileges inside an untrusted analysis worker.
 
 ## 8. Code ownership rule

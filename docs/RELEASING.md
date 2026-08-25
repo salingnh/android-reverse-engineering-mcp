@@ -146,7 +146,7 @@ A green run from an earlier branch head is not sufficient.
 
 ### 4. Verify controlled exact Flutter runtime-cache build
 
-Before production 0.3.0 release, verify at least one controlled exact-runtime cache build end-to-end:
+Before a production release that changes runtime-cache resolution, verify at least one controlled exact-runtime cache build end-to-end:
 
 - deterministic cache tag;
 - Dart version/snapshot/arch/OS/compressed-pointer identity;
@@ -158,6 +158,10 @@ Before production 0.3.0 release, verify at least one controlled exact-runtime ca
 - immutable image execution readiness.
 
 This does not require building every possible Dart runtime before release; cache misses remain an explicit supported state.
+
+From Flutter cache schema 3 onward, the controlled build request contains the provider-independent runtime identity and every exact identity field. The stable request identity identifies the cache; a separate private attempt identity identifies only the current bounded build attempt. Workflow run names carry both identities so reconciliation cannot attach a retry to a historical run, while concurrency by stable request identity remains defense-in-depth rather than an idempotency claim. Provider workflow/run identifiers, attempt identity and authoritative creation metadata remain private. A successful workflow run is insufficient until Runtime Driver verifies the published labels, source revision, and immutable image ID.
+
+Schema-2 cache images are not retagged or overwritten. Rebuild the same compatible Dart runtime under schema 3 so the OS label and new deterministic identity are present.
 
 ### 5. Tag the exact tested release commit
 

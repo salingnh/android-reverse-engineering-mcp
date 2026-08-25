@@ -7,6 +7,7 @@ ARG BLUTTER_COMMIT=4a60ac648bf448c5a7596437243bcd0b9376fdf0
 ARG DART_VERSION
 ARG SNAPSHOT_HASH
 ARG TARGET_ARCH=arm64
+ARG TARGET_OS=android
 ARG COMPRESSED_POINTERS=true
 
 RUN apt-get update \
@@ -47,6 +48,7 @@ ARG BLUTTER_COMMIT=4a60ac648bf448c5a7596437243bcd0b9376fdf0
 ARG DART_VERSION
 ARG SNAPSHOT_HASH
 ARG TARGET_ARCH=arm64
+ARG TARGET_OS=android
 ARG COMPRESSED_POINTERS=true
 
 LABEL org.opencontainers.image.title="safe-android-reverser-flutter-runtime" \
@@ -57,11 +59,12 @@ LABEL org.opencontainers.image.title="safe-android-reverser-flutter-runtime" \
       io.safe-reverser.capability.id="framework-flutter" \
       io.safe-reverser.capability.api="1" \
       io.safe-reverser.worker.abi="1" \
-      io.safe-reverser.runtime-cache.schema="2" \
+      io.safe-reverser.runtime-cache.schema="3" \
       io.safe-reverser.blutter.commit="${BLUTTER_COMMIT}" \
       io.safe-reverser.dart.version="${DART_VERSION}" \
       io.safe-reverser.dart.snapshot="${SNAPSHOT_HASH}" \
       io.safe-reverser.dart.arch="${TARGET_ARCH}" \
+      io.safe-reverser.dart.os="${TARGET_OS}" \
       io.safe-reverser.dart.compressed-pointers="${COMPRESSED_POINTERS}"
 
 RUN apt-get update \

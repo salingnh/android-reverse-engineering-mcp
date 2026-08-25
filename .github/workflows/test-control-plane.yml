@@ -48,6 +48,12 @@ jobs:
       - name: Test immutable worker image pinning
         run: PYTHONPATH=plugins/safe-android-reverser/lib python3 plugins/safe-android-reverser/tests/test_runtime_image_pinning.py
 
+      - name: Test runtime-cache resolver state and concurrency
+        run: PYTHONPATH=plugins/safe-android-reverser/lib python3 plugins/safe-android-reverser/tests/test_runtime_cache_resolver.py
+
+      - name: Test controlled-build provider boundary
+        run: PYTHONPATH=plugins/safe-android-reverser/lib python3 plugins/safe-android-reverser/tests/test_controlled_build_provider.py
+
       - name: Test shared platform resource bounds
         run: PYTHONPATH=plugins/safe-android-reverser/lib python3 plugins/safe-android-reverser/tests/test_platform_bounds.py
 
@@ -63,6 +69,8 @@ jobs:
             plugins/safe-android-reverser/lib/safe_reverser/evidence.py \
             plugins/safe-android-reverser/lib/safe_reverser/paths.py \
             plugins/safe-android-reverser/lib/safe_reverser/runtime.py \
+            plugins/safe-android-reverser/lib/safe_reverser/runtime_cache.py \
+            plugins/safe-android-reverser/lib/safe_reverser/controlled_build.py \
             plugins/safe-android-reverser/lib/safe_reverser/registry.py \
             plugins/safe-android-reverser/lib/safe_reverser/jobs.py \
             plugins/safe-android-reverser/lib/safe_reverser/worker.py \
@@ -75,6 +83,8 @@ jobs:
             plugins/safe-android-reverser/tests/test_public_operation_contract.py \
             plugins/safe-android-reverser/tests/test_cross_worker_contracts.py \
             plugins/safe-android-reverser/tests/test_runtime_image_pinning.py \
+            plugins/safe-android-reverser/tests/test_runtime_cache_resolver.py \
+            plugins/safe-android-reverser/tests/test_controlled_build_provider.py \
             plugins/safe-android-reverser/tests/test_platform_bounds.py
 
       - name: Validate single public MCP manifest
@@ -231,7 +241,7 @@ jobs:
           diagnostics = health['capabilities']['diagnostics']
           assert baseline.issubset(diagnostics), diagnostics
           assert diagnostics['static-core']['capability_worker']['id'] == 'static-core', diagnostics
-          assert diagnostics['framework-flutter']['runtime_cache_schema'] == 2, diagnostics
+          assert diagnostics['framework-flutter']['runtime_cache_schema'] == 3, diagnostics
           flutter_worker = diagnostics['framework-flutter']['worker']
           assert flutter_worker['status'] == 'ok', flutter_worker
           assert flutter_worker['network_required_at_runtime'] is False, flutter_worker
