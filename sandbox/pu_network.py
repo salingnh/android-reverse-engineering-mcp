@@ -105,14 +105,22 @@ def extract_network_model(
             if not value:
                 continue
             package, default_class = source_meta(value, path)
-            source_class = _fqn(package, default_class)
-            source_allowed, _source_ownership = _allowed(classifier, source_class, scope)
-            if not source_allowed:
+            scopes = class_scopes(value, default_class)
+            source_classes = {
+                _fqn(package, str(item.get("class_name") or ""))
+                for item in scopes
+                if item.get("class_name")
+            }
+            if not source_classes and default_class:
+                source_classes.add(_fqn(package, default_class))
+            if source_classes and not any(
+                _allowed(classifier, class_name, scope)[0]
+                for class_name in source_classes
+            ):
                 skipped_by_scope += 1
                 continue
             scanned += 1
             relative = str(path.relative_to(job))
-            scopes = class_scopes(value, default_class)
             items = declarations(value, default_class)
             method_ranges = ranges(items, len(value.splitlines()), scopes)
             lines = value.splitlines()
@@ -211,7 +219,7 @@ def extract_network_model(
         "notes": [
             "Endpoint callers require unique class+method(+arity) resolution; ambiguous methods are never silently unioned.",
             "Source evidence is attributed to lexical top-level/nested class scopes; nested JVM names use Outer$Inner.",
-            "Default application scope scans FIRST_PARTY and UNKNOWN source only; definite SDK/platform/generated internals require explicit scope expansion.",
+            "Default application scope scans FIRST_PARTY and UNKNOWN lexical classes only; a mixed decompiler file is retained whenever at least one class is eligible.",
             "Ownership classification is evidence-based; short/obfuscated namespaces remain UNKNOWN unless stronger evidence exists.",
             "Simple-class fallback uses literal suffix matching rather than SQL wildcard matching.",
             "Cross-split XREFs use one Androguard Analysis graph when available.",
