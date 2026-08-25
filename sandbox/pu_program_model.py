@@ -16,6 +16,8 @@ MAX_PROVIDER_SCAN_METHODS = 200_000
 MAX_PROVIDER_SCAN_EDGES = 20_000
 MAX_PROVIDER_QUERY_SECONDS = 5
 REPRESENTATION = "dex"
+EXTERNAL_SCOPES = frozenset({"THIRD_PARTY", "PLATFORM", "GENERATED"})
+_BOUNDARY_ID_PREFIX = f"pm:v{pm.PROGRAM_MODEL_VERSION}:external_boundary:"
 
 
 def _normalize_private_method_id(value: str) -> tuple[str, str, str] | None:
@@ -227,6 +229,14 @@ class DexProgramProvider:
             props["owner"] = str(owner)
         if sdk:
             props["sdk"] = str(sdk)
+        evidence_ref = self._evidence_ref(
+            {
+                "kind": "external-boundary",
+                "target": target.semantic_key,
+                "scope": scope,
+                "boundary_kind": boundary_kind,
+            }
+        )
         item = pm.ProgramEntity(
             self.snapshot.snapshot_id,
             pm.entity_id(self.snapshot, "EXTERNAL_BOUNDARY", key),
@@ -236,7 +246,7 @@ class DexProgramProvider:
             REPRESENTATION,
             scope,
             props,
-            target.evidence_refs,
+            (evidence_ref,),
         )
         self._boundary_entities[item.entity_id] = item
         return item
@@ -288,6 +298,86 @@ class DexProgramProvider:
                 return str(row["class"]), False
         return None, False
 
+    def _edge_entities(
+        self,
+        conn: sqlite3.Connection,
+        row: sqlite3.Row,
+        cache: dict[str, pm.ProgramEntity | None],
+    ) -> tuple[pm.ProgramEntity | None, pm.ProgramEntity | None]:
+        def resolve(private_id: str) -> pm.ProgramEntity | None:
+            if private_id in cache:
+                return cache[private_id]
+            method_row = conn.execute(
+                "SELECT * FROM methods WHERE id=?",
+                (private_id,),
+            ).fetchone()
+            item = (
+                self._function_entity(method_row)
+                if method_row is not None
+                else self._synthetic_function(private_id)
+            )
+            cache[private_id] = item
+            return item
+
+        return resolve(str(row["caller"])), resolve(str(row["callee"]))
+
+    def _scan_call_relationships(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        started: float,
+        private_id: str | None = None,
+    ) -> tuple[list[pm.ProgramRelationship], bool]:
+        if private_id is None:
+            rows = conn.execute(
+                "SELECT * FROM call_edges "
+                "ORDER BY kind,caller,callee,offset LIMIT ?",
+                (MAX_PROVIDER_SCAN_EDGES + 1,),
+            )
+        else:
+            rows = conn.execute(
+                "SELECT * FROM call_edges WHERE caller=? OR callee=? "
+                "ORDER BY kind,caller,callee,offset LIMIT ?",
+                (private_id, private_id, MAX_PROVIDER_SCAN_EDGES + 1),
+            )
+        cache: dict[str, pm.ProgramEntity | None] = {}
+        result: list[pm.ProgramRelationship] = []
+        scanned = 0
+        truncated = False
+        for row in rows:
+            scanned += 1
+            if scanned > MAX_PROVIDER_SCAN_EDGES:
+                truncated = True
+                break
+            if time.monotonic() - started > MAX_PROVIDER_QUERY_SECONDS:
+                truncated = True
+                break
+            caller, callee = self._edge_entities(conn, row, cache)
+            if caller is None or callee is None:
+                continue
+            result.append(
+                self._call_relationship(
+                    caller,
+                    callee,
+                    offset=int(row["offset"]),
+                    edge_kind=str(row["kind"]),
+                )
+            )
+        return result, truncated
+
+    def _find_boundary(
+        self,
+        conn: sqlite3.Connection,
+        identifier: str,
+    ) -> tuple[pm.ProgramEntity | None, bool]:
+        if identifier in self._boundary_entities:
+            return self._boundary_entities[identifier], False
+        _, truncated = self._scan_call_relationships(
+            conn,
+            started=time.monotonic(),
+        )
+        return self._boundary_entities.get(identifier), truncated
+
     def get_entity(self, entity_id: str) -> pm.ProgramEntity | None:
         app = self._application()
         if app.entity_id == entity_id:
@@ -295,6 +385,9 @@ class DexProgramProvider:
         if entity_id in self._boundary_entities:
             return self._boundary_entities[entity_id]
         with pu_index.connect(self.job) as conn:
+            if str(entity_id).startswith(_BOUNDARY_ID_PREFIX):
+                boundary, _ = self._find_boundary(conn, entity_id)
+                return boundary
             row, _ = self._find_function_row(conn, entity_id)
             if row is not None:
                 return self._function_entity(row)
@@ -323,6 +416,13 @@ class DexProgramProvider:
             has_more=has_more,
             truncated=truncated,
         )
+
+    @staticmethod
+    def _kind_may_follow(
+        kind: str,
+        after: tuple[str, str, str, str] | None,
+    ) -> bool:
+        return after is None or kind >= after[0]
 
     def query_entities(
         self,
@@ -360,12 +460,14 @@ class DexProgramProvider:
             accepted.append(item)
             return len(accepted) > limit
 
-        if kind in {None, "APPLICATION"}:
+        if kind in {None, "APPLICATION"} and self._kind_may_follow(
+            "APPLICATION", after
+        ):
             if consider(self._application()):
                 return self._finish_page(accepted, limit=limit, truncated=False)
 
         with pu_index.connect(self.job) as conn:
-            if kind in {None, "CLASS"}:
+            if kind in {None, "CLASS"} and self._kind_may_follow("CLASS", after):
                 rows = conn.execute(
                     "SELECT class,MAX(external) external FROM methods "
                     "GROUP BY class ORDER BY class LIMIT ?",
@@ -392,7 +494,9 @@ class DexProgramProvider:
                             truncated=truncated,
                         )
 
-            if kind in {None, "FUNCTION"}:
+            if kind in {None, "FUNCTION"} and self._kind_may_follow(
+                "FUNCTION", after
+            ):
                 rows = conn.execute(
                     "SELECT * FROM methods ORDER BY class,name,descriptor,id LIMIT ?",
                     (MAX_PROVIDER_SCAN_METHODS + 1,),
@@ -458,10 +562,9 @@ class DexProgramProvider:
             external=callee.properties.get("implementation") == "external",
         )
         app_scopes = {"FIRST_PARTY", "UNKNOWN"}
-        external_scopes = {"THIRD_PARTY", "PLATFORM", "GENERATED"}
-        crossing = caller.ownership in app_scopes and callee.ownership in external_scopes
+        crossing = caller.ownership in app_scopes and callee.ownership in EXTERNAL_SCOPES
         reverse_crossing = (
-            callee.ownership in app_scopes and caller.ownership in external_scopes
+            callee.ownership in app_scopes and caller.ownership in EXTERNAL_SCOPES
         )
         evidence_ref = self._evidence_ref(
             {
@@ -551,6 +654,21 @@ class DexProgramProvider:
             return len(accepted) > limit
 
         with pu_index.connect(self.job) as conn:
+            if str(entity_id).startswith(_BOUNDARY_ID_PREFIX):
+                relations, edge_truncated = self._scan_call_relationships(
+                    conn,
+                    started=started,
+                )
+                truncated = truncated or edge_truncated
+                for relation in relations:
+                    consider(relation)
+                accepted.sort(key=pm.relationship_sort_key)
+                return self._finish_page(
+                    accepted,
+                    limit=limit,
+                    truncated=truncated,
+                )
+
             function_row, function_scan_truncated = self._find_function_row(
                 conn,
                 entity_id,
@@ -622,50 +740,14 @@ class DexProgramProvider:
                 class_entity = self._class_entity(str(function_row["class"]))
                 if direction in {"incoming", "both"}:
                     consider(self._declares(class_entity, function))
-                private_id = str(function_row["id"])
-                rows = conn.execute(
-                    "SELECT * FROM call_edges "
-                    "WHERE caller=? OR callee=? "
-                    "ORDER BY kind,caller,callee,offset LIMIT ?",
-                    (private_id, private_id, MAX_PROVIDER_SCAN_EDGES + 1),
+                relations, edge_truncated = self._scan_call_relationships(
+                    conn,
+                    started=started,
+                    private_id=str(function_row["id"]),
                 )
-                scanned = 0
-                for row in rows:
-                    scanned += 1
-                    if scanned > MAX_PROVIDER_SCAN_EDGES:
-                        truncated = True
-                        break
-                    if time.monotonic() - started > MAX_PROVIDER_QUERY_SECONDS:
-                        truncated = True
-                        break
-                    caller_row = conn.execute(
-                        "SELECT * FROM methods WHERE id=?",
-                        (row["caller"],),
-                    ).fetchone()
-                    callee_row = conn.execute(
-                        "SELECT * FROM methods WHERE id=?",
-                        (row["callee"],),
-                    ).fetchone()
-                    caller = (
-                        self._function_entity(caller_row)
-                        if caller_row is not None
-                        else self._synthetic_function(str(row["caller"]))
-                    )
-                    callee = (
-                        self._function_entity(callee_row)
-                        if callee_row is not None
-                        else self._synthetic_function(str(row["callee"]))
-                    )
-                    if caller is None or callee is None:
-                        continue
-                    relation = self._call_relationship(
-                        caller,
-                        callee,
-                        offset=int(row["offset"]),
-                        edge_kind=str(row["kind"]),
-                    )
-                    if consider(relation):
-                        break
+                truncated = truncated or edge_truncated
+                for relation in relations:
+                    consider(relation)
 
         accepted.sort(key=pm.relationship_sort_key)
         return self._finish_page(accepted, limit=limit, truncated=truncated)
