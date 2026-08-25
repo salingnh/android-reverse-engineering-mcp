@@ -27,6 +27,15 @@ OWNERSHIP_QUERY_SCOPES = [
     "generated",
     "unknown",
 ]
+_SCOPE_PROPERTY = {
+    "type": "string",
+    "enum": OWNERSHIP_QUERY_SCOPES,
+    "default": "application",
+    "description": (
+        "Ownership scope. application includes FIRST_PARTY and UNKNOWN, suppresses definite "
+        "third-party/platform/generated internals, and retains direct SDK boundary XREFs."
+    ),
+}
 
 
 @contextmanager
@@ -170,6 +179,7 @@ def health(args):
         "symbols": True,
         "xrefs": True,
         "cfg": caps["androguard"],
+        "api_inventory": True,
         "network_model": True,
         "code_ownership": bool(caps.get("code_ownership")),
         "ownership_model_version": caps.get("ownership_model_version"),
@@ -197,6 +207,17 @@ def health(args):
         }
     }
     return result
+
+
+def extract_api(args):
+    job = core._job_dir(str(args.get("job_id", "")))
+    return _pu_call(
+        pu.extract_api,
+        job,
+        scope=str(args.get("scope", "application")),
+        max_items=int(args.get("max_items", 500)),
+        timeout_seconds=_timeout(args, 600),
+    )
 
 
 def build_program_index(args):
@@ -288,6 +309,7 @@ core.TOOL_HANDLERS.update(
         "inspect_flutter": inspect_flutter,
         "identify_dart_runtime": identify_dart_runtime,
         "extract_flutter_assets": extract_flutter_assets,
+        "extract_api": extract_api,
         "build_program_index": build_program_index,
         "find_symbols": find_symbols,
         "find_xrefs": find_xrefs,
@@ -303,17 +325,19 @@ for tool in core.TOOLS:
             "Fingerprint an APK/bundle, detect framework/tooling signals, and return an explicit "
             "framework-aware analysis route so non-Java business logic is not silently treated as JADX input."
         )
-        break
-
-_SCOPE_PROPERTY = {
-    "type": "string",
-    "enum": OWNERSHIP_QUERY_SCOPES,
-    "default": "application",
-    "description": (
-        "Ownership scope. application includes FIRST_PARTY and UNKNOWN, suppresses definite "
-        "third-party/platform/generated internals, and retains direct SDK boundary XREFs."
-    ),
-}
+    elif tool.get("name") == "extract_api":
+        tool["description"] = (
+            "Extract an ownership-scoped lexical API inventory from a decompile job. "
+            "Application scope suppresses definite SDK/platform/generated source internals by default."
+        )
+        properties = tool["inputSchema"]["properties"]
+        properties["scope"] = dict(_SCOPE_PROPERTY)
+        properties["timeout_seconds"] = {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 3600,
+            "default": 600,
+        }
 
 core.TOOLS.extend(
     [
