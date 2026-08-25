@@ -52,6 +52,7 @@ RUN apt-get update \
 COPY --from=blutter-source /opt/blutter /opt/blutter
 COPY ownership_contract.py /opt/safe-flutter/ownership_contract.py
 COPY program_model.py /opt/safe-flutter/program_model.py
+COPY application_map.py /opt/safe-flutter/application_map.py
 COPY sandbox/peg_schema.py /opt/safe-flutter/peg_schema.py
 COPY frameworks/flutter/cache_identity.py /opt/safe-flutter/cache_identity.py
 COPY frameworks/flutter/safe_blutter_adapter.py /opt/safe-flutter/safe_blutter_adapter.py
@@ -71,6 +72,7 @@ RUN set -eux; \
     python3 -m py_compile \
       /opt/safe-flutter/ownership_contract.py \
       /opt/safe-flutter/program_model.py \
+      /opt/safe-flutter/application_map.py \
       /opt/safe-flutter/peg_schema.py \
       /opt/safe-flutter/cache_identity.py \
       /opt/safe-flutter/safe_blutter_adapter.py \
@@ -80,7 +82,7 @@ RUN set -eux; \
       /opt/safe-flutter/flutter_artifact.py \
       /opt/safe-flutter/flutter_export.py \
       /opt/safe-flutter/flutter_entrypoint.py; \
-    PYTHONPATH=/opt/safe-flutter python3 -c 'import program_model as pm; import flutter_program_model as provider; import peg_schema as peg; assert pm.descriptor()["program_model_version"] == 1; assert pm.descriptor()["provider_continuation"] is True; assert provider.FlutterProgramProvider is not None; assert peg.PEG_SCHEMA_VERSION == 2'; \
+    PYTHONPATH=/opt/safe-flutter python3 -c 'import application_map as amap; import program_model as pm; import flutter_program_model as provider; import peg_schema as peg; assert amap.descriptor()["application_map_version"] == 1; assert amap.descriptor()["persistent_map_storage"] is False; assert pm.descriptor()["program_model_version"] == 1; assert pm.descriptor()["provider_continuation"] is True; assert provider.FlutterProgramProvider is not None; assert peg.PEG_SCHEMA_VERSION == 2'; \
     chmod 0555 /opt/safe-flutter/*.py; \
     chmod -R a-w /opt/blutter /opt/safe-flutter
 

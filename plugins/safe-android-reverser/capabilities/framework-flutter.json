@@ -2,7 +2,7 @@
   "id": "framework-flutter",
   "capability_api": 1,
   "worker_abi": 1,
-  "representations": ["dart-aot", "libapp.so", "flutter-assets"],
+  "representations": ["dart-aot", "flutter-dart-aot", "libapp.so", "flutter-assets"],
   "trust_boundary": "framework-static",
   "activation": "required",
   "adapter": "flutter-aot",

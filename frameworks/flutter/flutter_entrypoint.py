@@ -10,10 +10,13 @@ import sys
 import tempfile
 from pathlib import Path
 
+import application_map as amap
 import flutter_artifact as artifact
 import flutter_export as exporter
 import flutter_network as network
+import flutter_program_model as fpm
 import flutter_semantic as semantic
+import program_model as pm
 import safe_blutter_adapter as adapter
 
 SEMANTIC_COMMANDS = {
@@ -23,6 +26,8 @@ SEMANTIC_COMMANDS = {
     "find_dart_xrefs",
     "map_dart_to_native",
     "extract_flutter_network_model",
+    "get_application_map",
+    "expand_application_node",
 }
 INDEX_NAME = "flutter-index.sqlite"
 MANIFEST_NAME = "safe-flutter-analysis.json"
@@ -32,6 +37,15 @@ MAX_MANIFEST_BYTES = 64 * 1024
 MAX_BUILD_IDENTITY_LENGTH = 128
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
+OWNERSHIP_SCOPES = (
+    "application",
+    "all",
+    "first_party",
+    "third_party",
+    "platform",
+    "generated",
+    "unknown",
+)
 
 
 def _sha256(path: Path) -> str:
@@ -291,6 +305,11 @@ def _analyze_export_command(args: argparse.Namespace) -> dict:
     }
 
 
+def _projector(output: str) -> amap.ApplicationMapProjector:
+    provider = fpm.FlutterProgramProvider(_index_path(output))
+    return amap.ApplicationMapProjector(pm.ProgramRepository((provider,)))
+
+
 def _semantic_main() -> int:
     parser = argparse.ArgumentParser(
         description="Bounded semantic interface for the framework-flutter profile"
@@ -326,6 +345,22 @@ def _semantic_main() -> int:
     model.add_argument("output")
     model.add_argument("--limit", type=int, default=100)
 
+    app_map = sub.add_parser("get_application_map")
+    app_map.add_argument("output")
+    app_map.add_argument("--ownership-scope", choices=OWNERSHIP_SCOPES, default="application")
+    app_map.add_argument("--node-limit", type=int, default=amap.DEFAULT_NODE_LIMIT)
+    app_map.add_argument("--edge-limit", type=int, default=amap.DEFAULT_EDGE_LIMIT)
+
+    expand = sub.add_parser("expand_application_node")
+    expand.add_argument("output")
+    expand.add_argument("entity_id")
+    expand.add_argument("--ownership-scope", choices=OWNERSHIP_SCOPES, default="application")
+    expand.add_argument("--direction", choices=["incoming", "outgoing", "both"], default="both")
+    expand.add_argument("--relationship-kind", action="append", default=None)
+    expand.add_argument("--node-limit", type=int, default=amap.DEFAULT_NODE_LIMIT)
+    expand.add_argument("--edge-limit", type=int, default=amap.DEFAULT_EDGE_LIMIT)
+    expand.add_argument("--cursor", default=None)
+
     args = parser.parse_args()
     if args.command == "build_flutter_index":
         payload = _build_index_from_manifest(_output_dir(args.output))
@@ -343,9 +378,25 @@ def _semantic_main() -> int:
         )
     elif args.command == "map_dart_to_native":
         payload = semantic.map_dart_to_native(_index_path(args.output), args.symbol)
-    else:
+    elif args.command == "extract_flutter_network_model":
         payload = network.extract_flutter_network_model(
             _index_path(args.output), args.limit
+        )
+    elif args.command == "get_application_map":
+        payload = _projector(args.output).get_application_map(
+            ownership_scope=args.ownership_scope,
+            node_limit=args.node_limit,
+            edge_limit=args.edge_limit,
+        )
+    else:
+        payload = _projector(args.output).expand_application_node(
+            entity_id=args.entity_id,
+            ownership_scope=args.ownership_scope,
+            direction=args.direction,
+            relationship_kinds=args.relationship_kind,
+            node_limit=args.node_limit,
+            edge_limit=args.edge_limit,
+            cursor=args.cursor,
         )
     adapter._emit(payload)
     return 0 if payload.get("status") not in {"failed", "timeout", "error"} else 2
@@ -381,6 +432,7 @@ def main() -> int:
                 "max_scan_bytes": semantic.MAX_SCAN_BYTES,
                 "network_model_max_items": network.MAX_MODEL_ITEMS,
             }
+            payload["application_map"] = amap.descriptor()
             payload["orchestration"] = {
                 "prepare_artifact": True,
                 "analyze_export": True,
@@ -408,7 +460,12 @@ def main() -> int:
         if command in SEMANTIC_COMMANDS:
             return _semantic_main()
         return adapter.main()
-    except (adapter.AdapterError, semantic.FlutterIndexError) as exc:
+    except (
+        adapter.AdapterError,
+        semantic.FlutterIndexError,
+        pm.ProgramModelError,
+        amap.ApplicationMapError,
+    ) as exc:
         adapter._emit({"status": "error", "error": str(exc)})
         return 2
 

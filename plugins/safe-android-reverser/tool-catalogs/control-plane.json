@@ -1,0 +1,56 @@
+[
+  {
+    "name": "health",
+    "description": "Check the Safe Reverser host control plane and discover actual readiness across isolated capability workers.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "list_capabilities",
+    "description": "Return the manifest-driven Capability SPI registry and current runtime readiness states.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "get_application_map",
+    "description": "Return a deterministic bounded Application Map projection over the canonical Program Model for one analyzed representation.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "job_id": {"type": "string", "pattern": "^[0-9a-f]{12}$"},
+        "representation": {"type": "string", "enum": ["dex", "flutter-dart-aot"]},
+        "ownership_scope": {"type": "string", "enum": ["application", "all", "first_party", "third_party", "platform", "generated", "unknown"], "default": "application"},
+        "node_limit": {"type": "integer", "minimum": 1, "maximum": 80, "default": 40},
+        "edge_limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 100}
+      },
+      "required": ["job_id", "representation"],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "expand_application_node",
+    "description": "Re-resolve and progressively expand one canonical Program Model entity from an Application Map without relying on prior process state.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "job_id": {"type": "string", "pattern": "^[0-9a-f]{12}$"},
+        "representation": {"type": "string", "enum": ["dex", "flutter-dart-aot"]},
+        "entity_id": {"type": "string", "maxLength": 256},
+        "ownership_scope": {"type": "string", "enum": ["application", "all", "first_party", "third_party", "platform", "generated", "unknown"], "default": "application"},
+        "direction": {"type": "string", "enum": ["incoming", "outgoing", "both"], "default": "both"},
+        "relationship_kinds": {"type": "array", "items": {"type": "string", "maxLength": 128}, "maxItems": 32},
+        "node_limit": {"type": "integer", "minimum": 2, "maximum": 80, "default": 40},
+        "edge_limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 100},
+        "cursor": {"type": "string", "maxLength": 4096}
+      },
+      "required": ["job_id", "representation", "entity_id"],
+      "additionalProperties": false
+    }
+  }
+]

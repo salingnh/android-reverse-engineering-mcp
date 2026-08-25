@@ -11,6 +11,7 @@ from .contracts import (
     ContractError,
     VALID_STATES,
 )
+from .semantic_operations import CONTROL_PLANE_SEMANTIC_OPERATIONS
 
 MAX_MANIFEST_BYTES = 64 * 1024
 
@@ -44,6 +45,10 @@ class CapabilityRegistry:
                 if operation in RESERVED_PUBLIC_OPERATIONS:
                     raise ContractError(
                         f"operation {operation!r} is reserved by the control plane"
+                    )
+                if operation in CONTROL_PLANE_SEMANTIC_OPERATIONS:
+                    raise ContractError(
+                        f"semantic operation {operation!r} is owned by the control plane"
                     )
                 previous = self._operation_owner.get(operation)
                 if previous is not None:
@@ -86,6 +91,26 @@ class CapabilityRegistry:
         if owner is None:
             raise ContractError(f"no capability owns operation: {operation}") from None
         return self._manifests[owner]
+
+    def owner_for_representation(self, representation: str) -> CapabilityManifest:
+        normalized = str(representation or "").strip().lower()
+        if not normalized or len(normalized) > 128:
+            raise ContractError("invalid semantic representation")
+        matches = [
+            manifest
+            for manifest in self._manifests.values()
+            if normalized in {item.lower() for item in manifest.representation}
+        ]
+        if not matches:
+            raise ContractError(
+                f"no capability supports semantic representation: {normalized}"
+            )
+        if len(matches) != 1:
+            raise ContractError(
+                "semantic representation routing is ambiguous: "
+                f"{normalized} -> {sorted(item.capability_id for item in matches)}"
+            )
+        return matches[0]
 
     def manifests(self) -> dict[str, CapabilityManifest]:
         return dict(self._manifests)

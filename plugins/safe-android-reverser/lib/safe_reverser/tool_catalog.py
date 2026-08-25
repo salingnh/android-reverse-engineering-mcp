@@ -2,14 +2,16 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 from .contracts import CapabilityManifest, ContractError, OPERATION_RE
 
 MAX_TOOL_CATALOG_BYTES = 256 * 1024
 MAX_TOOL_DESCRIPTION_CHARS = 4096
 MAX_TOOL_SCHEMA_BYTES = 64 * 1024
+CATALOG_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,127}$")
 
 
 def _validate_tool_descriptor(value: Any, *, index: int) -> dict[str, Any]:
@@ -47,46 +49,65 @@ def _validate_tool_descriptor(value: Any, *, index: int) -> dict[str, Any]:
     }
 
 
-def load_tool_catalog(
-    catalog_root: Path, manifest: CapabilityManifest
-) -> list[dict[str, Any]]:
+def _catalog_path(catalog_root: Path, catalog_name: str) -> Path:
     root = Path(catalog_root)
     if root.is_symlink() or not root.is_dir():
         raise ContractError("tool catalog directory is unavailable")
     root = root.resolve()
-    path = root / f"{manifest.capability_id}.json"
+    name = str(catalog_name or "").strip()
+    if not CATALOG_NAME_RE.fullmatch(name):
+        raise ContractError("invalid tool catalog name")
+    path = root / f"{name}.json"
     if path.is_symlink() or not path.is_file() or path.resolve().parent != root:
-        raise ContractError(
-            f"trusted tool catalog is unavailable for {manifest.capability_id}"
-        )
+        raise ContractError(f"trusted tool catalog is unavailable for {name}")
     if path.stat().st_size > MAX_TOOL_CATALOG_BYTES:
-        raise ContractError(
-            f"trusted tool catalog is too large for {manifest.capability_id}"
-        )
+        raise ContractError(f"trusted tool catalog is too large for {name}")
+    return path
+
+
+def load_named_tool_catalog(
+    catalog_root: Path,
+    catalog_name: str,
+    *,
+    expected_operations: Iterable[str] | None = None,
+) -> list[dict[str, Any]]:
+    path = _catalog_path(catalog_root, catalog_name)
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        raise ContractError(
-            f"invalid trusted tool catalog for {manifest.capability_id}"
-        ) from exc
+        raise ContractError(f"invalid trusted tool catalog for {catalog_name}") from exc
     if not isinstance(raw, list) or not raw:
         raise ContractError(
-            f"trusted tool catalog must be a non-empty array for {manifest.capability_id}"
+            f"trusted tool catalog must be a non-empty array for {catalog_name}"
         )
-    tools = [_validate_tool_descriptor(item, index=index) for index, item in enumerate(raw)]
+    tools = [
+        _validate_tool_descriptor(item, index=index)
+        for index, item in enumerate(raw)
+    ]
     names = [item["name"] for item in tools]
     if len(names) != len(set(names)):
         raise ContractError(
-            f"trusted tool catalog contains duplicate operations for {manifest.capability_id}"
+            f"trusted tool catalog contains duplicate operations for {catalog_name}"
         )
-    declared = set(manifest.operations)
-    actual = set(names)
-    if actual != declared:
-        raise ContractError(
-            f"trusted tool catalog/manifest drift for {manifest.capability_id}: "
-            f"missing={sorted(declared - actual)} extra={sorted(actual - declared)}"
-        )
+    if expected_operations is not None:
+        expected = set(expected_operations)
+        actual = set(names)
+        if actual != expected:
+            raise ContractError(
+                f"trusted tool catalog/operation drift for {catalog_name}: "
+                f"missing={sorted(expected - actual)} extra={sorted(actual - expected)}"
+            )
     return tools
+
+
+def load_tool_catalog(
+    catalog_root: Path, manifest: CapabilityManifest
+) -> list[dict[str, Any]]:
+    return load_named_tool_catalog(
+        catalog_root,
+        manifest.capability_id,
+        expected_operations=manifest.operations,
+    )
 
 
 def catalogs_equal(
@@ -100,7 +121,11 @@ def catalogs_equal(
             name = item.get("name")
             description = item.get("description")
             schema = item.get("inputSchema")
-            if not isinstance(name, str) or not isinstance(description, str) or not isinstance(schema, dict):
+            if (
+                not isinstance(name, str)
+                or not isinstance(description, str)
+                or not isinstance(schema, dict)
+            ):
                 return {}
             result[name] = {
                 "description": description.strip(),
