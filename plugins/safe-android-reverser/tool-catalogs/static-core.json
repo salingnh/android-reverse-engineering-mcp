@@ -84,12 +84,14 @@
   },
   {
     "name": "extract_api",
-    "description": "Extract URLs, Retrofit endpoints, endpoint-shaped strings and network/auth signals from a decompile job.",
+    "description": "Extract an ownership-scoped lexical API inventory from a decompile job. Application scope suppresses definite SDK/platform/generated source internals by default.",
     "inputSchema": {
       "type": "object",
       "properties": {
         "job_id": {"type": "string"},
-        "max_items": {"type": "integer", "minimum": 20, "maximum": 2000, "default": 500}
+        "scope": {"type": "string", "enum": ["application", "all", "first_party", "third_party", "platform", "generated", "unknown"], "default": "application"},
+        "max_items": {"type": "integer", "minimum": 20, "maximum": 2000, "default": 500},
+        "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 3600, "default": 600}
       },
       "required": ["job_id"],
       "additionalProperties": false
