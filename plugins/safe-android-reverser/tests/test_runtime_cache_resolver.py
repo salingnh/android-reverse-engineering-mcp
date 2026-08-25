@@ -32,6 +32,8 @@ from safe_reverser.runtime import ImageUnavailableError, VerifiedImage
 from safe_reverser.runtime_cache import (
     RuntimeCacheResolver,
     RuntimeCacheState,
+    RuntimeCacheStateStore,
+    RuntimeCacheStoreError,
     RuntimeIdentity,
 )
 
@@ -53,6 +55,14 @@ def identity(**changes):
     }
     values.update(changes)
     return RuntimeIdentity(**values)
+
+
+def capacity_identity(index):
+    return identity(snapshot_hash=f"{index:032x}")
+
+
+def capacity_ref(index):
+    return f"example.invalid/flutter:capacity-{index}"
 
 
 def image_for(value: RuntimeIdentity, *, revision: str = REVISION, digest: str = "c"):
@@ -198,6 +208,19 @@ def _process_resolve(data_path, counter_path, start_event, result_queue):
     result_queue.put(resolver.resolve(identity(), CACHE_REF).state.value)
 
 
+def _process_capacity_resolve(
+    data_path, index, max_entries, start_event, result_queue
+):
+    start_event.wait(10)
+    resolver = RuntimeCacheResolver(
+        FakeRuntime(),
+        data_root=Path(data_path),
+        state_store_max_entries=max_entries,
+    )
+    result = resolver.resolve(capacity_identity(index), capacity_ref(index))
+    result_queue.put((result.state.value, result.failure_code))
+
+
 class RuntimeCacheResolverTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -209,7 +232,7 @@ class RuntimeCacheResolverTests(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def resolver(self, provider=None):
+    def resolver(self, provider=None, *, max_entries=10_000):
         return RuntimeCacheResolver(
             self.runtime,
             data_root=self.data,
@@ -218,6 +241,7 @@ class RuntimeCacheResolverTests(unittest.TestCase):
             retry_delay_seconds=5,
             clock=self.clock,
             attempt_identity_factory=self.attempts,
+            state_store_max_entries=max_entries,
         )
 
     def test_cache_hit_and_valid_immutable_image_are_ready(self):
@@ -508,6 +532,211 @@ class RuntimeCacheResolverTests(unittest.TestCase):
         lines = counter.read_text(encoding="utf-8").splitlines()
         self.assertEqual(len(lines), 1)
         self.assertRegex(lines[0], r"^submit [0-9a-f]{32}$")
+
+    def test_capacity_admits_exact_limit_and_rejects_new_without_poisoning_existing(self):
+        resolver = self.resolver(max_entries=3)
+        for index in range(1, 4):
+            result = resolver.resolve(capacity_identity(index), capacity_ref(index))
+            self.assertEqual(result.state, RuntimeCacheState.BUILD_REQUIRED)
+        self.assertEqual(resolver.store.admitted_count(), 3)
+
+        rejected = resolver.resolve(capacity_identity(4), capacity_ref(4))
+        self.assertEqual(rejected.state, RuntimeCacheState.FAILED)
+        self.assertEqual(
+            rejected.failure_code, "runtime_cache_capacity_exhausted"
+        )
+        self.assertEqual(resolver.store.admitted_count(), 3)
+
+        existing = resolver.resolve(capacity_identity(1), capacity_ref(1))
+        self.assertEqual(existing.state, RuntimeCacheState.BUILD_REQUIRED)
+        self.assertEqual(resolver.store.admitted_count(), 3)
+
+    def test_capacity_thread_race_never_exceeds_limit(self):
+        max_entries = 3
+        resolver = self.resolver(max_entries=max_entries)
+        for index in (1, 2):
+            self.assertEqual(
+                resolver.resolve(capacity_identity(index), capacity_ref(index)).state,
+                RuntimeCacheState.BUILD_REQUIRED,
+            )
+        barrier = threading.Barrier(8)
+
+        def call(index):
+            barrier.wait()
+            current = RuntimeCacheResolver(
+                self.runtime,
+                data_root=self.data,
+                state_store_max_entries=max_entries,
+            )
+            result = current.resolve(capacity_identity(index), capacity_ref(index))
+            return result.state, result.failure_code
+
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            outcomes = list(pool.map(call, range(100, 108)))
+        self.assertEqual(
+            sum(state is RuntimeCacheState.BUILD_REQUIRED for state, _code in outcomes),
+            1,
+        )
+        self.assertEqual(
+            sum(code == "runtime_cache_capacity_exhausted" for _state, code in outcomes),
+            7,
+        )
+        self.assertEqual(resolver.store.admitted_count(), max_entries)
+        self.assertLessEqual(
+            len(list(resolver.store.locks.glob("slot-*.lock"))), max_entries
+        )
+
+    def test_capacity_process_race_never_exceeds_limit(self):
+        max_entries = 3
+        resolver = self.resolver(max_entries=max_entries)
+        for index in (1, 2):
+            resolver.resolve(capacity_identity(index), capacity_ref(index))
+
+        context = multiprocessing.get_context("fork")
+        start = context.Event()
+        results = context.Queue()
+        processes = [
+            context.Process(
+                target=_process_capacity_resolve,
+                args=(str(self.data), index, max_entries, start, results),
+            )
+            for index in range(200, 205)
+        ]
+        for process in processes:
+            process.start()
+        start.set()
+        outcomes = [results.get(timeout=10) for _item in processes]
+        for process in processes:
+            process.join(timeout=10)
+            self.assertEqual(process.exitcode, 0)
+        self.assertEqual(
+            sum(state == "BUILD_REQUIRED" for state, _code in outcomes), 1
+        )
+        self.assertEqual(
+            sum(code == "runtime_cache_capacity_exhausted" for _state, code in outcomes),
+            4,
+        )
+        restarted = RuntimeCacheStateStore(self.data, max_entries=max_entries)
+        self.assertEqual(restarted.admitted_count(), max_entries)
+        self.assertLessEqual(
+            len(list(restarted.locks.glob("slot-*.lock"))), max_entries
+        )
+
+    def test_existing_building_ready_and_failed_retry_continue_at_capacity(self):
+        max_entries = 3
+        building_identity = capacity_identity(301)
+        building_ref = capacity_ref(301)
+        provider = FakeProvider(clock=self.clock)
+        building_resolver = self.resolver(provider, max_entries=max_entries)
+        self.assertEqual(
+            building_resolver.resolve(building_identity, building_ref).state,
+            RuntimeCacheState.BUILDING,
+        )
+
+        ready_identity = capacity_identity(302)
+        ready_ref = capacity_ref(302)
+        self.runtime.images[ready_ref] = image_for(ready_identity, digest="d")
+        ready_resolver = self.resolver(max_entries=max_entries)
+        self.assertEqual(
+            ready_resolver.resolve(ready_identity, ready_ref).state,
+            RuntimeCacheState.READY,
+        )
+
+        failed_identity = capacity_identity(303)
+        failed_ref = capacity_ref(303)
+        failed_provider = FakeProvider(clock=self.clock)
+        failed_provider.submit_error = ProviderRequestError("fixture failure")
+        failed_resolver = self.resolver(failed_provider, max_entries=max_entries)
+        self.assertEqual(
+            failed_resolver.resolve(failed_identity, failed_ref).state,
+            RuntimeCacheState.FAILED,
+        )
+        self.assertEqual(failed_resolver.store.admitted_count(), max_entries)
+
+        self.assertEqual(
+            building_resolver.resolve(building_identity, building_ref).state,
+            RuntimeCacheState.BUILDING,
+        )
+        self.assertEqual(provider.status_count, 1)
+        self.assertEqual(
+            ready_resolver.resolve(ready_identity, ready_ref).state,
+            RuntimeCacheState.READY,
+        )
+
+        self.clock.advance(5)
+        failed_provider.submit_error = None
+        retried = failed_resolver.resolve(failed_identity, failed_ref)
+        self.assertEqual(retried.state, RuntimeCacheState.BUILDING)
+        self.assertEqual(failed_resolver.store.admitted_count(), max_entries)
+
+    def test_restart_at_capacity_preserves_existing_and_rejects_new(self):
+        max_entries = 2
+        first = self.resolver(max_entries=max_entries)
+        for index in (401, 402):
+            first.resolve(capacity_identity(index), capacity_ref(index))
+        restarted = RuntimeCacheResolver(
+            self.runtime,
+            data_root=self.data,
+            state_store_max_entries=max_entries,
+        )
+        self.assertEqual(
+            restarted.resolve(capacity_identity(401), capacity_ref(401)).state,
+            RuntimeCacheState.BUILD_REQUIRED,
+        )
+        rejected = restarted.resolve(capacity_identity(403), capacity_ref(403))
+        self.assertEqual(
+            rejected.failure_code, "runtime_cache_capacity_exhausted"
+        )
+        self.assertEqual(restarted.store.admitted_count(), max_entries)
+
+    def test_capacity_failure_is_redacted_and_does_not_persist_attempt_state(self):
+        resolver = self.resolver(max_entries=1)
+        resolver.resolve(capacity_identity(501), capacity_ref(501))
+        result = resolver.resolve(capacity_identity(502), capacity_ref(502))
+        public = json.dumps(result.public_status())
+        self.assertEqual(
+            result.failure_code, "runtime_cache_capacity_exhausted"
+        )
+        self.assertNotIn(str(self.data), public)
+        self.assertNotIn("attempt_identity", public)
+        self.assertNotIn("provider_handle", public)
+        self.assertIsNone(resolver.store.read(capacity_identity(502)))
+
+    def test_failed_new_state_write_does_not_consume_capacity(self):
+        store = RuntimeCacheStateStore(self.data, max_entries=2)
+        first = capacity_identity(601)
+        failed = capacity_identity(602)
+        replacement = capacity_identity(603)
+        store.write(
+            first,
+            {
+                "state": "BUILD_REQUIRED",
+                "cache_ref": capacity_ref(601),
+                "updated_at_epoch": 1,
+            },
+        )
+        self.assertEqual(store.admitted_count(), 1)
+        with self.assertRaises(RuntimeCacheStoreError):
+            store.write(
+                failed,
+                {
+                    "state": "BUILD_REQUIRED",
+                    "cache_ref": capacity_ref(602),
+                    "updated_at_epoch": 1,
+                    "oversized": "x" * 70_000,
+                },
+            )
+        self.assertEqual(store.admitted_count(), 1)
+        self.assertIsNone(store.read(failed))
+        store.write(
+            replacement,
+            {
+                "state": "BUILD_REQUIRED",
+                "cache_ref": capacity_ref(603),
+                "updated_at_epoch": 1,
+            },
+        )
+        self.assertEqual(store.admitted_count(), 2)
 
     def test_published_image_wins_before_provider_reconciliation(self):
         runtime_identity = identity()
