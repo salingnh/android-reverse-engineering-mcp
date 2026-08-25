@@ -22,7 +22,7 @@ def flutter_ownership(library_url: str) -> dict[str, Any]:
         return {"scope": "PLATFORM", "owner": "Dart", "sdk": "Dart SDK"}
     if url.startswith("package:flutter/"):
         return {"scope": "PLATFORM", "owner": "Flutter", "sdk": "Flutter Framework"}
-    # package: does not imply third-party: app code and dependencies both use it.
+    # package: does not imply third-party. The app and dependencies both use it.
     return {"scope": "UNKNOWN", "owner": None, "sdk": None}
 
 
@@ -57,13 +57,15 @@ class FlutterProgramProvider:
 
     def _function_key(self, conn: sqlite3.Connection, row: sqlite3.Row) -> str:
         base = f"function:v1:{REPRESENTATION}:{self.class_key(str(row['library_url']), str(row['class_name']))}:{str(row['signature'])}"
-        count = int(conn.execute(
-            "SELECT COUNT(*) FROM functions WHERE library_url=? AND class_name=? AND signature=?",
-            (row["library_url"], row["class_name"], row["signature"]),
-        ).fetchone()[0])
+        count = int(
+            conn.execute(
+                "SELECT COUNT(*) FROM functions WHERE library_url=? AND class_name=? AND signature=?",
+                (row["library_url"], row["class_name"], row["signature"]),
+            ).fetchone()[0]
+        )
         if count > 1:
-            # Actual artifact address is only a collision disambiguator, never the
-            # normal semantic identity and never a private row id.
+            # Native offset is an artifact fact and is used only to disambiguate a
+            # genuine collision, never as normal semantic identity or a row id.
             return f"{base}@0x{int(row['native_offset']):x}"
         return base
 
@@ -83,7 +85,10 @@ class FlutterProgramProvider:
         return ref
 
     def _application(self) -> pm.ProgramEntity:
-        ref = self._evidence_ref({"kind": "flutter-artifact", "artifact_sha256": self.snapshot.artifact_sha256}, state="observed")
+        ref = self._evidence_ref(
+            {"kind": "flutter-artifact", "artifact_sha256": self.snapshot.artifact_sha256},
+            state="observed",
+        )
         return pm.ProgramEntity(
             self.snapshot.snapshot_id,
             pm.entity_id(self.snapshot, "APPLICATION", self.application_key),
@@ -99,7 +104,14 @@ class FlutterProgramProvider:
     def _module(self, row: sqlite3.Row) -> pm.ProgramEntity:
         url = str(row["url"])
         decision = flutter_ownership(url)
-        ref = self._evidence_ref({"kind": "dart-library", "uri": url, "source_file": str(row["source_file"]), "line": int(row["line"])})
+        ref = self._evidence_ref(
+            {
+                "kind": "dart-library",
+                "uri": url,
+                "source_file": str(row["source_file"]),
+                "line": int(row["line"]),
+            }
+        )
         key = self.module_key(url)
         return pm.ProgramEntity(
             self.snapshot.snapshot_id,
@@ -120,7 +132,15 @@ class FlutterProgramProvider:
             library_url = str(lib["url"]) if lib else ""
         name = str(row["name"])
         decision = flutter_ownership(library_url)
-        ref = self._evidence_ref({"kind": "dart-class", "library": library_url, "class": name, "source_file": str(row["source_file"]), "line": int(row["line"])})
+        ref = self._evidence_ref(
+            {
+                "kind": "dart-class",
+                "library": library_url,
+                "class": name,
+                "source_file": str(row["source_file"]),
+                "line": int(row["line"]),
+            }
+        )
         key = self.class_key(library_url, name)
         return pm.ProgramEntity(
             self.snapshot.snapshot_id,
@@ -138,12 +158,17 @@ class FlutterProgramProvider:
         library_url = str(row["library_url"])
         decision = flutter_ownership(library_url)
         key = self._function_key(conn, row)
-        ref = self._evidence_ref({
-            "kind": "dart-function", "library": library_url,
-            "class": str(row["class_name"]), "name": str(row["name"]),
-            "native_offset": int(row["native_offset"]),
-            "source_file": str(row["source_file"]), "line": int(row["line"]),
-        })
+        ref = self._evidence_ref(
+            {
+                "kind": "dart-function",
+                "library": library_url,
+                "class": str(row["class_name"]),
+                "name": str(row["name"]),
+                "native_offset": int(row["native_offset"]),
+                "source_file": str(row["source_file"]),
+                "line": int(row["line"]),
+            }
+        )
         return pm.ProgramEntity(
             self.snapshot.snapshot_id,
             pm.entity_id(self.snapshot, "FUNCTION", key),
@@ -152,16 +177,31 @@ class FlutterProgramProvider:
             f"{library_url}::{row['class_name']}::{row['name']}",
             REPRESENTATION,
             decision["scope"],
-            {"signature": str(row["signature"]), "implementation": "present", "native_offset": int(row["native_offset"]), "size": int(row["size"])},
+            {
+                "signature": str(row["signature"]),
+                "implementation": "present",
+                "native_offset": int(row["native_offset"]),
+                "size": int(row["size"]),
+            },
             (ref,),
         )
 
-    def _boundary(self, *, library_url: str, class_name: str, name: str, target: pm.ProgramEntity | None = None) -> pm.ProgramEntity:
+    def _boundary(
+        self,
+        *,
+        library_url: str,
+        class_name: str,
+        name: str,
+        target: pm.ProgramEntity | None = None,
+    ) -> pm.ProgramEntity:
         decision = flutter_ownership(library_url)
         boundary_kind = "platform" if decision["scope"] == "PLATFORM" else "external-unresolved"
         target_key = target.semantic_key if target else f"{library_url}::{class_name}::{name}"
         key = f"boundary:v1:{boundary_kind}:{target_key}"
-        props: dict[str, Any] = {"boundary_kind": boundary_kind, "target": f"{library_url}::{class_name}::{name}"}
+        props: dict[str, Any] = {
+            "boundary_kind": boundary_kind,
+            "target": f"{library_url}::{class_name}::{name}",
+        }
         if decision.get("owner"):
             props["owner"] = decision["owner"]
         if decision.get("sdk"):
@@ -182,7 +222,10 @@ class FlutterProgramProvider:
 
     def _find_function_by_entity_id(self, conn: sqlite3.Connection, identifier: str) -> sqlite3.Row | None:
         start = time.monotonic()
-        for row in conn.execute("SELECT * FROM functions ORDER BY library_url,class_name,name,native_offset LIMIT ?", (MAX_PROVIDER_SCAN_ROWS,)):
+        for row in conn.execute(
+            "SELECT * FROM functions ORDER BY library_url,class_name,name,native_offset LIMIT ?",
+            (MAX_PROVIDER_SCAN_ROWS,),
+        ):
             if time.monotonic() - start > MAX_PROVIDER_QUERY_SECONDS:
                 break
             if self._function(conn, row).entity_id == identifier:
@@ -191,7 +234,10 @@ class FlutterProgramProvider:
 
     def _find_class_by_entity_id(self, conn: sqlite3.Connection, identifier: str) -> sqlite3.Row | None:
         start = time.monotonic()
-        rows = conn.execute("SELECT c.*,l.url AS library_url FROM classes c JOIN libraries l ON l.id=c.library_id ORDER BY l.url,c.name LIMIT ?", (MAX_PROVIDER_SCAN_ROWS,))
+        rows = conn.execute(
+            "SELECT c.*,l.url AS library_url FROM classes c JOIN libraries l ON l.id=c.library_id ORDER BY l.url,c.name LIMIT ?",
+            (MAX_PROVIDER_SCAN_ROWS,),
+        )
         for row in rows:
             if time.monotonic() - start > MAX_PROVIDER_QUERY_SECONDS:
                 break
@@ -223,7 +269,15 @@ class FlutterProgramProvider:
                 return self._module(row)
         return None
 
-    def iter_entities(self, *, kind: str | None = None, text: str | None = None, ownership_scope: str = "application", representation: str | None = None, limit: int = pm.MAX_PROVIDER_PAGE_SIZE) -> Iterable[pm.ProgramEntity]:
+    def iter_entities(
+        self,
+        *,
+        kind: str | None = None,
+        text: str | None = None,
+        ownership_scope: str = "application",
+        representation: str | None = None,
+        limit: int = pm.MAX_PROVIDER_PAGE_SIZE,
+    ) -> Iterable[pm.ProgramEntity]:
         limit = max(1, min(int(limit), pm.MAX_PROVIDER_PAGE_SIZE))
         if representation and representation not in {REPRESENTATION, "artifact"}:
             return
@@ -243,27 +297,39 @@ class FlutterProgramProvider:
                     if time.monotonic() - start > MAX_PROVIDER_QUERY_SECONDS:
                         return
                     item = self._module(row)
-                    if ownership_scope_accepts(item.ownership, ownership_scope) and (not needle or needle in (item.display_name + " " + item.semantic_key).lower()):
+                    if ownership_scope_accepts(item.ownership, ownership_scope) and (
+                        not needle or needle in (item.display_name + " " + item.semantic_key).lower()
+                    ):
                         yield item
                         count += 1
                         if count >= limit:
                             return
             if kind in {None, "CLASS"}:
-                for row in conn.execute("SELECT c.*,l.url AS library_url FROM classes c JOIN libraries l ON l.id=c.library_id ORDER BY l.url,c.name LIMIT ?", (MAX_PROVIDER_SCAN_ROWS,)):
+                for row in conn.execute(
+                    "SELECT c.*,l.url AS library_url FROM classes c JOIN libraries l ON l.id=c.library_id ORDER BY l.url,c.name LIMIT ?",
+                    (MAX_PROVIDER_SCAN_ROWS,),
+                ):
                     if time.monotonic() - start > MAX_PROVIDER_QUERY_SECONDS:
                         return
                     item = self._class(row, library_url=str(row["library_url"]))
-                    if ownership_scope_accepts(item.ownership, ownership_scope) and (not needle or needle in (item.display_name + " " + item.semantic_key).lower()):
+                    if ownership_scope_accepts(item.ownership, ownership_scope) and (
+                        not needle or needle in (item.display_name + " " + item.semantic_key).lower()
+                    ):
                         yield item
                         count += 1
                         if count >= limit:
                             return
             if kind in {None, "FUNCTION"}:
-                for row in conn.execute("SELECT * FROM functions ORDER BY library_url,class_name,name,native_offset LIMIT ?", (MAX_PROVIDER_SCAN_ROWS,)):
+                for row in conn.execute(
+                    "SELECT * FROM functions ORDER BY library_url,class_name,name,native_offset LIMIT ?",
+                    (MAX_PROVIDER_SCAN_ROWS,),
+                ):
                     if time.monotonic() - start > MAX_PROVIDER_QUERY_SECONDS:
                         return
                     item = self._function(conn, row)
-                    if ownership_scope_accepts(item.ownership, ownership_scope) and (not needle or needle in (item.display_name + " " + item.semantic_key).lower()):
+                    if ownership_scope_accepts(item.ownership, ownership_scope) and (
+                        not needle or needle in (item.display_name + " " + item.semantic_key).lower()
+                    ):
                         yield item
                         count += 1
                         if count >= limit:
@@ -274,7 +340,12 @@ class FlutterProgramProvider:
         return pm.ProgramRelationship(
             self.snapshot.snapshot_id,
             pm.relationship_id(self.snapshot, "DECLARES", source.entity_id, target.entity_id),
-            "DECLARES", source.entity_id, target.entity_id, REPRESENΤATION if False else REPRESENTATION, {}, refs,
+            "DECLARES",
+            source.entity_id,
+            target.entity_id,
+            REPRESENTATION,
+            {},
+            refs,
         )
 
     def _xref(self, conn: sqlite3.Connection, row: sqlite3.Row) -> pm.ProgramRelationship | None:
@@ -282,30 +353,59 @@ class FlutterProgramProvider:
         if caller_row is None:
             return None
         caller = self._function(conn, caller_row)
-        target_row = conn.execute("SELECT * FROM functions WHERE id=?", (row["target_id"],)).fetchone() if row["target_id"] else None
+        target_row = (
+            conn.execute("SELECT * FROM functions WHERE id=?", (row["target_id"],)).fetchone()
+            if row["target_id"]
+            else None
+        )
         target = self._function(conn, target_row) if target_row is not None else None
         target_decision = flutter_ownership(str(row["target_library_url"]))
-        destination = self._boundary(
-            library_url=str(row["target_library_url"]),
-            class_name=str(row["target_class_name"]),
-            name=str(row["target_name"]),
-            target=target,
-        ) if target is None or target_decision["scope"] == "PLATFORM" else target
-        ref = self._evidence_ref({
-            "kind": "dart-xref", "caller": caller.semantic_key,
-            "target_library": str(row["target_library_url"]),
-            "target_class": str(row["target_class_name"]),
-            "target_name": str(row["target_name"]),
-            "source_file": str(row["source_file"]), "line": int(row["line"]),
-        })
+        if target is None or target_decision["scope"] == "PLATFORM":
+            destination = self._boundary(
+                library_url=str(row["target_library_url"]),
+                class_name=str(row["target_class_name"]),
+                name=str(row["target_name"]),
+                target=target,
+            )
+        else:
+            destination = target
+        ref = self._evidence_ref(
+            {
+                "kind": "dart-xref",
+                "caller": caller.semantic_key,
+                "target_library": str(row["target_library_url"]),
+                "target_class": str(row["target_class_name"]),
+                "target_name": str(row["target_name"]),
+                "source_file": str(row["source_file"]),
+                "line": int(row["line"]),
+            }
+        )
         return pm.ProgramRelationship(
             self.snapshot.snapshot_id,
-            pm.relationship_id(self.snapshot, "XREF", caller.entity_id, destination.entity_id, f"{row['source_file']}:{row['line']}"),
-            "XREF", caller.entity_id, destination.entity_id, REPRESENTATION,
-            {"reference_kind": "blutter-xref"}, (ref,),
+            pm.relationship_id(
+                self.snapshot,
+                "XREF",
+                caller.entity_id,
+                destination.entity_id,
+                f"{row['source_file']}:{row['line']}",
+            ),
+            "XREF",
+            caller.entity_id,
+            destination.entity_id,
+            REPRESENTATION,
+            {"reference_kind": "blutter-xref"},
+            (ref,),
         )
 
-    def iter_relationships(self, *, entity_id: str, kinds: frozenset[str] | None = None, direction: str = "both", ownership_scope: str = "application", limit: int = pm.MAX_PROVIDER_PAGE_SIZE) -> Iterable[pm.ProgramRelationship]:
+    def iter_relationships(
+        self,
+        *,
+        entity_id: str,
+        kinds: frozenset[str] | None = None,
+        direction: str = "both",
+        ownership_scope: str = "application",
+        limit: int = pm.MAX_PROVIDER_PAGE_SIZE,
+    ) -> Iterable[pm.ProgramRelationship]:
         limit = max(1, min(int(limit), pm.MAX_PROVIDER_PAGE_SIZE))
         count = 0
         app = self._application()
@@ -332,7 +432,10 @@ class FlutterProgramProvider:
                     if count >= limit:
                         return
                 if direction in {"outgoing", "both"} and (not kinds or "DECLARES" in kinds):
-                    for row in conn.execute("SELECT c.*,l.url AS library_url FROM classes c JOIN libraries l ON l.id=c.library_id WHERE c.library_id=? ORDER BY c.name LIMIT ?", (module_row["id"], MAX_PROVIDER_SCAN_ROWS)):
+                    for row in conn.execute(
+                        "SELECT c.*,l.url AS library_url FROM classes c JOIN libraries l ON l.id=c.library_id WHERE c.library_id=? ORDER BY c.name LIMIT ?",
+                        (module_row["id"], MAX_PROVIDER_SCAN_ROWS),
+                    ):
                         target = self._class(row, library_url=str(row["library_url"]))
                         if not ownership_scope_accepts(target.ownership, ownership_scope):
                             continue
@@ -350,7 +453,10 @@ class FlutterProgramProvider:
                     if count >= limit:
                         return
                 if direction in {"outgoing", "both"} and (not kinds or "DECLARES" in kinds):
-                    for row in conn.execute("SELECT * FROM functions WHERE class_id_ref=? ORDER BY name,native_offset LIMIT ?", (class_row["id"], MAX_PROVIDER_SCAN_ROWS)):
+                    for row in conn.execute(
+                        "SELECT * FROM functions WHERE class_id_ref=? ORDER BY name,native_offset LIMIT ?",
+                        (class_row["id"], MAX_PROVIDER_SCAN_ROWS),
+                    ):
                         target = self._function(conn, row)
                         if not ownership_scope_accepts(target.ownership, ownership_scope):
                             continue
@@ -362,18 +468,34 @@ class FlutterProgramProvider:
             if function_row is not None:
                 function = self._function(conn, function_row)
                 if direction in {"incoming", "both"} and (not kinds or "DECLARES" in kinds):
-                    class_private = conn.execute("SELECT c.*,l.url AS library_url FROM classes c JOIN libraries l ON l.id=c.library_id WHERE c.id=?", (function_row["class_id_ref"],)).fetchone()
+                    class_private = conn.execute(
+                        "SELECT c.*,l.url AS library_url FROM classes c JOIN libraries l ON l.id=c.library_id WHERE c.id=?",
+                        (function_row["class_id_ref"],),
+                    ).fetchone()
                     if class_private is not None:
-                        yield self._declares(self._class(class_private, library_url=str(class_private["library_url"])), function)
+                        yield self._declares(
+                            self._class(class_private, library_url=str(class_private["library_url"])),
+                            function,
+                        )
                         count += 1
                         if count >= limit:
                             return
                 if not kinds or "XREF" in kinds:
                     rows: list[sqlite3.Row] = []
                     if direction in {"outgoing", "both"}:
-                        rows.extend(conn.execute("SELECT * FROM xrefs WHERE caller_id=? ORDER BY source_file,line LIMIT ?", (function_row["id"], MAX_PROVIDER_XREFS)).fetchall())
+                        rows.extend(
+                            conn.execute(
+                                "SELECT * FROM xrefs WHERE caller_id=? ORDER BY source_file,line LIMIT ?",
+                                (function_row["id"], MAX_PROVIDER_XREFS),
+                            ).fetchall()
+                        )
                     if direction in {"incoming", "both"}:
-                        rows.extend(conn.execute("SELECT * FROM xrefs WHERE target_id=? ORDER BY source_file,line LIMIT ?", (function_row["id"], MAX_PROVIDER_XREFS)).fetchall())
+                        rows.extend(
+                            conn.execute(
+                                "SELECT * FROM xrefs WHERE target_id=? ORDER BY source_file,line LIMIT ?",
+                                (function_row["id"], MAX_PROVIDER_XREFS),
+                            ).fetchall()
+                        )
                     for row in rows[:MAX_PROVIDER_XREFS]:
                         relation = self._xref(conn, row)
                         if relation is None:
