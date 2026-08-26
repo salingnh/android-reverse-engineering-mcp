@@ -156,7 +156,7 @@ class DalvikFlowBuilder(dexflow.NormalizedDexFlowBuilder):
         if display:
             properties["field_name"] = display[:1024]
 
-        # The field is one shared semantic value across all access sites. The
+        # Static fields are one shared semantic value across access sites. The
         # declaring type owns the value; access-specific provenance belongs on
         # FIELD_READ/FIELD_WRITE edges rather than on the shared node.
         return self._node(
@@ -180,6 +180,10 @@ class DalvikFlowBuilder(dexflow.NormalizedDexFlowBuilder):
             and not name.startswith("move-result")
             and name != "move-exception"
         )
+
+    @staticmethod
+    def _is_instance_field(instruction: dexflow.InstructionSpec) -> bool:
+        return instruction.mnemonic.startswith(("iget", "iput"))
 
     def _emit_transform(
         self,
@@ -283,6 +287,57 @@ class DalvikFlowBuilder(dexflow.NormalizedDexFlowBuilder):
             ),
         )
 
+    def _emit_instance_field(
+        self,
+        method: dexflow.MethodSpec,
+        instruction: dexflow.InstructionSpec,
+        state: dict[int, frozenset[str]],
+    ) -> None:
+        registers = instruction.registers
+        reason = "instance-field receiver alias is not proven"
+        if instruction.mnemonic.startswith("iget"):
+            target = self._local_node(method, instruction)
+            if registers:
+                state[registers[0]] = frozenset({target.node_id})
+            self._gap(
+                method,
+                instruction,
+                "MISSING_EVIDENCE",
+                target=target.node_id,
+                reason=reason,
+                discriminator=self._discriminator(
+                    method.semantic_key, instruction.offset, "instance-field-read"
+                ),
+            )
+            return
+
+        sources = self._sources(state, registers[0]) if registers else ()
+        if sources:
+            for ordinal, source in enumerate(sources):
+                self._gap(
+                    method,
+                    instruction,
+                    "MISSING_EVIDENCE",
+                    source=source,
+                    reason=reason,
+                    discriminator=self._discriminator(
+                        method.semantic_key,
+                        instruction.offset,
+                        "instance-field-write",
+                        ordinal,
+                    ),
+                )
+        else:
+            self._gap(
+                method,
+                instruction,
+                "MISSING_EVIDENCE",
+                reason=reason,
+                discriminator=self._discriminator(
+                    method.semantic_key, instruction.offset, "instance-field-write"
+                ),
+            )
+
     def _emit_block(
         self,
         method: dexflow.MethodSpec,
@@ -293,6 +348,7 @@ class DalvikFlowBuilder(dexflow.NormalizedDexFlowBuilder):
         custom = any(
             self._is_transform(item)
             or self._is_plain_move(item)
+            or self._is_instance_field(item)
             or item.mnemonic == "move-exception"
             for item in block.instructions
         )
@@ -328,6 +384,9 @@ class DalvikFlowBuilder(dexflow.NormalizedDexFlowBuilder):
             elif self._is_plain_move(instruction):
                 flush()
                 self._emit_plain_move(method, instruction, state)
+            elif self._is_instance_field(instruction):
+                flush()
+                self._emit_instance_field(method, instruction, state)
             elif instruction.mnemonic == "move-exception":
                 flush()
                 self._emit_move_exception(method, instruction, state)
@@ -405,6 +464,9 @@ def descriptor() -> dict[str, Any]:
             "reflection_gap_precedence": True,
             "shared_field_access_evidence_on_edges": True,
             "declaring_field_owner_canonical": True,
+            "static_field_flow_proven": True,
+            "instance_field_alias_required": True,
+            "instance_field_unproven_is_gap": True,
             "read_before_write_semantics": True,
             "move_exception_is_explicit_gap": True,
         }
