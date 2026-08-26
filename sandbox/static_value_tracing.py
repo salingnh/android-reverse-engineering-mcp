@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 import dex_value_tracing as dexflow
+import dex_value_tracing_runtime as dexruntime
 import static_application_map
 import static_context_retrieval
 import value_tracing as tracing
@@ -15,7 +16,7 @@ def _analysis(server: Any, args: dict[str, Any]) -> dexflow.DexFlowAnalysis:
     entity_id = str(args.get("entity_id") or "").strip()
     if not entity_id or len(entity_id) > 256:
         raise server.core.ToolError("invalid value tracing entity_id")
-    return dexflow.build_dex_flow(
+    return dexruntime.build_dex_flow(
         job,
         server.core.WORKSPACE,
         server.pu.capabilities(),
@@ -32,7 +33,7 @@ def _analysis(server: Any, args: dict[str, Any]) -> dexflow.DexFlowAnalysis:
 
 def _metadata(analysis: dexflow.DexFlowAnalysis) -> dict[str, Any]:
     return {
-        "producer": dexflow.descriptor(),
+        "producer": dexruntime.descriptor(),
         "root_entity_id": analysis.root_entity_id,
         "methods_analyzed": analysis.methods_analyzed,
         "instructions_analyzed": analysis.instructions_analyzed,
@@ -205,7 +206,7 @@ def install(server: Any) -> None:
     def health(args: dict[str, Any]) -> dict[str, Any]:
         result = original_health(args)
         result["value_tracing"] = tracing.descriptor()
-        result["dex_flow_producer"] = dexflow.descriptor()
+        result["dex_flow_producer"] = dexruntime.descriptor()
         contract = result.get("tool_contract")
         if isinstance(contract, dict):
             internal = (
