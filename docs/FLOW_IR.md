@@ -58,7 +58,7 @@ Every node has:
 - optional `program_entity_id` when the value already has a canonical Program Model entity;
 - representation, bounded allowlisted properties and evidence references.
 
-Raw constant values are not part of the durable IR. A producer may retain a bounded `value_fingerprint` plus literal/type metadata. This prevents the IR from becoming a secret-dump channel.
+Raw constant values are not part of the durable IR. Constant nodes must use a hashed semantic key of the form `constant:<sha256>` and an empty label. A producer may retain only a validated `value_fingerprint` of the form `sha256:<64 lowercase hex>` plus bounded literal/type metadata. This prevents node identity, labels and properties from becoming secret-dump channels.
 
 ### `FlowEdge`
 
@@ -78,7 +78,7 @@ SANITIZES
 
 `CALLS` and `XREF` are intentionally absent. Structural call/xref topology can localize an analysis region, but it is never sufficient proof of value flow.
 
-Each edge is deterministic, snapshot-bound, provenance-bearing and connects two `FlowNode`s. Edge properties are kind-specific and allowlisted.
+Each edge is deterministic, snapshot-bound, provenance-bearing and connects two `FlowNode`s. Edge properties are kind-specific and allowlisted. A bounded semantic `discriminator` participates in edge identity so two distinct occurrences such as different statements/callsites connecting the same node pair remain distinct instead of colliding.
 
 ### `FlowGap`
 
@@ -95,13 +95,13 @@ BUDGET
 UNKNOWN
 ```
 
-A gap may connect two known nodes or terminate at a known source/target boundary. Gap reasons are bounded diagnostic codes/text; they are not synthetic `FLOWS_TO` evidence.
+A gap may connect two known nodes or terminate at a known source/target boundary. Gap reasons are bounded diagnostic codes/text; they are not synthetic `FLOWS_TO` evidence. Gaps also carry a semantic discriminator so multiple unsupported occurrences across the same endpoints remain independently addressable.
 
 ### `FlowPath`
 
 A path is an ordered sequence of node IDs and segment IDs. Every segment is either a real `FlowEdge` or a `FlowGap` joining the adjacent nodes.
 
-A complete path contains only real edges. An incomplete path must contain at least one gap. This makes uncertainty machine-readable and prevents callers from silently treating an unsupported boundary as proven flow.
+A complete path contains only real edges. An incomplete path must contain at least one gap. `complete` is a strict boolean rather than a truthy/coerced value. This makes uncertainty machine-readable and prevents callers from silently treating an unsupported boundary as proven flow.
 
 ### `FlowDocument`
 
@@ -128,7 +128,7 @@ flowg:v1:...
 flowp:v1:...
 ```
 
-Analyzer-private IDs are not used as public semantic identity.
+Analyzer-private IDs are not used as public semantic identity. Edge and gap IDs include their bounded semantic discriminator; constant node semantic keys are hash-derived and never include the raw literal.
 
 ## Bounds
 
@@ -170,16 +170,18 @@ The Stage F gate must prove at least:
 
 1. deterministic IDs and serialization;
 2. value-kind/property/role validation;
-3. `CALLS` and `XREF` cannot be represented as flow edges;
-4. edge endpoints must resolve within the document snapshot;
-5. gap-bearing paths cannot claim `complete=true`;
-6. complete paths cannot contain a gap;
-7. path segments must connect the exact adjacent nodes;
-8. snapshot mismatches fail closed;
-9. duplicate IDs fail closed;
-10. document count and serialized-size bounds fail closed;
-11. static-core and Flutter locked images package the same Flow IR version;
-12. no public MCP operation is added by Stage F.
+3. constant literal/identity redaction and strict fingerprints;
+4. distinct multi-edge/multi-gap occurrences retain unique IDs;
+5. `CALLS` and `XREF` cannot be represented as flow edges;
+6. edge endpoints must resolve within the document snapshot;
+7. gap-bearing paths cannot claim `complete=true`;
+8. complete paths cannot contain a gap;
+9. path segments must connect the exact adjacent nodes;
+10. snapshot mismatches fail closed;
+11. duplicate IDs fail closed;
+12. document count and serialized-size bounds fail closed;
+13. static-core and Flutter locked images package the same Flow IR version;
+14. no public MCP operation is added by Stage F.
 
 ## Long-Term Architecture Review
 
