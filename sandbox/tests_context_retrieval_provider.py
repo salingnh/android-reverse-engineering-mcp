@@ -156,6 +156,33 @@ class DexContextRetrievalTests(unittest.TestCase):
             )
         )
 
+    def test_source_provider_enforces_line_byte_and_file_size_bounds(self):
+        repo = self.repository()
+        login = self.login_entity(repo)
+        provider = static_context.DexContextSourceProvider(self.job)
+        evidence = repo.get_evidence(login.evidence_refs)
+
+        source = provider.source_slice(
+            entity=login,
+            evidence=evidence,
+            line_limit=2,
+            byte_limit=32,
+        )
+        self.assertIsNotNone(source)
+        self.assertLessEqual(source["returned_lines"], 2)
+        self.assertLessEqual(len(source["text"].encode("utf-8")), 32)
+        self.assertTrue(source["truncated"])
+
+        self.source.write_bytes(b"x" * (static_context.MAX_CONTEXT_SOURCE_FILE_BYTES + 1))
+        self.assertIsNone(
+            provider.source_slice(
+                entity=login,
+                evidence=evidence,
+                line_limit=20,
+                byte_limit=4096,
+            )
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
