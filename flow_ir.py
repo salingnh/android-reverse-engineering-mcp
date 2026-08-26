@@ -157,22 +157,29 @@ def _hash(*parts: str) -> str:
     return digest.hexdigest()
 
 
+def constant_semantic_key(*identity_parts: str) -> str:
+    parts = tuple(_text(part, "constant identity part", 1024) for part in identity_parts)
+    if not parts:
+        raise FlowIRError("constant semantic identity requires at least one part")
+    return "constant:" + _hash(*parts)
+
+
 def flow_node_id(snapshot_id: str, value_kind: str, owner_entity_id: str, semantic_key: str) -> str:
     snapshot = _text(snapshot_id, "snapshot_id", 128); kind = _enum(value_kind, VALUE_KINDS, "value kind")
     owner = _text(owner_entity_id, "owner_entity_id", 256); key = _text(semantic_key, "semantic_key", MAX_SEMANTIC_KEY_CHARS)
     return f"flown:v{FLOW_IR_VERSION}:{kind.lower()}:{_hash(snapshot, kind, owner, key)}"
 
 
-def flow_edge_id(snapshot_id: str, kind: str, source_node_id: str, target_node_id: str) -> str:
+def flow_edge_id(snapshot_id: str, kind: str, source_node_id: str, target_node_id: str, discriminator: str = "") -> str:
     snapshot = _text(snapshot_id, "snapshot_id", 128); edge_kind = _enum(kind, FLOW_EDGE_KINDS, "flow edge kind")
-    source = _text(source_node_id, "source_node_id", 256); target = _text(target_node_id, "target_node_id", 256)
-    return f"flowe:v{FLOW_IR_VERSION}:{edge_kind.lower()}:{_hash(snapshot, edge_kind, source, target)}"
+    source = _text(source_node_id, "source_node_id", 256); target = _text(target_node_id, "target_node_id", 256); disc = _text(discriminator, "flow edge discriminator", 1024, empty=True)
+    return f"flowe:v{FLOW_IR_VERSION}:{edge_kind.lower()}:{_hash(snapshot, edge_kind, source, target, disc)}"
 
 
-def flow_gap_id(snapshot_id: str, kind: str, owner_entity_id: str, source_node_id: str | None = None, target_node_id: str | None = None) -> str:
+def flow_gap_id(snapshot_id: str, kind: str, owner_entity_id: str, source_node_id: str | None = None, target_node_id: str | None = None, discriminator: str = "") -> str:
     snapshot = _text(snapshot_id, "snapshot_id", 128); gap_kind = _enum(kind, FLOW_GAP_KINDS, "flow gap kind")
-    owner = _text(owner_entity_id, "owner_entity_id", 256); source = _optional_text(source_node_id, "source_node_id", 256) or ""; target = _optional_text(target_node_id, "target_node_id", 256) or ""
-    return f"flowg:v{FLOW_IR_VERSION}:{gap_kind.lower()}:{_hash(snapshot, gap_kind, owner, source, target)}"
+    owner = _text(owner_entity_id, "owner_entity_id", 256); source = _optional_text(source_node_id, "source_node_id", 256) or ""; target = _optional_text(target_node_id, "target_node_id", 256) or ""; disc = _text(discriminator, "flow gap discriminator", 1024, empty=True)
+    return f"flowg:v{FLOW_IR_VERSION}:{gap_kind.lower()}:{_hash(snapshot, gap_kind, owner, source, target, disc)}"
 
 
 def flow_path_id(snapshot_id: str, node_ids: Iterable[str], segment_ids: Iterable[str]) -> str:
@@ -193,8 +200,11 @@ class FlowNode:
         node = _text(self.node_id, "node_id", 256); key = _text(self.semantic_key, "semantic_key", MAX_SEMANTIC_KEY_CHARS); owner = _text(self.owner_entity_id, "owner_entity_id", 256)
         representation = _text(self.representation, "representation", pm.MAX_REPRESENTATION_CHARS).lower(); program_entity = _optional_text(self.program_entity_id, "program_entity_id", 256)
         roles = tuple(sorted({_enum(item, SEMANTIC_ROLES, "semantic role") for item in self.roles})); label = _text(self.label, "label", MAX_TEXT_CHARS, empty=True)
-        if kind == "CONSTANT" and label:
-            raise FlowIRError("constant label must be empty; raw constant values are not IR labels")
+        if kind == "CONSTANT":
+            if label:
+                raise FlowIRError("constant label must be empty; raw constant values are not IR labels")
+            if re.fullmatch(r"constant:[0-9a-f]{64}", key) is None:
+                raise FlowIRError("constant semantic_key must be constant:<64 lowercase hex>")
         properties = _node_properties(kind, self.properties); evidence = _refs(self.evidence_refs)
         for name, value in (("snapshot_id", snapshot), ("node_id", node), ("semantic_key", key), ("value_kind", kind), ("owner_entity_id", owner), ("representation", representation), ("program_entity_id", program_entity), ("roles", roles), ("label", label), ("properties", properties), ("evidence_refs", evidence)):
             object.__setattr__(self, name, value)
@@ -208,38 +218,38 @@ class FlowNode:
 @dataclass(frozen=True)
 class FlowEdge:
     snapshot_id: str; edge_id: str; kind: str; source_node_id: str; target_node_id: str; representation: str; producer: str
-    properties: dict[str, Any] = field(default_factory=dict); evidence_refs: tuple[str, ...] = field(default_factory=tuple)
+    discriminator: str = ""; properties: dict[str, Any] = field(default_factory=dict); evidence_refs: tuple[str, ...] = field(default_factory=tuple)
 
     def __post_init__(self) -> None:
         snapshot = _text(self.snapshot_id, "snapshot_id", 128); kind = _enum(self.kind, FLOW_EDGE_KINDS, "flow edge kind"); edge = _text(self.edge_id, "edge_id", 256)
-        source = _text(self.source_node_id, "source_node_id", 256); target = _text(self.target_node_id, "target_node_id", 256); representation = _text(self.representation, "representation", pm.MAX_REPRESENTATION_CHARS).lower(); producer = _text(self.producer, "producer", 256)
+        source = _text(self.source_node_id, "source_node_id", 256); target = _text(self.target_node_id, "target_node_id", 256); representation = _text(self.representation, "representation", pm.MAX_REPRESENTATION_CHARS).lower(); producer = _text(self.producer, "producer", 256); discriminator = _text(self.discriminator, "flow edge discriminator", 1024, empty=True)
         properties = _edge_properties(kind, self.properties); evidence = _refs(self.evidence_refs)
-        for name, value in (("snapshot_id", snapshot), ("edge_id", edge), ("kind", kind), ("source_node_id", source), ("target_node_id", target), ("representation", representation), ("producer", producer), ("properties", properties), ("evidence_refs", evidence)):
+        for name, value in (("snapshot_id", snapshot), ("edge_id", edge), ("kind", kind), ("source_node_id", source), ("target_node_id", target), ("representation", representation), ("producer", producer), ("discriminator", discriminator), ("properties", properties), ("evidence_refs", evidence)):
             object.__setattr__(self, name, value)
-        if self.edge_id != flow_edge_id(snapshot, kind, source, target):
+        if self.edge_id != flow_edge_id(snapshot, kind, source, target, discriminator):
             raise FlowIRError("flow edge id does not match canonical identity")
 
     def to_dict(self) -> dict[str, Any]:
-        return {"edge_id": self.edge_id, "kind": self.kind, "source_node_id": self.source_node_id, "target_node_id": self.target_node_id, "representation": self.representation, "producer": self.producer, "properties": dict(self.properties), "evidence_refs": list(self.evidence_refs)}
+        return {"edge_id": self.edge_id, "kind": self.kind, "source_node_id": self.source_node_id, "target_node_id": self.target_node_id, "representation": self.representation, "producer": self.producer, "discriminator": self.discriminator, "properties": dict(self.properties), "evidence_refs": list(self.evidence_refs)}
 
 
 @dataclass(frozen=True)
 class FlowGap:
     snapshot_id: str; gap_id: str; kind: str; owner_entity_id: str; representation: str; producer: str
-    source_node_id: str | None = None; target_node_id: str | None = None; reason: str = ""; evidence_refs: tuple[str, ...] = field(default_factory=tuple)
+    source_node_id: str | None = None; target_node_id: str | None = None; discriminator: str = ""; reason: str = ""; evidence_refs: tuple[str, ...] = field(default_factory=tuple)
 
     def __post_init__(self) -> None:
         snapshot = _text(self.snapshot_id, "snapshot_id", 128); kind = _enum(self.kind, FLOW_GAP_KINDS, "flow gap kind"); gap = _text(self.gap_id, "gap_id", 256); owner = _text(self.owner_entity_id, "owner_entity_id", 256)
-        representation = _text(self.representation, "representation", pm.MAX_REPRESENTATION_CHARS).lower(); producer = _text(self.producer, "producer", 256); source = _optional_text(self.source_node_id, "source_node_id", 256); target = _optional_text(self.target_node_id, "target_node_id", 256); reason = _text(self.reason, "reason", MAX_TEXT_CHARS, empty=True); evidence = _refs(self.evidence_refs)
+        representation = _text(self.representation, "representation", pm.MAX_REPRESENTATION_CHARS).lower(); producer = _text(self.producer, "producer", 256); source = _optional_text(self.source_node_id, "source_node_id", 256); target = _optional_text(self.target_node_id, "target_node_id", 256); discriminator = _text(self.discriminator, "flow gap discriminator", 1024, empty=True); reason = _text(self.reason, "reason", MAX_TEXT_CHARS, empty=True); evidence = _refs(self.evidence_refs)
         if source is None and target is None:
             raise FlowIRError("flow gap must anchor at least one known node")
-        for name, value in (("snapshot_id", snapshot), ("gap_id", gap), ("kind", kind), ("owner_entity_id", owner), ("representation", representation), ("producer", producer), ("source_node_id", source), ("target_node_id", target), ("reason", reason), ("evidence_refs", evidence)):
+        for name, value in (("snapshot_id", snapshot), ("gap_id", gap), ("kind", kind), ("owner_entity_id", owner), ("representation", representation), ("producer", producer), ("source_node_id", source), ("target_node_id", target), ("discriminator", discriminator), ("reason", reason), ("evidence_refs", evidence)):
             object.__setattr__(self, name, value)
-        if self.gap_id != flow_gap_id(snapshot, kind, owner, source, target):
+        if self.gap_id != flow_gap_id(snapshot, kind, owner, source, target, discriminator):
             raise FlowIRError("flow gap id does not match canonical identity")
 
     def to_dict(self) -> dict[str, Any]:
-        return {"gap_id": self.gap_id, "kind": self.kind, "owner_entity_id": self.owner_entity_id, "source_node_id": self.source_node_id, "target_node_id": self.target_node_id, "representation": self.representation, "producer": self.producer, "reason": self.reason, "evidence_refs": list(self.evidence_refs)}
+        return {"gap_id": self.gap_id, "kind": self.kind, "owner_entity_id": self.owner_entity_id, "source_node_id": self.source_node_id, "target_node_id": self.target_node_id, "representation": self.representation, "producer": self.producer, "discriminator": self.discriminator, "reason": self.reason, "evidence_refs": list(self.evidence_refs)}
 
 
 @dataclass(frozen=True)
