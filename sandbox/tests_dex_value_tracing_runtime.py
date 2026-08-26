@@ -122,8 +122,6 @@ class DalvikRuntimeAdapterTests(unittest.TestCase):
                             (2,),
                             "sha256:" + "b" * 64,
                         ),
-                        # Runtime normalization retains receiver 9, collapses J
-                        # from words (0,1), and keeps I at register 2.
                         dexflow.InstructionSpec(
                             4,
                             "invoke-direct",
@@ -232,6 +230,50 @@ class DalvikRuntimeAdapterTests(unittest.TestCase):
             "com.shared.Store.token",
         )
         self.assertEqual(fields[0].evidence_refs, ())
+
+    def test_instance_fields_fail_closed_without_receiver_alias_evidence(self) -> None:
+        field_ref = "Lcom/shared/Store;->token:Ljava/lang/String;"
+        root = self.method(
+            "instance-fields",
+            descriptor="(Ljava/lang/Object;Ljava/lang/String;)Ljava/lang/String;",
+            parameters=(
+                dexflow.ParameterSpec(0, 0, "Ljava/lang/Object;"),
+                dexflow.ParameterSpec(1, 1, "Ljava/lang/String;"),
+            ),
+            blocks=(
+                dexflow.BlockSpec(
+                    0,
+                    (
+                        dexflow.InstructionSpec(
+                            0,
+                            "iput-object",
+                            (1, 0),
+                            field_ref=field_ref,
+                            field_name="com.shared.Store.token",
+                        ),
+                        dexflow.InstructionSpec(
+                            2,
+                            "iget-object",
+                            (2, 0),
+                            field_ref=field_ref,
+                            field_name="com.shared.Store.token",
+                        ),
+                        dexflow.InstructionSpec(4, "return-object", (2,)),
+                    ),
+                ),
+            ),
+        )
+        analysis = self.builder().build(root.private_id)
+        kinds = {edge.kind for edge in analysis.document.edges}
+        self.assertNotIn("FIELD_WRITE", kinds)
+        self.assertNotIn("FIELD_READ", kinds)
+        gaps = [
+            gap
+            for gap in analysis.document.gaps
+            if gap.kind == "MISSING_EVIDENCE"
+            and "receiver alias" in gap.reason
+        ]
+        self.assertEqual(len(gaps), 2)
 
     def test_two_addr_reads_old_destination_before_write(self) -> None:
         root = self.method(
@@ -365,6 +407,9 @@ class DalvikRuntimeAdapterTests(unittest.TestCase):
             descriptor["instance_receiver_preserved_until_semantic_call_layer"]
         )
         self.assertTrue(descriptor["declaring_field_owner_canonical"])
+        self.assertTrue(descriptor["static_field_flow_proven"])
+        self.assertTrue(descriptor["instance_field_alias_required"])
+        self.assertTrue(descriptor["instance_field_unproven_is_gap"])
         self.assertTrue(descriptor["read_before_write_semantics"])
         self.assertTrue(descriptor["move_exception_is_explicit_gap"])
 
