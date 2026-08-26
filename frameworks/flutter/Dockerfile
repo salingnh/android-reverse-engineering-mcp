@@ -54,6 +54,7 @@ COPY ownership_contract.py /opt/safe-flutter/ownership_contract.py
 COPY program_model.py /opt/safe-flutter/program_model.py
 COPY application_map.py /opt/safe-flutter/application_map.py
 COPY context_retrieval.py /opt/safe-flutter/context_retrieval.py
+COPY flow_ir.py /opt/safe-flutter/flow_ir.py
 COPY sandbox/peg_schema.py /opt/safe-flutter/peg_schema.py
 COPY frameworks/flutter/cache_identity.py /opt/safe-flutter/cache_identity.py
 COPY frameworks/flutter/safe_blutter_adapter.py /opt/safe-flutter/safe_blutter_adapter.py
@@ -76,6 +77,7 @@ RUN set -eux; \
       /opt/safe-flutter/program_model.py \
       /opt/safe-flutter/application_map.py \
       /opt/safe-flutter/context_retrieval.py \
+      /opt/safe-flutter/flow_ir.py \
       /opt/safe-flutter/peg_schema.py \
       /opt/safe-flutter/cache_identity.py \
       /opt/safe-flutter/safe_blutter_adapter.py \
@@ -86,7 +88,7 @@ RUN set -eux; \
       /opt/safe-flutter/flutter_artifact.py \
       /opt/safe-flutter/flutter_export.py \
       /opt/safe-flutter/flutter_entrypoint.py; \
-    PYTHONPATH=/opt/safe-flutter python3 -c 'import application_map as amap; import context_retrieval as ctx; import program_model as pm; import flutter_program_model as provider; import flutter_context_retrieval as source; import peg_schema as peg; assert amap.descriptor()["application_map_version"] == 1; assert amap.descriptor()["persistent_map_storage"] is False; assert ctx.descriptor()["context_retrieval_version"] == 1; assert ctx.descriptor()["persistent_context_storage"] is False; assert pm.descriptor()["program_model_version"] == 1; assert pm.descriptor()["provider_continuation"] is True; assert provider.FlutterProgramProvider is not None; assert source.FlutterContextSourceProvider is not None; assert peg.PEG_SCHEMA_VERSION == 2'; \
+    PYTHONPATH=/opt/safe-flutter python3 -c 'import application_map as amap; import context_retrieval as ctx; import flow_ir as flow; import program_model as pm; import flutter_program_model as provider; import flutter_context_retrieval as source; import peg_schema as peg; assert amap.descriptor()["application_map_version"] == 1; assert amap.descriptor()["persistent_map_storage"] is False; assert ctx.descriptor()["context_retrieval_version"] == 1; assert ctx.descriptor()["persistent_context_storage"] is False; assert flow.descriptor()["flow_ir_version"] == 1; assert flow.descriptor()["calls_xref_are_data_flow"] is False; assert flow.descriptor()["persistent_flow_storage"] is False; assert flow.descriptor()["public_operation_added"] is False; assert pm.descriptor()["program_model_version"] == 1; assert pm.descriptor()["provider_continuation"] is True; assert provider.FlutterProgramProvider is not None; assert source.FlutterContextSourceProvider is not None; assert peg.PEG_SCHEMA_VERSION == 2'; \
     chmod 0555 /opt/safe-flutter/*.py; \
     chmod -R a-w /opt/blutter /opt/safe-flutter
 
