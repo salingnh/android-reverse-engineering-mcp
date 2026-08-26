@@ -1,0 +1,82 @@
+name: Test durable Flow IR
+
+on:
+  pull_request:
+    paths:
+      - 'flow_ir.py'
+      - 'tests_flow_ir.py'
+      - 'docs/FLOW_IR.md'
+      - 'program_model.py'
+      - 'sandbox/Dockerfile'
+      - 'frameworks/flutter/Dockerfile'
+      - 'plugins/safe-android-reverser/tool-catalogs/**'
+      - '.github/workflows/test-flow-ir.yml'
+  push:
+    branches: [master, 'feat/**']
+    tags: ['safe-v*']
+    paths:
+      - 'flow_ir.py'
+      - 'tests_flow_ir.py'
+      - 'docs/FLOW_IR.md'
+      - 'program_model.py'
+      - 'sandbox/Dockerfile'
+      - 'frameworks/flutter/Dockerfile'
+      - 'plugins/safe-android-reverser/tool-catalogs/**'
+      - '.github/workflows/test-flow-ir.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Test durable Flow IR contract
+        run: PYTHONPATH=. python3 tests_flow_ir.py
+
+      - name: Validate Flow IR Python syntax
+        run: python3 -m py_compile flow_ir.py tests_flow_ir.py
+
+      - name: Validate semantic boundary
+        run: |
+          PYTHONPATH=. python3 - <<'PY'
+          import json
+          from pathlib import Path
+          import flow_ir as flow
+          import program_model as pm
+
+          descriptor = flow.descriptor()
+          assert descriptor['flow_ir_version'] == 1, descriptor
+          assert descriptor['program_model_version'] == pm.PROGRAM_MODEL_VERSION, descriptor
+          assert descriptor['calls_xref_are_data_flow'] is False, descriptor
+          assert descriptor['persistent_flow_storage'] is False, descriptor
+          assert descriptor['public_operation_added'] is False, descriptor
+          assert 'CALLS' not in descriptor['edge_kinds'], descriptor
+          assert 'XREF' not in descriptor['edge_kinds'], descriptor
+
+          control = json.loads(
+              Path('plugins/safe-android-reverser/tool-catalogs/control-plane.json').read_text(
+                  encoding='utf-8'
+              )
+          )
+          static = json.loads(
+              Path('plugins/safe-android-reverser/tool-catalogs/static-core.json').read_text(
+                  encoding='utf-8'
+              )
+          )
+          public_names = {
+              item['name'] for item in [*control, *static]
+          }
+          stage_g_h = {
+              'trace_value',
+              'find_source_to_sink',
+              'find_auth_flow',
+              'trace_header_generation',
+              'find_signing_logic',
+              'trace_crypto',
+          }
+          assert public_names.isdisjoint(stage_g_h), public_names & stage_g_h
+          PY
