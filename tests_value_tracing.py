@@ -168,6 +168,68 @@ class ValueTracingQueryTests(unittest.TestCase):
         )
         self.assertEqual(result["flow"]["counts"]["edges"], 1)
 
+    def test_source_to_sink_reachable_node_budget_truncates_fail_closed(self):
+        source = self.node(
+            "parameter:0",
+            "PARAMETER",
+            properties={"parameter_index": 0},
+        )
+        middle = self.node("local:middle")
+        sink = self.node("return:root", "RETURN")
+        document = flow.FlowDocument(
+            self.snapshot,
+            nodes=(source, middle, sink),
+            edges=(
+                self.edge("FLOWS_TO", source, middle, "one"),
+                self.edge("FLOWS_TO", middle, sink, "two"),
+            ),
+        )
+        result = tracing.find_source_to_sink(
+            document,
+            owner_entity_id=self.owner,
+            source_selector={"kind": "parameter", "index": 0},
+            sink_selector={"kind": "return"},
+            max_nodes=2,
+        )
+        self.assertTrue(result["truncated"])
+        self.assertEqual(result["complete_path_count"], 0)
+
+    def test_source_to_sink_exploration_state_budget_truncates(self):
+        source = self.node(
+            "parameter:0",
+            "PARAMETER",
+            properties={"parameter_index": 0},
+        )
+        left = self.node("local:left")
+        right = self.node("local:right")
+        merge = self.node("local:merge")
+        sink = self.node("return:root", "RETURN")
+        document = flow.FlowDocument(
+            self.snapshot,
+            nodes=(source, left, right, merge, sink),
+            edges=(
+                self.edge("FLOWS_TO", source, left, "sl"),
+                self.edge("FLOWS_TO", source, right, "sr"),
+                self.edge("FLOWS_TO", left, merge, "lm"),
+                self.edge("FLOWS_TO", right, merge, "rm"),
+                self.edge("FLOWS_TO", merge, sink, "ms"),
+            ),
+        )
+        original = tracing.MAX_TRACE_STATES
+        tracing.MAX_TRACE_STATES = 2
+        try:
+            result = tracing.find_source_to_sink(
+                document,
+                owner_entity_id=self.owner,
+                source_selector={"kind": "parameter", "index": 0},
+                sink_selector={"kind": "return"},
+                max_nodes=20,
+            )
+        finally:
+            tracing.MAX_TRACE_STATES = original
+        self.assertTrue(result["truncated"])
+        self.assertEqual(result["complete_path_count"], 0)
+
     def test_limits_fail_closed(self):
         node = self.node("local:any")
         document = flow.FlowDocument(self.snapshot, nodes=(node,))
@@ -192,6 +254,7 @@ class ValueTracingQueryTests(unittest.TestCase):
         self.assertEqual(descriptor["flow_ir_version"], flow.FLOW_IR_VERSION)
         self.assertFalse(descriptor["calls_xref_are_data_flow"])
         self.assertFalse(descriptor["gaps_are_traversable"])
+        self.assertEqual(descriptor["max_trace_states"], tracing.MAX_TRACE_STATES)
 
 
 if __name__ == "__main__":
