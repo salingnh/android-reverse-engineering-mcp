@@ -24,10 +24,15 @@ class FlowIRTests(unittest.TestCase):
         snapshot=None,
     ):
         snapshot = snapshot or self.snapshot
+        semantic_key = (
+            flow.constant_semantic_key(key)
+            if kind == "CONSTANT" and not str(key).startswith("constant:")
+            else key
+        )
         return flow.FlowNode(
             snapshot_id=snapshot,
-            node_id=flow.flow_node_id(snapshot, kind, self.owner, key),
-            semantic_key=key,
+            node_id=flow.flow_node_id(snapshot, kind, self.owner, semantic_key),
+            semantic_key=semantic_key,
             value_kind=kind,
             owner_entity_id=self.owner,
             representation="dex",
@@ -37,7 +42,7 @@ class FlowIRTests(unittest.TestCase):
             evidence_refs=("pme:test",),
         )
 
-    def edge(self, source, target, kind="ASSIGNMENT", *, properties=None):
+    def edge(self, source, target, kind="ASSIGNMENT", *, discriminator="", properties=None):
         return flow.FlowEdge(
             snapshot_id=self.snapshot,
             edge_id=flow.flow_edge_id(
@@ -45,17 +50,19 @@ class FlowIRTests(unittest.TestCase):
                 kind,
                 source.node_id,
                 target.node_id,
+                discriminator,
             ),
             kind=kind,
             source_node_id=source.node_id,
             target_node_id=target.node_id,
             representation="dex",
             producer="fixture-producer",
+            discriminator=discriminator,
             properties=properties or {},
             evidence_refs=("pme:edge",),
         )
 
-    def gap(self, source, target, kind="DYNAMIC_DISPATCH"):
+    def gap(self, source, target, kind="DYNAMIC_DISPATCH", *, discriminator=""):
         return flow.FlowGap(
             snapshot_id=self.snapshot,
             gap_id=flow.flow_gap_id(
@@ -64,6 +71,7 @@ class FlowIRTests(unittest.TestCase):
                 self.owner,
                 source.node_id,
                 target.node_id,
+                discriminator,
             ),
             kind=kind,
             owner_entity_id=self.owner,
@@ -71,6 +79,7 @@ class FlowIRTests(unittest.TestCase):
             producer="fixture-producer",
             source_node_id=source.node_id,
             target_node_id=target.node_id,
+            discriminator=discriminator,
             reason="target cannot be resolved statically",
             evidence_refs=("pme:gap",),
         )
@@ -92,20 +101,10 @@ class FlowIRTests(unittest.TestCase):
     def test_deterministic_identity_and_serialization(self):
         left = self.node("local:z")
         right = self.node("local:a", roles=("SINK", "SOURCE", "SINK"))
-        edge = self.edge(right, left)
+        edge = self.edge(right, left, discriminator="statement:12")
         path = self.path((right, left), (edge,), complete=True)
-        first = flow.FlowDocument(
-            self.snapshot,
-            nodes=(left, right),
-            edges=(edge,),
-            paths=(path,),
-        )
-        second = flow.FlowDocument(
-            self.snapshot,
-            nodes=(right, left),
-            edges=(edge,),
-            paths=(path,),
-        )
+        first = flow.FlowDocument(self.snapshot, nodes=(left, right), edges=(edge,), paths=(path,))
+        second = flow.FlowDocument(self.snapshot, nodes=(right, left), edges=(edge,), paths=(path,))
         self.assertEqual(first.to_dict(), second.to_dict())
         self.assertEqual(right.roles, ("SINK", "SOURCE"))
         self.assertEqual(
@@ -129,23 +128,28 @@ class FlowIRTests(unittest.TestCase):
         with self.assertRaises(flow.FlowIRError):
             self.node("x", roles=("AUTH_MAGIC",))
         with self.assertRaises(flow.FlowIRError):
-            self.node("x", kind="CONSTANT", properties={"raw_value": "secret"})
+            self.node("secret", kind="CONSTANT", properties={"raw_value": "secret"})
         with self.assertRaisesRegex(flow.FlowIRError, "constant label"):
-            self.node("constant:secret", kind="CONSTANT", label="Bearer real-secret")
+            self.node("secret-label", kind="CONSTANT", label="Bearer real-secret")
+        with self.assertRaisesRegex(flow.FlowIRError, "constant semantic_key"):
+            flow.FlowNode(
+                self.snapshot,
+                flow.flow_node_id(self.snapshot, "CONSTANT", self.owner, "constant:plaintext"),
+                "constant:plaintext",
+                "CONSTANT",
+                self.owner,
+                "dex",
+            )
         with self.assertRaisesRegex(flow.FlowIRError, "value_fingerprint"):
             self.node(
-                "constant:bad-fingerprint",
+                "bad-fingerprint",
                 kind="CONSTANT",
                 properties={"value_fingerprint": "sha256:abc"},
             )
         with self.assertRaisesRegex(flow.FlowIRError, "parameter_index"):
-            self.node(
-                "parameter:bad-index",
-                kind="PARAMETER",
-                properties={"parameter_index": "0"},
-            )
+            self.node("parameter:bad-index", kind="PARAMETER", properties={"parameter_index": "0"})
         constant = self.node(
-            "constant:bearer",
+            "bearer-literal@statement-24",
             kind="CONSTANT",
             properties={
                 "literal_kind": "string",
@@ -153,6 +157,7 @@ class FlowIRTests(unittest.TestCase):
                 "value_fingerprint": "sha256:" + "a" * 64,
             },
         )
+        self.assertRegex(constant.semantic_key, r"^constant:[0-9a-f]{64}$")
         self.assertNotIn("value", constant.properties)
         self.assertEqual(constant.label, "")
 
@@ -165,6 +170,24 @@ class FlowIRTests(unittest.TestCase):
             self.edge(left, right, properties={"statement_offset": True})
         with self.assertRaisesRegex(flow.FlowIRError, "non-canonical"):
             self.edge(left, right, properties={"callsite_guess": 42})
+
+    def test_multi_edge_and_gap_discriminator_preserves_occurrences(self):
+        left = self.node("left")
+        right = self.node("right")
+        edge_a = self.edge(left, right, discriminator="callsite:10")
+        edge_b = self.edge(left, right, discriminator="callsite:20")
+        self.assertNotEqual(edge_a.edge_id, edge_b.edge_id)
+        gap_a = self.gap(left, right, discriminator="dispatch:10")
+        gap_b = self.gap(left, right, discriminator="dispatch:20")
+        self.assertNotEqual(gap_a.gap_id, gap_b.gap_id)
+        document = flow.FlowDocument(
+            self.snapshot,
+            nodes=(left, right),
+            edges=(edge_a, edge_b),
+            gaps=(gap_a, gap_b),
+        )
+        self.assertEqual(len(document.edges), 2)
+        self.assertEqual(len(document.gaps), 2)
 
     def test_calls_and_xref_are_not_flow_edges(self):
         left = self.node("left")
@@ -189,12 +212,7 @@ class FlowIRTests(unittest.TestCase):
         right = self.node("right", roles=("SINK",))
         gap = self.gap(left, right, "REFLECTION")
         path = self.path((left, right), (gap,), complete=False)
-        document = flow.FlowDocument(
-            self.snapshot,
-            nodes=(left, right),
-            gaps=(gap,),
-            paths=(path,),
-        )
+        document = flow.FlowDocument(self.snapshot, nodes=(left, right), gaps=(gap,), paths=(path,))
         self.assertEqual(document.paths[0].complete, False)
         self.assertEqual(document.gaps[0].kind, "REFLECTION")
 
@@ -204,12 +222,7 @@ class FlowIRTests(unittest.TestCase):
         gap = self.gap(left, right)
         path = self.path((left, right), (gap,), complete=True)
         with self.assertRaisesRegex(flow.FlowIRError, "complete.*gap"):
-            flow.FlowDocument(
-                self.snapshot,
-                nodes=(left, right),
-                gaps=(gap,),
-                paths=(path,),
-            )
+            flow.FlowDocument(self.snapshot, nodes=(left, right), gaps=(gap,), paths=(path,))
 
     def test_incomplete_path_requires_gap(self):
         left = self.node("left")
@@ -217,12 +230,7 @@ class FlowIRTests(unittest.TestCase):
         edge = self.edge(left, right)
         path = self.path((left, right), (edge,), complete=False)
         with self.assertRaisesRegex(flow.FlowIRError, "incomplete.*gap"):
-            flow.FlowDocument(
-                self.snapshot,
-                nodes=(left, right),
-                edges=(edge,),
-                paths=(path,),
-            )
+            flow.FlowDocument(self.snapshot, nodes=(left, right), edges=(edge,), paths=(path,))
 
     def test_path_complete_is_strict_boolean(self):
         left = self.node("left")
@@ -232,13 +240,7 @@ class FlowIRTests(unittest.TestCase):
         segment_ids = (edge.edge_id,)
         path_id = flow.flow_path_id(self.snapshot, node_ids, segment_ids)
         with self.assertRaisesRegex(flow.FlowIRError, "complete must be boolean"):
-            flow.FlowPath(
-                self.snapshot,
-                path_id,
-                node_ids,
-                segment_ids,
-                "false",  # type: ignore[arg-type]
-            )
+            flow.FlowPath(self.snapshot, path_id, node_ids, segment_ids, "false")  # type: ignore[arg-type]
 
     def test_path_segment_must_connect_exact_adjacent_nodes(self):
         one = self.node("one")
@@ -255,12 +257,7 @@ class FlowIRTests(unittest.TestCase):
             True,
         )
         with self.assertRaisesRegex(flow.FlowIRError, "adjacent"):
-            flow.FlowDocument(
-                self.snapshot,
-                nodes=(one, two, three),
-                edges=(wrong,),
-                paths=(path,),
-            )
+            flow.FlowDocument(self.snapshot, nodes=(one, two, three), edges=(wrong,), paths=(path,))
 
     def test_snapshot_mismatch_and_duplicate_ids_fail_closed(self):
         left = self.node("left")
@@ -274,10 +271,7 @@ class FlowIRTests(unittest.TestCase):
     def test_hard_count_and_serialized_size_bounds(self):
         node = self.node("repeated")
         with self.assertRaisesRegex(flow.FlowIRError, "node count"):
-            flow.FlowDocument(
-                self.snapshot,
-                nodes=(node,) * (flow.MAX_FLOW_NODES + 1),
-            )
+            flow.FlowDocument(self.snapshot, nodes=(node,) * (flow.MAX_FLOW_NODES + 1))
         one = self.node("one", label="x" * 400)
         two = self.node("two", label="y" * 400)
         with mock.patch.object(flow, "MAX_FLOW_DOCUMENT_BYTES", 512):
@@ -287,14 +281,8 @@ class FlowIRTests(unittest.TestCase):
     def test_descriptor_is_shared_ir_not_public_operation_or_storage(self):
         descriptor = flow.descriptor()
         self.assertEqual(descriptor["flow_ir_version"], 1)
-        self.assertEqual(
-            descriptor["program_model_version"],
-            pm.PROGRAM_MODEL_VERSION,
-        )
-        self.assertEqual(
-            descriptor["durable_concepts"],
-            ["FlowNode", "FlowEdge", "FlowPath", "FlowGap"],
-        )
+        self.assertEqual(descriptor["program_model_version"], pm.PROGRAM_MODEL_VERSION)
+        self.assertEqual(descriptor["durable_concepts"], ["FlowNode", "FlowEdge", "FlowPath", "FlowGap"])
         self.assertFalse(descriptor["persistent_flow_storage"])
         self.assertFalse(descriptor["public_operation_added"])
         self.assertFalse(descriptor["raw_constant_values"])
