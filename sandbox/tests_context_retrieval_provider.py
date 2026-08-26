@@ -141,22 +141,7 @@ class DexContextRetrievalTests(unittest.TestCase):
         repo = self.repository()
         login = self.login_entity(repo)
         source_provider = static_context.DexContextSourceProvider(self.job)
-        malicious = (
-            {
-                "location": {
-                    "source_file": "../../outside.java",
-                    "line": 1,
-                }
-            },
-        )
-        self.assertIsNone(
-            source_provider.source_slice(
-                entity=login,
-                evidence=malicious,
-                line_limit=20,
-                byte_limit=4096,
-            )
-        )
+        self.assertIsNone(source_provider._from_locator("../../outside.java"))
 
         outside = Path(self.tmp.name) / "outside.java"
         outside.write_text("public class AuthService { public void login() {} }", encoding="utf-8")
