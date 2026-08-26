@@ -82,5 +82,78 @@
       "required": ["job_id", "representation", "entity_id"],
       "additionalProperties": false
     }
+  },
+  {
+    "name": "trace_value",
+    "description": "Trace a semantic value through bounded proven data-flow evidence from one canonical DEX function; structural CALLS/XREF topology is never treated as value flow.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "job_id": {"type": "string", "pattern": "^[0-9a-f]{12}$"},
+        "representation": {"type": "string", "enum": ["dex"]},
+        "entity_id": {"type": "string", "minLength": 1, "maxLength": 256},
+        "seed": {
+          "type": "object",
+          "properties": {
+            "kind": {"type": "string", "enum": ["parameter", "return", "field", "node"]},
+            "index": {"type": "integer", "minimum": 0, "maximum": 1024},
+            "name": {"type": "string", "minLength": 1, "maxLength": 512},
+            "node_id": {"type": "string", "minLength": 1, "maxLength": 256}
+          },
+          "required": ["kind"],
+          "additionalProperties": false
+        },
+        "direction": {"type": "string", "enum": ["forward", "backward", "both"], "default": "both"},
+        "method_limit": {"type": "integer", "minimum": 1, "maximum": 32, "default": 12},
+        "analysis_depth": {"type": "integer", "minimum": 0, "maximum": 8, "default": 3},
+        "instruction_limit": {"type": "integer", "minimum": 1, "maximum": 20000, "default": 8000},
+        "trace_depth": {"type": "integer", "minimum": 0, "maximum": 32, "default": 8},
+        "node_limit": {"type": "integer", "minimum": 1, "maximum": 500, "default": 160}
+      },
+      "required": ["job_id", "representation", "entity_id", "seed"],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "find_source_to_sink",
+    "description": "Find bounded complete source-to-sink paths over proven DEX Flow IR edges while returning unsupported boundaries as non-traversable gaps.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "job_id": {"type": "string", "pattern": "^[0-9a-f]{12}$"},
+        "representation": {"type": "string", "enum": ["dex"]},
+        "entity_id": {"type": "string", "minLength": 1, "maxLength": 256},
+        "source": {
+          "type": "object",
+          "properties": {
+            "kind": {"type": "string", "enum": ["parameter", "return", "field", "node"]},
+            "index": {"type": "integer", "minimum": 0, "maximum": 1024},
+            "name": {"type": "string", "minLength": 1, "maxLength": 512},
+            "node_id": {"type": "string", "minLength": 1, "maxLength": 256}
+          },
+          "required": ["kind"],
+          "additionalProperties": false
+        },
+        "sink": {
+          "type": "object",
+          "properties": {
+            "kind": {"type": "string", "enum": ["parameter", "return", "field", "node"]},
+            "index": {"type": "integer", "minimum": 0, "maximum": 1024},
+            "name": {"type": "string", "minLength": 1, "maxLength": 512},
+            "node_id": {"type": "string", "minLength": 1, "maxLength": 256}
+          },
+          "required": ["kind"],
+          "additionalProperties": false
+        },
+        "method_limit": {"type": "integer", "minimum": 1, "maximum": 32, "default": 12},
+        "analysis_depth": {"type": "integer", "minimum": 0, "maximum": 8, "default": 3},
+        "instruction_limit": {"type": "integer", "minimum": 1, "maximum": 20000, "default": 8000},
+        "path_depth": {"type": "integer", "minimum": 1, "maximum": 32, "default": 12},
+        "path_limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20},
+        "node_limit": {"type": "integer", "minimum": 2, "maximum": 500, "default": 240}
+      },
+      "required": ["job_id", "representation", "entity_id", "source", "sink"],
+      "additionalProperties": false
+    }
   }
 ]
