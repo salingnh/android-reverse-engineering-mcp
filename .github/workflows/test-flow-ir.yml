@@ -9,6 +9,8 @@ on:
       - 'program_model.py'
       - 'sandbox/Dockerfile'
       - 'frameworks/flutter/Dockerfile'
+      - 'frameworks/flutter/tools.lock.env'
+      - 'plugins/safe-android-reverser/VERSION'
       - 'plugins/safe-android-reverser/tool-catalogs/**'
       - '.github/workflows/test-flow-ir.yml'
   push:
@@ -21,6 +23,8 @@ on:
       - 'program_model.py'
       - 'sandbox/Dockerfile'
       - 'frameworks/flutter/Dockerfile'
+      - 'frameworks/flutter/tools.lock.env'
+      - 'plugins/safe-android-reverser/VERSION'
       - 'plugins/safe-android-reverser/tool-catalogs/**'
       - '.github/workflows/test-flow-ir.yml'
   workflow_dispatch:
@@ -54,6 +58,7 @@ jobs:
           assert descriptor['calls_xref_are_data_flow'] is False, descriptor
           assert descriptor['persistent_flow_storage'] is False, descriptor
           assert descriptor['public_operation_added'] is False, descriptor
+          assert descriptor['raw_constant_values'] is False, descriptor
           assert 'CALLS' not in descriptor['edge_kinds'], descriptor
           assert 'XREF' not in descriptor['edge_kinds'], descriptor
 
@@ -67,16 +72,70 @@ jobs:
                   encoding='utf-8'
               )
           )
-          public_names = {
-              item['name'] for item in [*control, *static]
-          }
+          public_names = {item['name'] for item in [*control, *static]}
           stage_g_h = {
-              'trace_value',
-              'find_source_to_sink',
-              'find_auth_flow',
-              'trace_header_generation',
-              'find_signing_logic',
-              'trace_crypto',
+              'trace_value', 'find_source_to_sink', 'find_auth_flow',
+              'trace_header_generation', 'find_signing_logic', 'trace_crypto',
           }
           assert public_names.isdisjoint(stage_g_h), public_names & stage_g_h
           PY
+
+  locked-images:
+    needs: contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Read pinned build inputs
+        id: inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          source frameworks/flutter/tools.lock.env
+          version="$(tr -d '[:space:]' < plugins/safe-android-reverser/VERSION)"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "blutter_repository=$BLUTTER_REPOSITORY" >> "$GITHUB_OUTPUT"
+          echo "blutter_commit=$BLUTTER_COMMIT" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build static-core image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: sandbox/Dockerfile
+          load: true
+          push: false
+          tags: safe-android-reverser-flow:ci
+          build-args: |
+            SAFE_REVERSER_VERSION=${{ steps.inputs.outputs.version }}
+            SAFE_REVERSER_BUILD_COMMIT=${{ github.sha }}
+          cache-from: type=gha,scope=static-core
+
+      - name: Build framework-flutter image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: frameworks/flutter/Dockerfile
+          load: true
+          push: false
+          tags: safe-android-reverser-flutter-flow:ci
+          build-args: |
+            SAFE_REVERSER_VERSION=${{ steps.inputs.outputs.version }}
+            SAFE_REVERSER_BUILD_COMMIT=${{ github.sha }}
+            BLUTTER_REPOSITORY=${{ steps.inputs.outputs.blutter_repository }}
+            BLUTTER_COMMIT=${{ steps.inputs.outputs.blutter_commit }}
+          cache-from: type=gha,scope=flutter-profile
+
+      - name: Verify identical Flow IR contract in both locked images
+        run: |
+          for image in safe-android-reverser-flow:ci safe-android-reverser-flutter-flow:ci; do
+            docker run --rm \
+              --network=none --read-only --cap-drop=ALL \
+              --security-opt=no-new-privileges \
+              --tmpfs=/tmp:rw,nosuid,nodev,size=128m \
+              --entrypoint=python3 \
+              "$image" \
+              -c 'import flow_ir as f; d=f.descriptor(); assert d["flow_ir_version"] == 1; assert d["program_model_version"] == 1; assert d["calls_xref_are_data_flow"] is False; assert d["persistent_flow_storage"] is False; assert d["public_operation_added"] is False; assert d["raw_constant_values"] is False'
+          done
