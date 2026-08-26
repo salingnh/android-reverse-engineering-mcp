@@ -17,8 +17,14 @@ from .worker import McpContainerWorker, WorkerProtocolError
 
 MAX_ENABLED_CAPABILITIES = 64
 CONTROLLED_BUILD_PROVIDER_ENV = "SAFE_REVERSER_CONTROLLED_BUILD_PROVIDER"
-MAX_MAP_CURSOR_CHARS = 4096
-MAX_MAP_RELATIONSHIP_KINDS = 32
+MAX_PROGRAM_MODEL_CURSOR_CHARS = 4096
+MAX_PROGRAM_MODEL_RELATIONSHIP_KINDS = 32
+MAX_CONTEXT_RELATIONSHIP_LIMIT = 120
+MAX_CONTEXT_EVIDENCE_LIMIT = 32
+MAX_CONTEXT_SOURCE_LINE_LIMIT = 400
+MAX_CONTEXT_SOURCE_BYTE_LIMIT = 64 * 1024
+MIN_CONTEXT_RESPONSE_BUDGET_BYTES = 32 * 1024
+MAX_CONTEXT_RESPONSE_BUDGET_BYTES = 256 * 1024
 
 
 class CapabilityAdapter(Protocol):
@@ -102,6 +108,47 @@ class McpWorkerAdapter:
         return self.worker.call_internal(name, args, timeout=360)
 
 
+def _bounded_int_arg(
+    args: dict[str, Any],
+    name: str,
+    default: int,
+    minimum: int,
+    maximum: int,
+) -> int:
+    try:
+        value = int(args.get(name, default))
+    except (TypeError, ValueError) as exc:
+        raise ContractError(f"invalid {name}") from exc
+    if value < minimum or value > maximum:
+        raise ContractError(f"invalid {name}")
+    return value
+
+
+def _append_relationship_filters(
+    argv: list[str], args: dict[str, Any], *, error_prefix: str
+) -> None:
+    kinds = args.get("relationship_kinds")
+    if kinds is not None:
+        if (
+            not isinstance(kinds, list)
+            or len(kinds) > MAX_PROGRAM_MODEL_RELATIONSHIP_KINDS
+            or any(
+                not isinstance(item, str)
+                or not item.strip()
+                or len(item) > 128
+                for item in kinds
+            )
+        ):
+            raise ContractError(f"invalid {error_prefix} relationship_kinds")
+        for kind in kinds:
+            argv.extend(["--relationship-kind", kind.strip()])
+    cursor = str(args.get("cursor") or "").strip()
+    if cursor:
+        if len(cursor) > MAX_PROGRAM_MODEL_CURSOR_CHARS:
+            raise ContractError(f"{error_prefix} cursor exceeds size bound")
+        argv.extend(["--cursor", cursor])
+
+
 class FlutterAotAdapter:
     """Control-plane adapter around the Flutter domain capability."""
 
@@ -130,42 +177,81 @@ class FlutterAotAdapter:
     def program_model_call(
         self, name: str, args: dict[str, Any]
     ) -> dict[str, Any]:
-        if name not in {"get_application_map", "expand_application_node"}:
+        if name not in {
+            "get_application_map",
+            "expand_application_node",
+            "get_function_context",
+        }:
             raise ContractError(f"unsupported Program Model operation: {name}")
-        argv = [
-            "--ownership-scope",
-            str(args.get("ownership_scope", "application")),
-            "--node-limit",
-            str(args.get("node_limit", 40)),
-            "--edge-limit",
-            str(args.get("edge_limit", 100)),
-        ]
-        if name == "expand_application_node":
+
+        ownership_scope = str(args.get("ownership_scope", "application"))
+        if name == "get_application_map":
+            argv = [
+                "--ownership-scope",
+                ownership_scope,
+                "--node-limit",
+                str(args.get("node_limit", 40)),
+                "--edge-limit",
+                str(args.get("edge_limit", 100)),
+            ]
+        elif name == "expand_application_node":
             entity_id = str(args.get("entity_id") or "").strip()
             if not entity_id or len(entity_id) > 256:
                 raise ContractError("invalid Application Map entity_id")
-            argv.extend(
-                [
-                    entity_id,
-                    "--direction",
-                    str(args.get("direction", "both")),
-                ]
+            argv = [
+                entity_id,
+                "--ownership-scope",
+                ownership_scope,
+                "--node-limit",
+                str(args.get("node_limit", 40)),
+                "--edge-limit",
+                str(args.get("edge_limit", 100)),
+                "--direction",
+                str(args.get("direction", "both")),
+            ]
+            _append_relationship_filters(argv, args, error_prefix="Application Map")
+        else:
+            entity_id = str(args.get("entity_id") or "").strip()
+            if not entity_id or len(entity_id) > 256:
+                raise ContractError("invalid function context entity_id")
+            relationship_limit = _bounded_int_arg(
+                args, "relationship_limit", 32, 1, MAX_CONTEXT_RELATIONSHIP_LIMIT
             )
-            kinds = args.get("relationship_kinds")
-            if kinds is not None:
-                if (
-                    not isinstance(kinds, list)
-                    or len(kinds) > MAX_MAP_RELATIONSHIP_KINDS
-                    or any(not isinstance(item, str) or not item for item in kinds)
-                ):
-                    raise ContractError("invalid Application Map relationship_kinds")
-                for kind in kinds:
-                    argv.extend(["--relationship-kind", kind])
-            cursor = str(args.get("cursor") or "").strip()
-            if cursor:
-                if len(cursor) > MAX_MAP_CURSOR_CHARS:
-                    raise ContractError("Application Map cursor exceeds size bound")
-                argv.extend(["--cursor", cursor])
+            evidence_limit = _bounded_int_arg(
+                args, "evidence_limit", 12, 1, MAX_CONTEXT_EVIDENCE_LIMIT
+            )
+            source_line_limit = _bounded_int_arg(
+                args, "source_line_limit", 120, 1, MAX_CONTEXT_SOURCE_LINE_LIMIT
+            )
+            source_byte_limit = _bounded_int_arg(
+                args, "source_byte_limit", 16 * 1024, 1024, MAX_CONTEXT_SOURCE_BYTE_LIMIT
+            )
+            response_budget = _bounded_int_arg(
+                args,
+                "response_budget_bytes",
+                64 * 1024,
+                MIN_CONTEXT_RESPONSE_BUDGET_BYTES,
+                MAX_CONTEXT_RESPONSE_BUDGET_BYTES,
+            )
+            argv = [
+                entity_id,
+                "--ownership-scope",
+                ownership_scope,
+                "--direction",
+                str(args.get("direction", "both")),
+                "--relationship-limit",
+                str(relationship_limit),
+                "--evidence-limit",
+                str(evidence_limit),
+                "--source-line-limit",
+                str(source_line_limit),
+                "--source-byte-limit",
+                str(source_byte_limit),
+                "--response-budget-bytes",
+                str(response_budget),
+            ]
+            _append_relationship_filters(argv, args, error_prefix="function context")
+
         return self.capability._semantic(
             args.get("job_id"),
             name,
