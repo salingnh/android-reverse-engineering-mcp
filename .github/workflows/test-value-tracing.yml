@@ -1,0 +1,186 @@
+name: Test localized value tracing
+
+on:
+  pull_request:
+    paths:
+      - 'flow_ir.py'
+      - 'value_tracing.py'
+      - 'tests_value_tracing.py'
+      - 'sandbox/dex_value_tracing.py'
+      - 'sandbox/static_value_tracing.py'
+      - 'sandbox/tests_dex_value_tracing.py'
+      - 'sandbox/mcp_entrypoint.py'
+      - 'sandbox/Dockerfile'
+      - 'plugins/safe-android-reverser/lib/safe_reverser/worker.py'
+      - 'plugins/safe-android-reverser/lib/safe_reverser/semantic_operations.py'
+      - 'plugins/safe-android-reverser/lib/safe_reverser/semantic_router.py'
+      - 'plugins/safe-android-reverser/tests/test_value_tracing_routing.py'
+      - 'plugins/safe-android-reverser/tool-catalogs/control-plane.json'
+      - 'docs/VALUE_TRACING.md'
+      - '.github/workflows/test-value-tracing.yml'
+  push:
+    branches: [master, 'feat/**']
+    tags: ['safe-v*']
+    paths:
+      - 'flow_ir.py'
+      - 'value_tracing.py'
+      - 'tests_value_tracing.py'
+      - 'sandbox/dex_value_tracing.py'
+      - 'sandbox/static_value_tracing.py'
+      - 'sandbox/tests_dex_value_tracing.py'
+      - 'sandbox/mcp_entrypoint.py'
+      - 'sandbox/Dockerfile'
+      - 'plugins/safe-android-reverser/lib/safe_reverser/worker.py'
+      - 'plugins/safe-android-reverser/lib/safe_reverser/semantic_operations.py'
+      - 'plugins/safe-android-reverser/lib/safe_reverser/semantic_router.py'
+      - 'plugins/safe-android-reverser/tests/test_value_tracing_routing.py'
+      - 'plugins/safe-android-reverser/tool-catalogs/control-plane.json'
+      - 'docs/VALUE_TRACING.md'
+      - '.github/workflows/test-value-tracing.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Test semantic Flow IR query layer
+        run: PYTHONPATH=. python3 tests_value_tracing.py
+
+      - name: Test normalized DEX value-flow producer
+        run: PYTHONPATH=.:sandbox python3 sandbox/tests_dex_value_tracing.py
+
+      - name: Test control-plane value routing
+        run: PYTHONPATH=plugins/safe-android-reverser/lib python3 plugins/safe-android-reverser/tests/test_value_tracing_routing.py
+
+      - name: Validate Stage G Python syntax
+        run: |
+          python3 -m py_compile \
+            value_tracing.py \
+            tests_value_tracing.py \
+            sandbox/dex_value_tracing.py \
+            sandbox/static_value_tracing.py \
+            sandbox/tests_dex_value_tracing.py \
+            plugins/safe-android-reverser/lib/safe_reverser/worker.py \
+            plugins/safe-android-reverser/lib/safe_reverser/semantic_operations.py \
+            plugins/safe-android-reverser/lib/safe_reverser/semantic_router.py \
+            plugins/safe-android-reverser/tests/test_value_tracing_routing.py
+
+      - name: Validate semantic invariants
+        run: |
+          PYTHONPATH=.:sandbox:plugins/safe-android-reverser/lib python3 - <<'PY'
+          import json
+          from pathlib import Path
+          import dex_value_tracing as dexflow
+          import flow_ir as flow
+          import value_tracing as tracing
+          from safe_reverser.semantic_operations import (
+              VALUE_FLOW_ROUTABLE_REPRESENTATIONS,
+              VALUE_FLOW_SEMANTIC_OPERATIONS,
+          )
+
+          assert flow.descriptor()['calls_xref_are_data_flow'] is False
+          assert tracing.descriptor()['calls_xref_are_data_flow'] is False
+          assert tracing.descriptor()['gaps_are_traversable'] is False
+          assert dexflow.descriptor()['calls_xref_are_data_flow'] is False
+          assert dexflow.descriptor()['raw_constants_emitted'] is False
+          assert dexflow.descriptor()['persistent_flow_storage'] is False
+          assert VALUE_FLOW_SEMANTIC_OPERATIONS == {'trace_value', 'find_source_to_sink'}
+          assert VALUE_FLOW_ROUTABLE_REPRESENTATIONS == {'dex'}
+
+          catalog = json.loads(
+              Path('plugins/safe-android-reverser/tool-catalogs/control-plane.json').read_text(
+                  encoding='utf-8'
+              )
+          )
+          names = [item['name'] for item in catalog]
+          assert names.count('trace_value') == 1, names
+          assert names.count('find_source_to_sink') == 1, names
+          trace_schema = next(item['inputSchema'] for item in catalog if item['name'] == 'trace_value')
+          sink_schema = next(item['inputSchema'] for item in catalog if item['name'] == 'find_source_to_sink')
+          assert trace_schema['properties']['representation']['enum'] == ['dex']
+          assert sink_schema['properties']['representation']['enum'] == ['dex']
+          assert 'register' not in trace_schema['properties']['seed']['properties']['kind']['enum']
+          PY
+
+  locked-image:
+    needs: contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Read release version
+        id: version
+        shell: bash
+        run: |
+          version="$(tr -d '[:space:]' < plugins/safe-android-reverser/VERSION)"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build static-core image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: sandbox/Dockerfile
+          load: true
+          push: false
+          tags: safe-android-reverser-value-flow:ci
+          build-args: |
+            SAFE_REVERSER_VERSION=${{ steps.version.outputs.version }}
+            SAFE_REVERSER_BUILD_COMMIT=${{ github.sha }}
+          cache-from: type=gha,scope=static-core
+
+      - name: Run value-flow contracts inside locked image
+        run: |
+          for test in /workspace/tests_value_tracing.py /workspace/sandbox/tests_dex_value_tracing.py; do
+            docker run --rm \
+              --network=none --read-only --cap-drop=ALL \
+              --security-opt=no-new-privileges \
+              --tmpfs=/tmp:rw,nosuid,nodev,size=256m \
+              --tmpfs=/work:rw,nosuid,nodev,size=256m \
+              --user="$(id -u):$(id -g)" \
+              --volume="$PWD:/workspace:ro" \
+              --entrypoint=python3 \
+              safe-android-reverser-value-flow:ci \
+              "$test"
+          done
+
+      - name: Verify locked worker internal ABI and health
+        run: |
+          mkdir -p "$RUNNER_TEMP/value-flow-data"
+          output="$RUNNER_TEMP/value-flow-health.jsonl"
+          printf '%s\n' \
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"ci","version":"1"}}}' \
+            '{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}' \
+            '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' \
+            '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"health","arguments":{}}}' \
+          | docker run --rm -i \
+              --network=none --read-only --cap-drop=ALL \
+              --security-opt=no-new-privileges \
+              --tmpfs=/tmp:rw,nosuid,nodev,size=256m \
+              --tmpfs=/work:rw,nosuid,nodev,size=256m \
+              --user="$(id -u):$(id -g)" \
+              --volume="$PWD:/workspace:ro" \
+              --volume="$RUNNER_TEMP/value-flow-data:/data:rw" \
+              safe-android-reverser-value-flow:ci > "$output"
+          python3 - "$output" <<'PY'
+          import json
+          import sys
+          rows = [json.loads(line) for line in open(sys.argv[1], encoding='utf-8') if line.strip()]
+          tools = next(item for item in rows if item.get('id') == 2)['result']['tools']
+          names = [item['name'] for item in tools]
+          for name in ('trace_value', 'find_source_to_sink'):
+              assert names.count(name) == 1, names
+          health = json.loads(next(item for item in rows if item.get('id') == 3)['result']['content'][0]['text'])
+          assert health['value_tracing']['value_tracing_version'] == 1, health
+          assert health['value_tracing']['gaps_are_traversable'] is False, health
+          assert health['dex_flow_producer']['dex_flow_producer_version'] == 1, health
+          assert health['dex_flow_producer']['raw_constants_emitted'] is False, health
+          assert health['dex_flow_producer']['backend'] == 'androguard-structured-bytecode', health
+          PY
