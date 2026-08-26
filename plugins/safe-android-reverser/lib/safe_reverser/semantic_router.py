@@ -9,6 +9,8 @@ from .registry import CapabilityRegistry
 from .semantic_operations import (
     CONTROL_PLANE_SEMANTIC_OPERATIONS,
     PROGRAM_MODEL_ROUTABLE_REPRESENTATIONS,
+    VALUE_FLOW_ROUTABLE_REPRESENTATIONS,
+    VALUE_FLOW_SEMANTIC_OPERATIONS,
 )
 
 JOB_ID_RE = re.compile(r"^[0-9a-f]{12}$")
@@ -42,6 +44,13 @@ def route_program_model_operation(
             f"operation is not a control-plane semantic operation: {operation}"
         )
     job_id, representation = _analysis_locator(arguments)
+    if (
+        operation in VALUE_FLOW_SEMANTIC_OPERATIONS
+        and representation not in VALUE_FLOW_ROUTABLE_REPRESENTATIONS
+    ):
+        raise SemanticRoutingError(
+            f"value tracing is not available for representation: {representation}"
+        )
     try:
         manifest = registry.owner_for_representation(representation)
     except ContractError as exc:
