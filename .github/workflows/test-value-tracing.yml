@@ -7,8 +7,10 @@ on:
       - 'value_tracing.py'
       - 'tests_value_tracing.py'
       - 'sandbox/dex_value_tracing.py'
+      - 'sandbox/dex_value_tracing_runtime.py'
       - 'sandbox/static_value_tracing.py'
       - 'sandbox/tests_dex_value_tracing.py'
+      - 'sandbox/tests_dex_value_tracing_runtime.py'
       - 'sandbox/mcp_entrypoint.py'
       - 'sandbox/Dockerfile'
       - 'plugins/safe-android-reverser/lib/safe_reverser/worker.py'
@@ -26,8 +28,10 @@ on:
       - 'value_tracing.py'
       - 'tests_value_tracing.py'
       - 'sandbox/dex_value_tracing.py'
+      - 'sandbox/dex_value_tracing_runtime.py'
       - 'sandbox/static_value_tracing.py'
       - 'sandbox/tests_dex_value_tracing.py'
+      - 'sandbox/tests_dex_value_tracing_runtime.py'
       - 'sandbox/mcp_entrypoint.py'
       - 'sandbox/Dockerfile'
       - 'plugins/safe-android-reverser/lib/safe_reverser/worker.py'
@@ -54,6 +58,9 @@ jobs:
       - name: Test normalized DEX value-flow producer
         run: PYTHONPATH=.:sandbox python3 sandbox/tests_dex_value_tracing.py
 
+      - name: Test Dalvik runtime normalization and correctness guards
+        run: PYTHONPATH=.:sandbox python3 sandbox/tests_dex_value_tracing_runtime.py
+
       - name: Test control-plane value routing
         run: PYTHONPATH=plugins/safe-android-reverser/lib python3 plugins/safe-android-reverser/tests/test_value_tracing_routing.py
 
@@ -63,8 +70,10 @@ jobs:
             value_tracing.py \
             tests_value_tracing.py \
             sandbox/dex_value_tracing.py \
+            sandbox/dex_value_tracing_runtime.py \
             sandbox/static_value_tracing.py \
             sandbox/tests_dex_value_tracing.py \
+            sandbox/tests_dex_value_tracing_runtime.py \
             plugins/safe-android-reverser/lib/safe_reverser/worker.py \
             plugins/safe-android-reverser/lib/safe_reverser/semantic_operations.py \
             plugins/safe-android-reverser/lib/safe_reverser/semantic_router.py \
@@ -76,6 +85,7 @@ jobs:
           import json
           from pathlib import Path
           import dex_value_tracing as dexflow
+          import dex_value_tracing_runtime as dexruntime
           import flow_ir as flow
           import value_tracing as tracing
           from safe_reverser.semantic_operations import (
@@ -89,6 +99,14 @@ jobs:
           assert dexflow.descriptor()['calls_xref_are_data_flow'] is False
           assert dexflow.descriptor()['raw_constants_emitted'] is False
           assert dexflow.descriptor()['persistent_flow_storage'] is False
+          runtime = dexruntime.descriptor()
+          assert runtime['dalvik_abi_normalization'] is True
+          assert runtime['wide_parameter_words_collapsed'] is True
+          assert runtime['instance_receiver_preserved_until_semantic_call_layer'] is True
+          assert runtime['reflection_gap_precedence'] is True
+          assert runtime['declaring_field_owner_canonical'] is True
+          assert runtime['read_before_write_semantics'] is True
+          assert runtime['move_exception_is_explicit_gap'] is True
           assert VALUE_FLOW_SEMANTIC_OPERATIONS == {'trace_value', 'find_source_to_sink'}
           assert VALUE_FLOW_ROUTABLE_REPRESENTATIONS == {'dex'}
 
@@ -138,7 +156,10 @@ jobs:
 
       - name: Run value-flow contracts inside locked image
         run: |
-          for test in /workspace/tests_value_tracing.py /workspace/sandbox/tests_dex_value_tracing.py; do
+          for test in \
+            /workspace/tests_value_tracing.py \
+            /workspace/sandbox/tests_dex_value_tracing.py \
+            /workspace/sandbox/tests_dex_value_tracing_runtime.py; do
             docker run --rm \
               --network=none --read-only --cap-drop=ALL \
               --security-opt=no-new-privileges \
@@ -180,7 +201,12 @@ jobs:
           health = json.loads(next(item for item in rows if item.get('id') == 3)['result']['content'][0]['text'])
           assert health['value_tracing']['value_tracing_version'] == 1, health
           assert health['value_tracing']['gaps_are_traversable'] is False, health
-          assert health['dex_flow_producer']['dex_flow_producer_version'] == 1, health
-          assert health['dex_flow_producer']['raw_constants_emitted'] is False, health
-          assert health['dex_flow_producer']['backend'] == 'androguard-structured-bytecode', health
+          producer = health['dex_flow_producer']
+          assert producer['dex_flow_producer_version'] == 1, health
+          assert producer['raw_constants_emitted'] is False, health
+          assert producer['backend'] == 'androguard-structured-bytecode', health
+          assert producer['instance_receiver_preserved_until_semantic_call_layer'] is True, health
+          assert producer['declaring_field_owner_canonical'] is True, health
+          assert producer['read_before_write_semantics'] is True, health
+          assert producer['move_exception_is_explicit_gap'] is True, health
           PY
