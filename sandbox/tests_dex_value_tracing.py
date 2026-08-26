@@ -49,17 +49,21 @@ class NormalizedDexFlowTests(unittest.TestCase):
         self.methods[private_id] = item
         return item
 
+    @staticmethod
+    def evidence_ref(method, instruction, kind):
+        if kind == "field" and instruction is not None and instruction.field_ref:
+            return "pme:" + dexflow._hash("field", instruction.field_ref)
+        return "pme:" + dexflow._hash(
+            method.private_id,
+            str(instruction.offset if instruction else -1),
+            kind,
+        )
+
     def builder(self, **kwargs):
         return dexflow.NormalizedDexFlowBuilder(
             snapshot_id=self.snapshot,
             method_loader=self.methods.get,
-            evidence_ref=lambda method, instruction, kind: (
-                "pme:" + dexflow._hash(
-                    method.private_id,
-                    str(instruction.offset if instruction else -1),
-                    kind,
-                )
-            ),
+            evidence_ref=self.evidence_ref,
             **kwargs,
         )
 
