@@ -83,11 +83,14 @@ COPY --from=runtime-builder /opt/blutter/dartvm_fetch_build.py /opt/blutter/dart
 COPY --from=runtime-builder /opt/blutter/bin/ /opt/blutter/bin/
 COPY ownership_contract.py /opt/safe-flutter/ownership_contract.py
 COPY program_model.py /opt/safe-flutter/program_model.py
+COPY application_map.py /opt/safe-flutter/application_map.py
+COPY context_retrieval.py /opt/safe-flutter/context_retrieval.py
 COPY sandbox/peg_schema.py /opt/safe-flutter/peg_schema.py
 COPY frameworks/flutter/cache_identity.py /opt/safe-flutter/cache_identity.py
 COPY frameworks/flutter/safe_blutter_adapter.py /opt/safe-flutter/safe_blutter_adapter.py
 COPY frameworks/flutter/flutter_semantic.py /opt/safe-flutter/flutter_semantic.py
 COPY frameworks/flutter/flutter_program_model.py /opt/safe-flutter/flutter_program_model.py
+COPY frameworks/flutter/flutter_context_retrieval.py /opt/safe-flutter/flutter_context_retrieval.py
 COPY frameworks/flutter/flutter_network.py /opt/safe-flutter/flutter_network.py
 COPY frameworks/flutter/flutter_artifact.py /opt/safe-flutter/flutter_artifact.py
 COPY frameworks/flutter/flutter_export.py /opt/safe-flutter/flutter_export.py
@@ -106,11 +109,14 @@ RUN set -eux; \
     python3 -m py_compile \
       /opt/safe-flutter/ownership_contract.py \
       /opt/safe-flutter/program_model.py \
+      /opt/safe-flutter/application_map.py \
+      /opt/safe-flutter/context_retrieval.py \
       /opt/safe-flutter/peg_schema.py \
       /opt/safe-flutter/cache_identity.py \
       /opt/safe-flutter/safe_blutter_adapter.py \
       /opt/safe-flutter/flutter_semantic.py \
       /opt/safe-flutter/flutter_program_model.py \
+      /opt/safe-flutter/flutter_context_retrieval.py \
       /opt/safe-flutter/flutter_network.py \
       /opt/safe-flutter/flutter_artifact.py \
       /opt/safe-flutter/flutter_export.py \
@@ -118,7 +124,7 @@ RUN set -eux; \
       /opt/blutter/blutter.py \
       /opt/blutter/extract_dart_info.py \
       /opt/blutter/dartvm_fetch_build.py; \
-    PYTHONPATH=/opt/safe-flutter python3 -c 'import program_model as pm; import flutter_program_model as provider; import peg_schema as peg; assert pm.descriptor()["program_model_version"] == 1; assert pm.descriptor()["provider_continuation"] is True; assert provider.FlutterProgramProvider is not None; assert peg.PEG_SCHEMA_VERSION == 2'; \
+    PYTHONPATH=/opt/safe-flutter python3 -c 'import application_map as amap; import context_retrieval as ctx; import flutter_context_retrieval as source; import flutter_entrypoint as entry; import program_model as pm; import flutter_program_model as provider; import peg_schema as peg; assert amap.descriptor()["application_map_version"] == 1; assert ctx.descriptor()["context_retrieval_version"] == 1; assert ctx.descriptor()["persistent_context_storage"] is False; assert "get_application_map" in entry.SEMANTIC_COMMANDS; assert "get_function_context" in entry.SEMANTIC_COMMANDS; assert pm.descriptor()["program_model_version"] == 1; assert pm.descriptor()["provider_continuation"] is True; assert provider.FlutterProgramProvider is not None; assert source.FlutterContextSourceProvider is not None; assert peg.PEG_SCHEMA_VERSION == 2'; \
     chmod 0555 /opt/safe-flutter/*.py; \
     chmod -R a-w /opt/blutter /opt/safe-flutter /opt/licenses
 
