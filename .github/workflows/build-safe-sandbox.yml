@@ -6,12 +6,15 @@ on:
       - 'sandbox/**'
       - 'program_model.py'
       - 'application_map.py'
+      - 'context_retrieval.py'
       - 'ownership_contract.py'
       - 'tests_program_model_contract.py'
       - 'tests_application_map.py'
+      - 'tests_context_retrieval.py'
       - 'docs/PROGRAM_MODEL.md'
       - 'docs/APPLICATION_MAP.md'
       - 'docs/APPLICATION_MAP_ROUTING.md'
+      - 'docs/CONTEXT_RETRIEVAL.md'
       - 'plugins/safe-android-reverser/VERSION'
       - 'plugins/safe-android-reverser/tool-catalogs/static-core.json'
       - 'plugins/safe-android-reverser/capabilities/static-core.json'
@@ -25,12 +28,15 @@ on:
       - 'sandbox/**'
       - 'program_model.py'
       - 'application_map.py'
+      - 'context_retrieval.py'
       - 'ownership_contract.py'
       - 'tests_program_model_contract.py'
       - 'tests_application_map.py'
+      - 'tests_context_retrieval.py'
       - 'docs/PROGRAM_MODEL.md'
       - 'docs/APPLICATION_MAP.md'
       - 'docs/APPLICATION_MAP_ROUTING.md'
+      - 'docs/CONTEXT_RETRIEVAL.md'
       - 'plugins/safe-android-reverser/VERSION'
       - 'plugins/safe-android-reverser/tool-catalogs/static-core.json'
       - 'plugins/safe-android-reverser/capabilities/static-core.json'
@@ -79,11 +85,17 @@ jobs:
       - name: Test Application Map projection contract
         run: PYTHONPATH=.:sandbox python3 tests_application_map.py
 
+      - name: Test Context Retrieval contract
+        run: PYTHONPATH=.:sandbox python3 tests_context_retrieval.py
+
       - name: Test DEX Program Model provider
         run: PYTHONPATH=.:sandbox python3 sandbox/tests_program_model_provider.py
 
       - name: Test DEX Application Map provider integration
         run: PYTHONPATH=.:sandbox python3 sandbox/tests_application_map_provider.py
+
+      - name: Test DEX Context Retrieval provider integration
+        run: PYTHONPATH=.:sandbox python3 sandbox/tests_context_retrieval_provider.py
 
       - name: Test bounded Flutter artifact inspection
         run: PYTHONPATH=.:sandbox python3 sandbox/tests_flutter_analysis.py
@@ -107,6 +119,7 @@ jobs:
           import json
           from pathlib import Path
           import application_map as amap
+          import context_retrieval as ctx
           import mcp_entrypoint as entry
           import program_model as pm
 
@@ -116,7 +129,7 @@ jobs:
                   encoding='utf-8'
               )
           )
-          internal = {'health', 'get_application_map', 'expand_application_node'}
+          internal = {'health', 'get_application_map', 'expand_application_node', 'get_function_context'}
           public = [tool for tool in server.core.TOOLS if tool.get('name') not in internal]
           assert public == canonical, 'worker public descriptors must match the canonical host catalog verbatim'
           assert {tool['name'] for tool in public} == set(server.core.TOOL_HANDLERS) - internal
@@ -124,12 +137,17 @@ jobs:
           assert raw_names.count('health') == 1
           assert raw_names.count('get_application_map') == 1
           assert raw_names.count('expand_application_node') == 1
+          assert raw_names.count('get_function_context') == 1
           assert internal.issubset(server.core.TOOL_HANDLERS)
           assert pm.descriptor()['program_model_version'] == 1
           assert pm.descriptor()['provider_continuation'] is True
           assert amap.descriptor()['application_map_version'] == 1
           assert amap.descriptor()['projection_only'] is True
           assert amap.descriptor()['persistent_map_storage'] is False
+          assert ctx.descriptor()['context_retrieval_version'] == 1
+          assert ctx.descriptor()['progressive_semantic_retrieval'] is True
+          assert ctx.descriptor()['persistent_context_storage'] is False
+          assert ctx.descriptor()['calls_xref_are_data_flow'] is False
 
           health = entry.health({})
           assert health['version'] == entry.RELEASE_VERSION, health
@@ -152,6 +170,8 @@ jobs:
           assert health['application_map']['application_map_version'] == 1, health
           assert health['application_map']['projection_only'] is True, health
           assert health['application_map']['persistent_map_storage'] is False, health
+          assert health['context_retrieval']['context_retrieval_version'] == 1, health
+          assert health['context_retrieval']['persistent_context_storage'] is False, health
           assert health['tool_contract']['source'] == 'static-core.json', health
           assert health['tool_contract']['single_descriptor_source'] is True, health
           assert health['tool_contract']['public_operation_count'] == len(canonical), health
@@ -163,11 +183,14 @@ jobs:
             ownership_contract.py \
             program_model.py \
             application_map.py \
+            context_retrieval.py \
             tests_program_model_contract.py \
             tests_application_map.py \
+            tests_context_retrieval.py \
             sandbox/mcp_server.py \
             sandbox/static_semantic_worker.py \
             sandbox/static_application_map.py \
+            sandbox/static_context_retrieval.py \
             sandbox/mcp_entrypoint.py \
             sandbox/analysis_routing.py \
             sandbox/archive_safety.py \
@@ -186,7 +209,8 @@ jobs:
             sandbox/tests_program_understanding.py \
             sandbox/tests_program_understanding_scopes.py \
             sandbox/tests_program_model_provider.py \
-            sandbox/tests_application_map_provider.py
+            sandbox/tests_application_map_provider.py \
+            sandbox/tests_context_retrieval_provider.py
 
   image:
     needs: test
@@ -252,7 +276,7 @@ jobs:
       - name: Run semantic integration tests inside worker
         run: |
           mkdir -p "$RUNNER_TEMP/semantic-data"
-          for test in tests_archive_safety.py tests_flutter_analysis.py tests_program_understanding.py tests_program_understanding_scopes.py tests_program_model_provider.py tests_application_map_provider.py; do
+          for test in tests_archive_safety.py tests_flutter_analysis.py tests_program_understanding.py tests_program_understanding_scopes.py tests_program_model_provider.py tests_application_map_provider.py tests_context_retrieval_provider.py; do
             docker run --rm \
               --network=none --read-only --cap-drop=ALL \
               --security-opt=no-new-privileges \
@@ -265,7 +289,7 @@ jobs:
               safe-android-reverser:ci \
               "/workspace/sandbox/$test"
           done
-          for test in tests_program_model_contract.py tests_application_map.py; do
+          for test in tests_program_model_contract.py tests_application_map.py tests_context_retrieval.py; do
             docker run --rm \
               --network=none --read-only --cap-drop=ALL \
               --security-opt=no-new-privileges \
@@ -311,10 +335,11 @@ jobs:
           assert payload['capability_worker']['worker_abi'] == 1, payload
           assert payload['analysis_routing']['profiles']['framework-flutter']['status'] == 'declared', payload
           assert payload['application_map']['application_map_version'] == 1, payload
+          assert payload['context_retrieval']['context_retrieval_version'] == 1, payload
           assert payload['tool_contract']['single_descriptor_source'] is True, payload
           tools_response = next(item for item in rows if item.get('id') == 3)
           names = {item['name'] for item in tools_response['result']['tools']}
-          assert {'health', 'get_application_map', 'expand_application_node'}.issubset(names), names
+          assert {'health', 'get_application_map', 'expand_application_node', 'get_function_context'}.issubset(names), names
           PY
 
       - name: Log in to GHCR
