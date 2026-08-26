@@ -96,6 +96,7 @@ jobs:
           assert flow.descriptor()['calls_xref_are_data_flow'] is False
           assert tracing.descriptor()['calls_xref_are_data_flow'] is False
           assert tracing.descriptor()['gaps_are_traversable'] is False
+          assert tracing.descriptor()['max_trace_states'] == 10_000
           assert dexflow.descriptor()['calls_xref_are_data_flow'] is False
           assert dexflow.descriptor()['raw_constants_emitted'] is False
           assert dexflow.descriptor()['persistent_flow_storage'] is False
@@ -105,6 +106,9 @@ jobs:
           assert runtime['instance_receiver_preserved_until_semantic_call_layer'] is True
           assert runtime['reflection_gap_precedence'] is True
           assert runtime['declaring_field_owner_canonical'] is True
+          assert runtime['static_field_flow_proven'] is True
+          assert runtime['instance_field_alias_required'] is True
+          assert runtime['instance_field_unproven_is_gap'] is True
           assert runtime['read_before_write_semantics'] is True
           assert runtime['move_exception_is_explicit_gap'] is True
           assert VALUE_FLOW_SEMANTIC_OPERATIONS == {'trace_value', 'find_source_to_sink'}
@@ -201,12 +205,16 @@ jobs:
           health = json.loads(next(item for item in rows if item.get('id') == 3)['result']['content'][0]['text'])
           assert health['value_tracing']['value_tracing_version'] == 1, health
           assert health['value_tracing']['gaps_are_traversable'] is False, health
+          assert health['value_tracing']['max_trace_states'] == 10_000, health
           producer = health['dex_flow_producer']
           assert producer['dex_flow_producer_version'] == 1, health
           assert producer['raw_constants_emitted'] is False, health
           assert producer['backend'] == 'androguard-structured-bytecode', health
           assert producer['instance_receiver_preserved_until_semantic_call_layer'] is True, health
           assert producer['declaring_field_owner_canonical'] is True, health
+          assert producer['static_field_flow_proven'] is True, health
+          assert producer['instance_field_alias_required'] is True, health
+          assert producer['instance_field_unproven_is_gap'] is True, health
           assert producer['read_before_write_semantics'] is True, health
           assert producer['move_exception_is_explicit_gap'] is True, health
           PY
