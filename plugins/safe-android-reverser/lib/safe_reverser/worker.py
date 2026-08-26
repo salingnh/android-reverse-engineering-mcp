@@ -11,7 +11,7 @@ PROTOCOL_VERSION = "2025-06-18"
 MAX_MCP_RESPONSE_BYTES = 2 * 1024 * 1024
 REQUIRED_INTERNAL_MCP_OPERATIONS = frozenset({"health"})
 PROGRAM_MODEL_INTERNAL_OPERATIONS = frozenset(
-    {"get_application_map", "expand_application_node"}
+    {"get_application_map", "expand_application_node", "get_function_context"}
 )
 INTERNAL_MCP_OPERATIONS = (
     REQUIRED_INTERNAL_MCP_OPERATIONS | PROGRAM_MODEL_INTERNAL_OPERATIONS
