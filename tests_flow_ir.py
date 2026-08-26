@@ -37,7 +37,7 @@ class FlowIRTests(unittest.TestCase):
             evidence_refs=("pme:test",),
         )
 
-    def edge(self, source, target, kind="ASSIGNMENT"):
+    def edge(self, source, target, kind="ASSIGNMENT", *, properties=None):
         return flow.FlowEdge(
             snapshot_id=self.snapshot,
             edge_id=flow.flow_edge_id(
@@ -51,6 +51,7 @@ class FlowIRTests(unittest.TestCase):
             target_node_id=target.node_id,
             representation="dex",
             producer="fixture-producer",
+            properties=properties or {},
             evidence_refs=("pme:edge",),
         )
 
@@ -129,16 +130,41 @@ class FlowIRTests(unittest.TestCase):
             self.node("x", roles=("AUTH_MAGIC",))
         with self.assertRaises(flow.FlowIRError):
             self.node("x", kind="CONSTANT", properties={"raw_value": "secret"})
+        with self.assertRaisesRegex(flow.FlowIRError, "constant label"):
+            self.node("constant:secret", kind="CONSTANT", label="Bearer real-secret")
+        with self.assertRaisesRegex(flow.FlowIRError, "value_fingerprint"):
+            self.node(
+                "constant:bad-fingerprint",
+                kind="CONSTANT",
+                properties={"value_fingerprint": "sha256:abc"},
+            )
+        with self.assertRaisesRegex(flow.FlowIRError, "parameter_index"):
+            self.node(
+                "parameter:bad-index",
+                kind="PARAMETER",
+                properties={"parameter_index": "0"},
+            )
         constant = self.node(
             "constant:bearer",
             kind="CONSTANT",
             properties={
                 "literal_kind": "string",
                 "type": "java.lang.String",
-                "value_fingerprint": "sha256:abc",
+                "value_fingerprint": "sha256:" + "a" * 64,
             },
         )
         self.assertNotIn("value", constant.properties)
+        self.assertEqual(constant.label, "")
+
+    def test_edge_property_types_fail_closed(self):
+        left = self.node("left")
+        right = self.node("right")
+        with self.assertRaisesRegex(flow.FlowIRError, "statement_offset"):
+            self.edge(left, right, properties={"statement_offset": -1})
+        with self.assertRaisesRegex(flow.FlowIRError, "statement_offset"):
+            self.edge(left, right, properties={"statement_offset": True})
+        with self.assertRaisesRegex(flow.FlowIRError, "non-canonical"):
+            self.edge(left, right, properties={"callsite_guess": 42})
 
     def test_calls_and_xref_are_not_flow_edges(self):
         left = self.node("left")
@@ -198,6 +224,22 @@ class FlowIRTests(unittest.TestCase):
                 paths=(path,),
             )
 
+    def test_path_complete_is_strict_boolean(self):
+        left = self.node("left")
+        right = self.node("right")
+        edge = self.edge(left, right)
+        node_ids = (left.node_id, right.node_id)
+        segment_ids = (edge.edge_id,)
+        path_id = flow.flow_path_id(self.snapshot, node_ids, segment_ids)
+        with self.assertRaisesRegex(flow.FlowIRError, "complete must be boolean"):
+            flow.FlowPath(
+                self.snapshot,
+                path_id,
+                node_ids,
+                segment_ids,
+                "false",  # type: ignore[arg-type]
+            )
+
     def test_path_segment_must_connect_exact_adjacent_nodes(self):
         one = self.node("one")
         two = self.node("two")
@@ -255,6 +297,7 @@ class FlowIRTests(unittest.TestCase):
         )
         self.assertFalse(descriptor["persistent_flow_storage"])
         self.assertFalse(descriptor["public_operation_added"])
+        self.assertFalse(descriptor["raw_constant_values"])
 
 
 if __name__ == "__main__":
