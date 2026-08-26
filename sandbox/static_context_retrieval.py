@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import time
 from pathlib import Path
 from typing import Any
@@ -21,14 +22,27 @@ class DexContextSourceProvider:
         self.job = Path(job).resolve()
 
     def _safe_file(self, candidate: Path, root: Path) -> Path | None:
+        """Return a bounded regular file without traversing symlink components."""
         try:
-            root_resolved = root.resolve()
-            if root.is_symlink() or not root_resolved.is_dir():
+            lexical_root = Path(os.path.abspath(root))
+            lexical_candidate = Path(os.path.abspath(candidate))
+            if lexical_root.is_symlink() or not lexical_root.is_dir():
                 return None
-            if candidate.is_symlink():
+            if lexical_root != self.job and self.job not in lexical_root.parents:
                 return None
-            resolved = candidate.resolve()
-        except OSError:
+            if (
+                lexical_candidate == lexical_root
+                or lexical_root not in lexical_candidate.parents
+            ):
+                return None
+            current = lexical_root
+            for part in lexical_candidate.relative_to(lexical_root).parts:
+                current = current / part
+                if current.is_symlink():
+                    return None
+            root_resolved = lexical_root.resolve()
+            resolved = lexical_candidate.resolve()
+        except (OSError, ValueError):
             return None
         if resolved == root_resolved or root_resolved not in resolved.parents:
             return None
@@ -80,16 +94,19 @@ class DexContextSourceProvider:
             scanned += 1
             if scanned > MAX_SOURCE_SCAN_FILES or time.monotonic() - started > MAX_SOURCE_SCAN_SECONDS:
                 break
+            safe = self._safe_file(path, self.job)
+            if safe is None:
+                continue
             try:
-                value = pu_source.text(path)
+                value = pu_source.text(safe)
             except OSError:
                 continue
             if not value:
                 continue
-            package, simple = pu_source.source_meta(value, path)
+            package, simple = pu_source.source_meta(value, safe)
             qualified = f"{package}.{simple}" if package else simple
             if qualified == outer_name:
-                return path.resolve()
+                return safe
         return None
 
     @staticmethod
@@ -136,7 +153,13 @@ class DexContextSourceProvider:
             if exact:
                 matches = exact
         if evidence_line is not None:
-            near = sorted(matches, key=lambda item: (abs(int(item["line"]) - evidence_line), int(item["line"])))
+            near = sorted(
+                matches,
+                key=lambda item: (
+                    abs(int(item["line"]) - evidence_line),
+                    int(item["line"]),
+                ),
+            )
             if near:
                 matches = near
         target = matches[0] if matches else None
@@ -175,7 +198,6 @@ class DexContextSourceProvider:
         if not output and desired:
             prefix = desired[0].encode("utf-8", "replace")[: max(1, byte_limit - 1)]
             output = [prefix.decode("utf-8", "ignore")]
-            used = len(output[0].encode("utf-8"))
             truncated = True
         return "\n".join(output), len(output), truncated
 
