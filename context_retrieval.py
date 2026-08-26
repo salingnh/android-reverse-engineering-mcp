@@ -123,6 +123,8 @@ def _finalize(payload: dict[str, Any], budget: int) -> dict[str, Any] | None:
 
 def _relationship_dict(item: pm.ProgramRelationship) -> dict[str, Any]:
     result = item.to_dict()
+    # Only a canonical FLOWS_TO edge is a data-flow claim. Structural topology is
+    # retained for localization but never promoted by Stage E.
     result["data_flow_claim"] = item.kind == "FLOWS_TO"
     return result
 
@@ -309,12 +311,17 @@ class ContextRetriever:
                 )
                 other = self.repository.get_entity(other_id)
                 if other is None:
+                    # Preserve the canonical relationship itself. The repository
+                    # cursor may advance past this item, so omitting the edge here
+                    # would make the continuation lie about delivered evidence.
+                    relationships.append(relation)
                     unresolved = True
                     continue
                 if not _visible_in_scope(other, scope):
                     scope_filtered = True
                     continue
                 if len(neighbors) >= MAX_CONTEXT_ENTITIES and other.entity_id not in neighbors:
+                    relationships.append(relation)
                     unresolved = True
                     continue
                 neighbors[other.entity_id] = other
@@ -342,6 +349,7 @@ class ContextRetriever:
             root_evidence = self.repository.get_evidence(root.evidence_refs)
             source_slice = None
             source_unavailable = False
+            source_truncated = False
             if source_enabled and self.source_provider is not None:
                 source_slice = _validate_source_slice(
                     self.source_provider.source_slice(
@@ -352,6 +360,9 @@ class ContextRetriever:
                     )
                 )
                 source_unavailable = source_slice is None
+                source_truncated = bool(
+                    source_slice is not None and source_slice.get("truncated") is True
+                )
 
             warnings: list[str] = []
             if structural_truncated:
@@ -366,6 +377,8 @@ class ContextRetriever:
                 warnings.append("ownership_scope_filtered_relationships")
             if source_unavailable:
                 warnings.append("source_slice_unavailable")
+            if source_truncated:
+                warnings.append("source_slice_truncated")
             if size_limited:
                 warnings.append("response_size_budget_reached")
 
@@ -391,12 +404,16 @@ class ContextRetriever:
                 "returned_relationships": len(relationships),
                 "returned_evidence": len(evidence),
                 "returned_source_slices": 1 if source_slice is not None else 0,
-                "has_more": page.has_more or page.truncated or size_limited,
+                # `has_more` is only pagination state. Evidence/source reduction is
+                # represented by `truncated` + warnings because there is no cursor
+                # for those dimensions.
+                "has_more": page.has_more or page.truncated,
                 "truncated": (
                     structural_truncated
                     or page.truncated
                     or evidence_truncated
                     or unresolved
+                    or source_truncated
                     or size_limited
                 ),
                 "cursor": page.cursor,
