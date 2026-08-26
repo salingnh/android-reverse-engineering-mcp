@@ -11,7 +11,9 @@ import tempfile
 from pathlib import Path
 
 import application_map as amap
+import context_retrieval as context
 import flutter_artifact as artifact
+import flutter_context_retrieval as flutter_context
 import flutter_export as exporter
 import flutter_network as network
 import flutter_program_model as fpm
@@ -28,6 +30,7 @@ SEMANTIC_COMMANDS = {
     "extract_flutter_network_model",
     "get_application_map",
     "expand_application_node",
+    "get_function_context",
 }
 INDEX_NAME = "flutter-index.sqlite"
 MANIFEST_NAME = "safe-flutter-analysis.json"
@@ -305,9 +308,21 @@ def _analyze_export_command(args: argparse.Namespace) -> dict:
     }
 
 
-def _projector(output: str) -> amap.ApplicationMapProjector:
+def _program_repository(output: str) -> pm.ProgramRepository:
     provider = fpm.FlutterProgramProvider(_index_path(output))
-    return amap.ApplicationMapProjector(pm.ProgramRepository((provider,)))
+    return pm.ProgramRepository((provider,))
+
+
+def _projector(output: str) -> amap.ApplicationMapProjector:
+    return amap.ApplicationMapProjector(_program_repository(output))
+
+
+def _context_retriever(output: str) -> context.ContextRetriever:
+    output_dir = _output_dir(output)
+    return context.ContextRetriever(
+        _program_repository(output),
+        flutter_context.FlutterContextSourceProvider(output_dir),
+    )
 
 
 def _semantic_main() -> int:
@@ -347,19 +362,54 @@ def _semantic_main() -> int:
 
     app_map = sub.add_parser("get_application_map")
     app_map.add_argument("output")
-    app_map.add_argument("--ownership-scope", choices=OWNERSHIP_SCOPES, default="application")
+    app_map.add_argument(
+        "--ownership-scope", choices=OWNERSHIP_SCOPES, default="application"
+    )
     app_map.add_argument("--node-limit", type=int, default=amap.DEFAULT_NODE_LIMIT)
     app_map.add_argument("--edge-limit", type=int, default=amap.DEFAULT_EDGE_LIMIT)
 
     expand = sub.add_parser("expand_application_node")
     expand.add_argument("output")
     expand.add_argument("entity_id")
-    expand.add_argument("--ownership-scope", choices=OWNERSHIP_SCOPES, default="application")
-    expand.add_argument("--direction", choices=["incoming", "outgoing", "both"], default="both")
+    expand.add_argument(
+        "--ownership-scope", choices=OWNERSHIP_SCOPES, default="application"
+    )
+    expand.add_argument(
+        "--direction", choices=["incoming", "outgoing", "both"], default="both"
+    )
     expand.add_argument("--relationship-kind", action="append", default=None)
     expand.add_argument("--node-limit", type=int, default=amap.DEFAULT_NODE_LIMIT)
     expand.add_argument("--edge-limit", type=int, default=amap.DEFAULT_EDGE_LIMIT)
     expand.add_argument("--cursor", default=None)
+
+    function_context = sub.add_parser("get_function_context")
+    function_context.add_argument("output")
+    function_context.add_argument("entity_id")
+    function_context.add_argument(
+        "--ownership-scope", choices=OWNERSHIP_SCOPES, default="application"
+    )
+    function_context.add_argument(
+        "--direction", choices=["incoming", "outgoing", "both"], default="both"
+    )
+    function_context.add_argument("--relationship-kind", action="append", default=None)
+    function_context.add_argument(
+        "--relationship-limit", type=int, default=context.DEFAULT_RELATIONSHIP_LIMIT
+    )
+    function_context.add_argument(
+        "--evidence-limit", type=int, default=context.DEFAULT_EVIDENCE_LIMIT
+    )
+    function_context.add_argument(
+        "--source-line-limit", type=int, default=context.DEFAULT_SOURCE_LINE_LIMIT
+    )
+    function_context.add_argument(
+        "--source-byte-limit", type=int, default=context.DEFAULT_SOURCE_BYTE_LIMIT
+    )
+    function_context.add_argument(
+        "--response-budget-bytes",
+        type=int,
+        default=context.DEFAULT_RESPONSE_BUDGET_BYTES,
+    )
+    function_context.add_argument("--cursor", default=None)
 
     args = parser.parse_args()
     if args.command == "build_flutter_index":
@@ -388,7 +438,7 @@ def _semantic_main() -> int:
             node_limit=args.node_limit,
             edge_limit=args.edge_limit,
         )
-    else:
+    elif args.command == "expand_application_node":
         payload = _projector(args.output).expand_application_node(
             entity_id=args.entity_id,
             ownership_scope=args.ownership_scope,
@@ -396,6 +446,19 @@ def _semantic_main() -> int:
             relationship_kinds=args.relationship_kind,
             node_limit=args.node_limit,
             edge_limit=args.edge_limit,
+            cursor=args.cursor,
+        )
+    else:
+        payload = _context_retriever(args.output).get_function_context(
+            entity_id=args.entity_id,
+            ownership_scope=args.ownership_scope,
+            direction=args.direction,
+            relationship_kinds=args.relationship_kind,
+            relationship_limit=args.relationship_limit,
+            evidence_limit=args.evidence_limit,
+            source_line_limit=args.source_line_limit,
+            source_byte_limit=args.source_byte_limit,
+            response_budget_bytes=args.response_budget_bytes,
             cursor=args.cursor,
         )
     adapter._emit(payload)
@@ -411,7 +474,9 @@ def _parse_analyze_args() -> argparse.Namespace:
 
 
 def _parse_prepare_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Prepare Flutter AOT libraries from an Android artifact")
+    parser = argparse.ArgumentParser(
+        description="Prepare Flutter AOT libraries from an Android artifact"
+    )
     parser.add_argument("artifact")
     parser.add_argument("output")
     return parser.parse_args(sys.argv[2:])
@@ -433,6 +498,7 @@ def main() -> int:
                 "network_model_max_items": network.MAX_MODEL_ITEMS,
             }
             payload["application_map"] = amap.descriptor()
+            payload["context_retrieval"] = context.descriptor()
             payload["orchestration"] = {
                 "prepare_artifact": True,
                 "analyze_export": True,
@@ -465,6 +531,7 @@ def main() -> int:
         semantic.FlutterIndexError,
         pm.ProgramModelError,
         amap.ApplicationMapError,
+        context.ContextRetrievalError,
     ) as exc:
         adapter._emit({"status": "error", "error": str(exc)})
         return 2
