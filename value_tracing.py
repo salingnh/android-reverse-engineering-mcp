@@ -9,6 +9,7 @@ VALUE_TRACING_VERSION = 1
 MAX_TRACE_DEPTH = 32
 MAX_TRACE_NODES = 500
 MAX_TRACE_PATHS = 100
+MAX_TRACE_STATES = 10_000
 SELECTOR_KINDS = ("parameter", "return", "field", "node")
 
 
@@ -214,18 +215,26 @@ def find_source_to_sink(
     selected_edges: set[str] = set()
     reachable: set[str] = {item.node_id for item in sources}
     truncated = False
+    explored_states = 0
 
     queue = deque(
         (source.node_id, (source.node_id,), ())
         for source in sorted(sources, key=lambda item: item.node_id)
     )
     while queue and len(found) < path_limit:
+        explored_states += 1
+        if explored_states > MAX_TRACE_STATES:
+            truncated = True
+            break
         node_id, node_path, edge_path = queue.popleft()
         if len(edge_path) >= depth_limit:
             continue
         for edge in outgoing.get(node_id, ()):
             target = edge.target_node_id
             if target in node_path:
+                continue
+            if target not in reachable and len(reachable) >= node_limit:
+                truncated = True
                 continue
             next_nodes = node_path + (target,)
             next_edges = edge_path + (edge.edge_id,)
@@ -246,6 +255,9 @@ def find_source_to_sink(
                     )
                     break
             else:
+                if len(queue) >= MAX_TRACE_STATES:
+                    truncated = True
+                    continue
                 queue.append((target, next_nodes, next_edges))
 
     for path in found.values():
@@ -306,4 +318,5 @@ def descriptor() -> dict[str, Any]:
         "max_trace_depth": MAX_TRACE_DEPTH,
         "max_trace_nodes": MAX_TRACE_NODES,
         "max_trace_paths": MAX_TRACE_PATHS,
+        "max_trace_states": MAX_TRACE_STATES,
     }
