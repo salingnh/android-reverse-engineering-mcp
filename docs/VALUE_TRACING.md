@@ -28,12 +28,20 @@ Initial proven relations:
 1. register assignment / move;
 2. constants into register definitions;
 3. deterministic arithmetic/cast/transformation inputs into result definitions;
-4. field writes and reads;
+4. static-field writes and reads through one canonical declaring-class field node;
 5. exact argument -> parameter binding for statically resolved direct/static calls;
 6. function return value -> callsite result binding;
 7. bounded interprocedural composition across first-party/unknown internal methods.
 
 Control-flow joins use a conservative may-flow merge of reaching definitions. This is static may-flow evidence, not a claim that every runtime path carries the value.
+
+Dalvik-specific ABI normalization is private to the producer. Wide `long`/`double` arguments consume two register words but map to one semantic parameter; instance-call receivers are preserved until the semantic call layer removes them exactly once. Transformations read all source operands before overwriting their destination, including `/2addr` instructions.
+
+### Static vs instance fields
+
+Static fields (`sget`/`sput`) have one process-level storage location for a declaring field, so Stage G can safely normalize their accesses through one canonical `FIELD` node owned by the declaring Program Model class. Access-site provenance remains on `FIELD_READ` / `FIELD_WRITE` edges rather than changing the shared node identity.
+
+Instance fields (`iget`/`iput`) are different: the same declaring field can belong to many object instances. Stage G does **not** claim those instances alias merely because the field descriptor matches. Until receiver-alias evidence exists, an instance-field access is represented as `MISSING_EVIDENCE` and does not emit a proven `FIELD_READ` / `FIELD_WRITE` edge. A future alias-aware producer may extend this coverage without changing Flow IR or the public semantic operations.
 
 ## Explicit gaps
 
@@ -43,6 +51,7 @@ The producer fails closed when it cannot establish value semantics. Examples:
 - native body -> `NATIVE`;
 - virtual/interface/polymorphic/custom dispatch when the exact implementation is not proven -> `DYNAMIC_DISPATCH`;
 - SDK/platform/third-party internals suppressed by ownership policy -> `EXTERNAL_BOUNDARY`;
+- instance-field access without proven receiver alias -> `MISSING_EVIDENCE`;
 - unavailable register definition or unsupported result semantics -> `MISSING_EVIDENCE` / `UNSUPPORTED_INSTRUCTION`;
 - method/instruction/depth/resource limit -> `BUDGET`.
 
@@ -55,9 +64,12 @@ Normal tracing is intentionally smaller than Stage F hard document bounds:
 - root methods per trace: default 12, max 32;
 - interprocedural depth: default 3, max 8;
 - normalized instructions: default 8,000, max 20,000;
-- returned nodes: default 160, max 500;
+- returned/reachable nodes: default 160/240 depending on query, max 500;
 - source-to-sink search depth: default 12, max 32;
-- returned paths: default 20, max 100.
+- returned paths: default 20, max 100;
+- source-to-sink exploration states: hard max 10,000.
+
+The node bound applies to the reachable frontier, not only the final response. The state bound prevents combinatorial simple-path expansion on dense graphs even when the final number of returned paths is small. Hitting either bound marks the result truncated and does not invent a path.
 
 The worker remains subject to its existing wall-clock, container CPU/memory, read-only root, non-root, network-none and host-owned runtime limits.
 
@@ -94,6 +106,7 @@ Stage G does not:
 
 - claim whole-app soundness/completeness;
 - resolve arbitrary reflection/native/dynamic dispatch;
+- infer instance-object aliasing from a matching field descriptor;
 - infer flow from `CALLS` or `XREF` alone;
 - add analyzer-specific public operations;
 - add auth/HMAC/AES/token conclusions (Stage H);
@@ -104,19 +117,20 @@ Stage G does not:
 The gate must prove:
 
 1. intraprocedural move/constant/transformation flow;
-2. exact argument -> parameter binding;
+2. exact argument -> parameter binding, including wide Dalvik arguments and one-time receiver handling;
 3. exact return -> callsite binding;
-4. field write/read propagation through shared field nodes;
-5. bounded interprocedural composition;
-6. branch join may-flow is deterministic and bounded;
-7. virtual/interface/reflection/native/external/budget uncertainty is explicit;
-8. XREF/CALLS-only fixtures produce no `FLOWS_TO` path;
-9. raw constants never appear in semantic output;
-10. `trace_value` cannot seed on private DEX register numbers;
-11. source-to-sink complete paths contain only real FlowEdge segments;
-12. path/subgraph limits fail closed or mark truncation explicitly;
-13. host routing stays `job_id + representation` and zero-container discovery remains intact;
-14. exact-head static-core/control-plane/release CI is green.
+4. static-field write/read propagation through a canonical declaring-class field node;
+5. instance fields fail closed without receiver-alias evidence;
+6. bounded interprocedural composition;
+7. branch join may-flow is deterministic and bounded;
+8. virtual/interface/reflection/native/external/budget uncertainty is explicit;
+9. XREF/CALLS-only fixtures produce no `FLOWS_TO` path;
+10. raw constants never appear in semantic output;
+11. `trace_value` cannot seed on private DEX register numbers;
+12. source-to-sink complete paths contain only real FlowEdge segments;
+13. path/subgraph/frontier/exploration-state limits fail closed or mark truncation explicitly;
+14. host routing stays `job_id + representation` and zero-container discovery remains intact;
+15. exact-head static-core/control-plane/release CI is green.
 
 ## Long-Term Architecture Review
 
