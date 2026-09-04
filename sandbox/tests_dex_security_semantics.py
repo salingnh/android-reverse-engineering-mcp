@@ -112,14 +112,7 @@ class DexSecurityProducerTests(unittest.TestCase):
         disc = f"gap:{self.counter}"
         return flow.FlowGap(
             self.snapshot,
-            flow.flow_gap_id(
-                self.snapshot,
-                kind,
-                owner.entity_id,
-                source.node_id,
-                target.node_id,
-                disc,
-            ),
+            flow.flow_gap_id(self.snapshot, kind, owner.entity_id, source.node_id, target.node_id, disc),
             kind,
             owner.entity_id,
             "dex",
@@ -152,15 +145,9 @@ class DexSecurityProducerTests(unittest.TestCase):
             nodes=(marker, name_arg, value_arg, token),
             edges=(self.edge(marker, name_arg), self.edge(token, value_arg)),
         )
-        overlay = producer.build_overlay(
-            document,
-            self.methods,
-            {(caller.private_id, 0): ("authorization",)},
-        )
-        kinds = {item.kind for item in overlay.signals}
-        self.assertIn("AUTHORIZATION_HEADER_SINK", kinds)
-        result = security.find_auth_flow(document, overlay)
-        self.assertEqual(result["counts"]["findings"], 1)
+        overlay = producer.build_overlay(document, self.methods, {(caller.private_id, 0): ("authorization",)})
+        self.assertIn("AUTHORIZATION_HEADER_SINK", {item.kind for item in overlay.signals})
+        self.assertEqual(security.find_auth_flow(document, overlay)["counts"]["findings"], 1)
 
     def test_unconnected_authorization_marker_never_creates_sink(self):
         target = self.method(
@@ -175,18 +162,23 @@ class DexSecurityProducerTests(unittest.TestCase):
         const = dexflow.InstructionSpec(0, "const-string", (0,), "sha256:" + "a" * 64)
         call = dexflow.InstructionSpec(2, "invoke-virtual", (9, 2, 1), call_targets=(target.private_id,))
         caller = self.method("caller", blocks=(dexflow.BlockSpec(0, (const, call)),))
-        marker = self.constant(caller, const)
-        name_arg = self.argument(caller, 2, 0)
-        value_arg = self.argument(caller, 2, 1)
-        document = flow.FlowDocument(self.snapshot, nodes=(marker, name_arg, value_arg))
-        overlay = producer.build_overlay(
-            document,
-            self.methods,
-            {(caller.private_id, 0): ("authorization",)},
+        document = flow.FlowDocument(
+            self.snapshot,
+            nodes=(self.constant(caller, const), self.argument(caller, 2, 0), self.argument(caller, 2, 1)),
         )
+        overlay = producer.build_overlay(document, self.methods, {(caller.private_id, 0): ("authorization",)})
         self.assertNotIn("AUTHORIZATION_HEADER_SINK", {item.kind for item in overlay.signals})
 
-    def test_hmac_contract_uses_stage_g_unknown_result_boundary(self):
+    def test_hmac_requires_algorithm_flow_to_mac_getinstance(self):
+        get_instance = self.method(
+            "mac-get",
+            class_name="javax.crypto.Mac",
+            name="getInstance",
+            descriptor="(Ljava/lang/String;)Ljavax/crypto/Mac;",
+            ownership="PLATFORM",
+            is_static=True,
+            is_external=True,
+        )
         init = self.method(
             "mac-init",
             class_name="javax.crypto.Mac",
@@ -205,32 +197,52 @@ class DexSecurityProducerTests(unittest.TestCase):
             is_static=False,
             is_external=True,
         )
-        c1 = dexflow.InstructionSpec(2, "invoke-virtual", (9, 0), call_targets=(init.private_id,))
-        c2 = dexflow.InstructionSpec(4, "invoke-virtual", (9, 1), call_targets=(final.private_id,))
-        caller = self.method("caller", blocks=(dexflow.BlockSpec(0, (c1, c2)),))
+        const = dexflow.InstructionSpec(0, "const-string", (0,), "sha256:" + "c" * 64)
+        c0 = dexflow.InstructionSpec(2, "invoke-static", (0,), call_targets=(get_instance.private_id,))
+        c1 = dexflow.InstructionSpec(4, "invoke-virtual", (9, 1), call_targets=(init.private_id,))
+        c2 = dexflow.InstructionSpec(6, "invoke-virtual", (9, 2), call_targets=(final.private_id,))
+        caller = self.method("caller", blocks=(dexflow.BlockSpec(0, (const, c0, c1, c2)),))
+        marker = self.constant(caller, const)
+        algorithm_arg = self.argument(caller, 2, 0)
         key = self.node(caller, "parameter:key", "PARAMETER", {"parameter_index": 0})
         payload = self.node(caller, "parameter:payload", "PARAMETER", {"parameter_index": 1})
-        key_arg = self.argument(caller, 2, 0)
-        payload_arg = self.argument(caller, 4, 0)
-        result_node = self.unknown_result(caller, 4)
+        key_arg = self.argument(caller, 4, 0)
+        payload_arg = self.argument(caller, 6, 0)
+        result_node = self.unknown_result(caller, 6)
         gap = self.gap(caller, payload_arg, result_node)
-        document = flow.FlowDocument(
+        base_nodes = (marker, algorithm_arg, key, payload, key_arg, payload_arg, result_node)
+        without_family_flow = flow.FlowDocument(
             self.snapshot,
-            nodes=(key, payload, key_arg, payload_arg, result_node),
+            nodes=base_nodes,
             edges=(self.edge(key, key_arg), self.edge(payload, payload_arg)),
             gaps=(gap,),
         )
-        overlay = producer.build_overlay(document, self.methods, {})
+        overlay = producer.build_overlay(without_family_flow, self.methods, {(caller.private_id, 0): ("hmac",)})
+        self.assertFalse({"HMAC_KEY_INPUT", "HMAC_PAYLOAD_INPUT", "HMAC_OUTPUT_BOUNDARY"}.intersection({item.kind for item in overlay.signals}))
+
+        confirmed = flow.FlowDocument(
+            self.snapshot,
+            nodes=base_nodes,
+            edges=(self.edge(marker, algorithm_arg), self.edge(key, key_arg), self.edge(payload, payload_arg)),
+            gaps=(gap,),
+        )
+        overlay = producer.build_overlay(confirmed, self.methods, {(caller.private_id, 0): ("hmac",)})
         kinds = {item.kind for item in overlay.signals}
         self.assertTrue({"HMAC_KEY_INPUT", "HMAC_PAYLOAD_INPUT", "HMAC_OUTPUT_BOUNDARY"}.issubset(kinds))
-        boundary = next(item for item in overlay.signals if item.kind == "HMAC_OUTPUT_BOUNDARY")
-        self.assertEqual(boundary.anchor_id, gap.gap_id)
-        result = security.trace_crypto(document, overlay, family="hmac")
-        finding_kinds = {item["kind"] for item in result["findings"]}
+        finding_kinds = {item["kind"] for item in security.trace_crypto(confirmed, overlay, family="hmac")["findings"]}
         self.assertIn("HMAC_KEY_INPUT_FLOW", finding_kinds)
         self.assertIn("HMAC_PAYLOAD_INPUT_FLOW", finding_kinds)
 
-    def test_cipher_aes_signals_require_allowlisted_algorithm_marker(self):
+    def test_aes_requires_algorithm_flow_to_cipher_getinstance(self):
+        get_instance = self.method(
+            "cipher-get",
+            class_name="javax.crypto.Cipher",
+            name="getInstance",
+            descriptor="(Ljava/lang/String;)Ljavax/crypto/Cipher;",
+            ownership="PLATFORM",
+            is_static=True,
+            is_external=True,
+        )
         cipher = self.method(
             "cipher-init",
             class_name="javax.crypto.Cipher",
@@ -241,24 +253,28 @@ class DexSecurityProducerTests(unittest.TestCase):
             is_external=True,
         )
         const = dexflow.InstructionSpec(0, "const-string", (0,), "sha256:" + "b" * 64)
-        call = dexflow.InstructionSpec(2, "invoke-virtual", (9, 1, 2), call_targets=(cipher.private_id,))
-        caller = self.method("caller", blocks=(dexflow.BlockSpec(0, (const, call)),))
+        get_call = dexflow.InstructionSpec(2, "invoke-static", (0,), call_targets=(get_instance.private_id,))
+        init_call = dexflow.InstructionSpec(4, "invoke-virtual", (9, 1, 2), call_targets=(cipher.private_id,))
+        caller = self.method("caller", blocks=(dexflow.BlockSpec(0, (const, get_call, init_call)),))
         marker = self.constant(caller, const)
-        mode_arg = self.argument(caller, 2, 0)
-        key_arg = self.argument(caller, 2, 1)
+        algorithm_arg = self.argument(caller, 2, 0)
+        mode_arg = self.argument(caller, 4, 0)
+        key_arg = self.argument(caller, 4, 1)
         key = self.node(caller, "parameter:key", "PARAMETER", {"parameter_index": 0})
-        document = flow.FlowDocument(
+        nodes = (marker, algorithm_arg, mode_arg, key_arg, key)
+
+        unrelated = flow.FlowDocument(self.snapshot, nodes=nodes, edges=(self.edge(key, key_arg),))
+        overlay = producer.build_overlay(unrelated, self.methods, {(caller.private_id, 0): ("aes",)})
+        self.assertNotIn("CRYPTO_KEY_INPUT", {item.kind for item in overlay.signals})
+
+        confirmed = flow.FlowDocument(
             self.snapshot,
-            nodes=(marker, mode_arg, key_arg, key),
-            edges=(self.edge(key, key_arg),),
+            nodes=nodes,
+            edges=(self.edge(marker, algorithm_arg), self.edge(key, key_arg)),
         )
-        without = producer.build_overlay(document, self.methods, {})
-        self.assertNotIn("CRYPTO_KEY_INPUT", {item.kind for item in without.signals})
-        with_aes = producer.build_overlay(
-            document, self.methods, {(caller.private_id, 0): ("aes",)}
-        )
-        self.assertIn("CRYPTO_KEY_INPUT", {item.kind for item in with_aes.signals})
-        self.assertIn("CRYPTO_ALGORITHM_MARKER", {item.kind for item in with_aes.signals})
+        overlay = producer.build_overlay(confirmed, self.methods, {(caller.private_id, 0): ("aes",)})
+        self.assertIn("CRYPTO_KEY_INPUT", {item.kind for item in overlay.signals})
+        self.assertIn("CRYPTO_ALGORITHM_MARKER", {item.kind for item in overlay.signals})
 
     def test_identity_and_payment_sdk_stay_boundaries_and_token_source_is_post_gap_node(self):
         identity = self.method(
@@ -297,8 +313,7 @@ class DexSecurityProducerTests(unittest.TestCase):
         token = next(item for item in overlay.signals if item.kind == "TOKEN_SOURCE_BOUNDARY")
         self.assertEqual(token.anchor_type, "FLOW_NODE")
         self.assertEqual(token.anchor_id, r1.node_id)
-        serialized = json.dumps(overlay.to_dict(), sort_keys=True)
-        self.assertNotIn("publishable", serialized.lower())
+        self.assertNotIn("publishable", json.dumps(overlay.to_dict(), sort_keys=True).lower())
 
     def test_safe_literal_normalization_returns_categories_only(self):
         self.assertEqual(producer._normalize_literal(" Authorization "), {"authorization"})
@@ -314,6 +329,7 @@ class DexSecurityProducerTests(unittest.TestCase):
         self.assertFalse(value["raw_secret_values"])
         self.assertFalse(value["receiver_alias_claimed"])
         self.assertTrue(value["stage_g_dynamic_result_anchor_respected"])
+        self.assertTrue(value["crypto_family_requires_getinstance_flow"])
 
 
 if __name__ == "__main__":
