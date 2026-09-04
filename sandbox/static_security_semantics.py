@@ -18,18 +18,27 @@ def _analysis(server: Any, args: dict[str, Any]) -> dexsecurity.DexSecurityAnaly
     if not entity_id or len(entity_id) > 256:
         raise server.core.ToolError("invalid security semantic entity_id")
     try:
+        method_limit = int(args.get("method_limit", dexflow.DEFAULT_METHOD_LIMIT))
+        analysis_depth = int(args.get("analysis_depth", dexflow.DEFAULT_ANALYSIS_DEPTH))
+        instruction_limit = int(
+            args.get("instruction_limit", dexflow.DEFAULT_INSTRUCTION_LIMIT)
+        )
         return dexsecurity.build_dex_security(
             job,
             server.core.WORKSPACE,
             server.pu.capabilities(),
             entity_id=entity_id,
-            method_limit=int(args.get("method_limit", dexflow.DEFAULT_METHOD_LIMIT)),
-            analysis_depth=int(args.get("analysis_depth", dexflow.DEFAULT_ANALYSIS_DEPTH)),
-            instruction_limit=int(
-                args.get("instruction_limit", dexflow.DEFAULT_INSTRUCTION_LIMIT)
-            ),
+            method_limit=method_limit,
+            analysis_depth=analysis_depth,
+            instruction_limit=instruction_limit,
         )
-    except (dexsecurity.DexSecuritySemanticsError, dexflow.DexValueTracingError) as exc:
+    except (
+        TypeError,
+        ValueError,
+        dexsecurity.DexSecuritySemanticsError,
+        dexflow.DexValueTracingError,
+        security.SecuritySemanticsError,
+    ) as exc:
         raise server.core.ToolError(str(exc)) from exc
 
 
@@ -55,7 +64,7 @@ def _find_auth_flow(server: Any, args: dict[str, Any]) -> dict[str, Any]:
             max_depth=int(args.get("path_depth", 16)),
             max_findings=int(args.get("finding_limit", 40)),
         )
-    except security.SecuritySemanticsError as exc:
+    except (TypeError, ValueError, security.SecuritySemanticsError) as exc:
         raise server.core.ToolError(str(exc)) from exc
     result.update(_metadata(analysis))
     return result
@@ -71,7 +80,7 @@ def _trace_crypto(server: Any, args: dict[str, Any]) -> dict[str, Any]:
             max_depth=int(args.get("path_depth", 16)),
             max_findings=int(args.get("finding_limit", 40)),
         )
-    except security.SecuritySemanticsError as exc:
+    except (TypeError, ValueError, security.SecuritySemanticsError) as exc:
         raise server.core.ToolError(str(exc)) from exc
     result.update(_metadata(analysis))
     return result
