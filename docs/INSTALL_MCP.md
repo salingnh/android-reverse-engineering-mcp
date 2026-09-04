@@ -2,7 +2,7 @@
 
 This is the supported installation/update path for Safe Android Reverser.
 
-Release candidate: **0.3.0 — Platform Foundation + Flutter AOT**. Its platform architecture has passed exact-head acceptance CI and is merged into `master`; marketplace publication occurs only after release CI, controlled Flutter runtime-cache verification, and immutable `safe-v0.3.0` capability-image publication complete.
+Current published release is **0.4.0**. Release metadata is promoted to `master` only after exact-head CI and immutable capability-image verification complete.
 
 ## Distribution model from 0.3
 
