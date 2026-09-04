@@ -73,11 +73,17 @@ jobs:
               )
           )
           public_names = {item['name'] for item in [*control, *static]}
-          stage_g_h = {
-              'trace_value', 'find_source_to_sink', 'find_auth_flow',
-              'trace_header_generation', 'find_signing_logic', 'trace_crypto',
+          # Stage G value-flow operations are now an approved consumer of this
+          # durable IR. Stage H semantics remain forbidden until Stage G is gated
+          # and merged and Stage H receives its own architecture review.
+          stage_h = {
+              'find_auth_flow',
+              'trace_header_generation',
+              'find_signing_logic',
+              'trace_crypto',
           }
-          assert public_names.isdisjoint(stage_g_h), public_names & stage_g_h
+          assert public_names.isdisjoint(stage_h), public_names & stage_h
+          assert {'trace_value', 'find_source_to_sink'}.issubset(public_names), public_names
           PY
 
   locked-images:

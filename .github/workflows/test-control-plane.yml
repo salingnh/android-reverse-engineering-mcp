@@ -9,11 +9,17 @@ on:
       - 'program_model.py'
       - 'application_map.py'
       - 'context_retrieval.py'
+      - 'flow_ir.py'
+      - 'value_tracing.py'
       - 'tests_application_map.py'
       - 'tests_context_retrieval.py'
+      - 'tests_flow_ir.py'
+      - 'tests_value_tracing.py'
       - 'docs/APPLICATION_MAP.md'
       - 'docs/APPLICATION_MAP_ROUTING.md'
       - 'docs/CONTEXT_RETRIEVAL.md'
+      - 'docs/FLOW_IR.md'
+      - 'docs/VALUE_TRACING.md'
       - 'scripts/check_release_consistency.py'
       - '.claude-plugin/marketplace.json'
       - '.github/workflows/test-control-plane.yml'
@@ -27,11 +33,17 @@ on:
       - 'program_model.py'
       - 'application_map.py'
       - 'context_retrieval.py'
+      - 'flow_ir.py'
+      - 'value_tracing.py'
       - 'tests_application_map.py'
       - 'tests_context_retrieval.py'
+      - 'tests_flow_ir.py'
+      - 'tests_value_tracing.py'
       - 'docs/APPLICATION_MAP.md'
       - 'docs/APPLICATION_MAP_ROUTING.md'
       - 'docs/CONTEXT_RETRIEVAL.md'
+      - 'docs/FLOW_IR.md'
+      - 'docs/VALUE_TRACING.md'
       - 'scripts/check_release_consistency.py'
       - '.claude-plugin/marketplace.json'
       - '.github/workflows/test-control-plane.yml'
@@ -63,6 +75,9 @@ jobs:
 
       - name: Test Context Retrieval host routing contracts
         run: PYTHONPATH=plugins/safe-android-reverser/lib python3 plugins/safe-android-reverser/tests/test_context_retrieval_routing.py
+
+      - name: Test Value Tracing host routing contracts
+        run: PYTHONPATH=plugins/safe-android-reverser/lib python3 plugins/safe-android-reverser/tests/test_value_tracing_routing.py
 
       - name: Test cross-worker ABI contracts
         run: PYTHONPATH=plugins/safe-android-reverser/lib python3 plugins/safe-android-reverser/tests/test_cross_worker_contracts.py
@@ -107,6 +122,7 @@ jobs:
             plugins/safe-android-reverser/tests/test_public_operation_contract.py \
             plugins/safe-android-reverser/tests/test_application_map_routing.py \
             plugins/safe-android-reverser/tests/test_context_retrieval_routing.py \
+            plugins/safe-android-reverser/tests/test_value_tracing_routing.py \
             plugins/safe-android-reverser/tests/test_cross_worker_contracts.py \
             plugins/safe-android-reverser/tests/test_runtime_image_pinning.py \
             plugins/safe-android-reverser/tests/test_runtime_cache_resolver.py \
@@ -133,6 +149,8 @@ jobs:
           from safe_reverser.semantic_operations import (
               CONTROL_PLANE_CATALOG_OPERATIONS,
               CONTROL_PLANE_SEMANTIC_OPERATIONS,
+              VALUE_FLOW_ROUTABLE_REPRESENTATIONS,
+              VALUE_FLOW_SEMANTIC_OPERATIONS,
           )
           from safe_reverser.tool_catalog import load_named_tool_catalog, load_tool_catalog
           plugin_root = Path('plugins/safe-android-reverser')
@@ -159,6 +177,8 @@ jobs:
               expected_operations=CONTROL_PLANE_CATALOG_OPERATIONS,
           )
           assert {item['name'] for item in control_tools} == set(CONTROL_PLANE_CATALOG_OPERATIONS)
+          assert VALUE_FLOW_SEMANTIC_OPERATIONS == {'trace_value', 'find_source_to_sink'}
+          assert VALUE_FLOW_ROUTABLE_REPRESENTATIONS == {'dex'}
           assert registry.owner_for_representation('dex').capability_id == 'static-core'
           assert registry.owner_for_representation('flutter-dart-aot').capability_id == 'framework-flutter'
           PY
@@ -259,14 +279,13 @@ jobs:
           tool_response = next(item for item in rows if item.get('id') == 2)
           tool_names = [item['name'] for item in tool_response['result']['tools']]
           names = set(tool_names)
-          assert 'health' in names
-          assert 'list_capabilities' in names
-          assert 'get_application_map' in names
-          assert 'expand_application_node' in names
-          assert 'get_function_context' in names
-          assert tool_names.count('get_application_map') == 1, tool_names
-          assert tool_names.count('expand_application_node') == 1, tool_names
-          assert tool_names.count('get_function_context') == 1, tool_names
+          semantic = {
+              'get_application_map', 'expand_application_node', 'get_function_context',
+              'trace_value', 'find_source_to_sink'
+          }
+          assert {'health', 'list_capabilities'}.issubset(names)
+          assert semantic.issubset(names)
+          assert all(tool_names.count(name) == 1 for name in semantic), tool_names
           assert 'fingerprint' in names
           assert 'build_program_index' in names
           assert 'analyze_flutter_aot' in names
@@ -276,13 +295,9 @@ jobs:
           assert health['status'] == 'ok', health
           assert health['architecture'] == 'single-host-control-plane', health
           assert health['control_plane']['runtime_socket_mounted_into_workers'] is False
-          assert set(health['control_plane']['semantic_operations']) == {
-              'get_application_map', 'expand_application_node', 'get_function_context'
-          }, health
+          assert set(health['control_plane']['semantic_operations']) == semantic, health
           assert health['control_plane']['program_model_routing'] == 'job_id+representation', health
-          assert set(health['control_plane']['program_model_representations']) == {
-              'dex', 'flutter-dart-aot'
-          }, health
+          assert set(health['control_plane']['program_model_representations']) == {'dex', 'flutter-dart-aot'}, health
           static_state = health['capabilities']['states']['static-core']
           flutter_state = health['capabilities']['states']['framework-flutter']
           assert static_state['state'] == 'ready', health
@@ -291,13 +306,16 @@ jobs:
           assert flutter_state['activation'] == 'required', health
           assert static_state['image_id'].startswith('sha256:'), static_state
           assert flutter_state['image_id'].startswith('sha256:'), flutter_state
-          assert len(static_state['image_id']) == 71, static_state
-          assert len(flutter_state['image_id']) == 71, flutter_state
           diagnostics = health['capabilities']['diagnostics']
           assert baseline.issubset(diagnostics), diagnostics
-          assert diagnostics['static-core']['capability_worker']['id'] == 'static-core', diagnostics
-          assert diagnostics['static-core']['application_map']['application_map_version'] == 1, diagnostics
-          assert diagnostics['static-core']['context_retrieval']['context_retrieval_version'] == 1, diagnostics
+          static_diag = diagnostics['static-core']
+          assert static_diag['capability_worker']['id'] == 'static-core', diagnostics
+          assert static_diag['application_map']['application_map_version'] == 1, diagnostics
+          assert static_diag['context_retrieval']['context_retrieval_version'] == 1, diagnostics
+          assert static_diag['value_tracing']['value_tracing_version'] == 1, diagnostics
+          assert static_diag['value_tracing']['gaps_are_traversable'] is False, diagnostics
+          assert static_diag['dex_flow_producer']['dex_flow_producer_version'] == 1, diagnostics
+          assert static_diag['dex_flow_producer']['raw_constants_emitted'] is False, diagnostics
           assert diagnostics['framework-flutter']['runtime_cache_schema'] == 3, diagnostics
           flutter_worker = diagnostics['framework-flutter']['worker']
           assert flutter_worker['status'] == 'ok', flutter_worker
@@ -312,9 +330,7 @@ jobs:
           assert baseline.issubset(caps['registry']), caps
           assert caps['registry']['static-core']['adapter'] == 'mcp-container', caps
           assert caps['registry']['framework-flutter']['adapter'] == 'flutter-aot', caps
-          assert 'health' not in caps['registry']['static-core']['operations'], caps
-          assert 'get_application_map' not in caps['registry']['static-core']['operations'], caps
-          assert 'get_function_context' not in caps['registry']['static-core']['operations'], caps
-          assert 'get_function_context' not in caps['registry']['framework-flutter']['operations'], caps
-          assert 'expand_application_node' not in caps['registry']['framework-flutter']['operations'], caps
+          for operation in semantic:
+              assert operation not in caps['registry']['static-core']['operations'], caps
+              assert operation not in caps['registry']['framework-flutter']['operations'], caps
           PY

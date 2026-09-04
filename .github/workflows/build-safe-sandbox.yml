@@ -7,14 +7,20 @@ on:
       - 'program_model.py'
       - 'application_map.py'
       - 'context_retrieval.py'
+      - 'flow_ir.py'
+      - 'value_tracing.py'
       - 'ownership_contract.py'
       - 'tests_program_model_contract.py'
       - 'tests_application_map.py'
       - 'tests_context_retrieval.py'
+      - 'tests_flow_ir.py'
+      - 'tests_value_tracing.py'
       - 'docs/PROGRAM_MODEL.md'
       - 'docs/APPLICATION_MAP.md'
       - 'docs/APPLICATION_MAP_ROUTING.md'
       - 'docs/CONTEXT_RETRIEVAL.md'
+      - 'docs/FLOW_IR.md'
+      - 'docs/VALUE_TRACING.md'
       - 'plugins/safe-android-reverser/VERSION'
       - 'plugins/safe-android-reverser/tool-catalogs/static-core.json'
       - 'plugins/safe-android-reverser/capabilities/static-core.json'
@@ -29,14 +35,20 @@ on:
       - 'program_model.py'
       - 'application_map.py'
       - 'context_retrieval.py'
+      - 'flow_ir.py'
+      - 'value_tracing.py'
       - 'ownership_contract.py'
       - 'tests_program_model_contract.py'
       - 'tests_application_map.py'
       - 'tests_context_retrieval.py'
+      - 'tests_flow_ir.py'
+      - 'tests_value_tracing.py'
       - 'docs/PROGRAM_MODEL.md'
       - 'docs/APPLICATION_MAP.md'
       - 'docs/APPLICATION_MAP_ROUTING.md'
       - 'docs/CONTEXT_RETRIEVAL.md'
+      - 'docs/FLOW_IR.md'
+      - 'docs/VALUE_TRACING.md'
       - 'plugins/safe-android-reverser/VERSION'
       - 'plugins/safe-android-reverser/tool-catalogs/static-core.json'
       - 'plugins/safe-android-reverser/capabilities/static-core.json'
@@ -88,6 +100,18 @@ jobs:
       - name: Test Context Retrieval contract
         run: PYTHONPATH=.:sandbox python3 tests_context_retrieval.py
 
+      - name: Test durable Flow IR contract
+        run: PYTHONPATH=.:sandbox python3 tests_flow_ir.py
+
+      - name: Test localized value tracing contract
+        run: PYTHONPATH=.:sandbox python3 tests_value_tracing.py
+
+      - name: Test normalized DEX value-flow producer
+        run: PYTHONPATH=.:sandbox python3 sandbox/tests_dex_value_tracing.py
+
+      - name: Test Dalvik runtime normalization
+        run: PYTHONPATH=.:sandbox python3 sandbox/tests_dex_value_tracing_runtime.py
+
       - name: Test DEX Program Model provider
         run: PYTHONPATH=.:sandbox python3 sandbox/tests_program_model_provider.py
 
@@ -120,8 +144,10 @@ jobs:
           from pathlib import Path
           import application_map as amap
           import context_retrieval as ctx
+          import dex_value_tracing_runtime as dexruntime
           import mcp_entrypoint as entry
           import program_model as pm
+          import value_tracing as tracing
 
           server = entry.server
           canonical = json.loads(
@@ -129,15 +155,20 @@ jobs:
                   encoding='utf-8'
               )
           )
-          internal = {'health', 'get_application_map', 'expand_application_node', 'get_function_context'}
+          internal = {
+              'health',
+              'get_application_map',
+              'expand_application_node',
+              'get_function_context',
+              'trace_value',
+              'find_source_to_sink',
+          }
           public = [tool for tool in server.core.TOOLS if tool.get('name') not in internal]
           assert public == canonical, 'worker public descriptors must match the canonical host catalog verbatim'
           assert {tool['name'] for tool in public} == set(server.core.TOOL_HANDLERS) - internal
           raw_names = [tool.get('name') for tool in server.core.TOOLS]
-          assert raw_names.count('health') == 1
-          assert raw_names.count('get_application_map') == 1
-          assert raw_names.count('expand_application_node') == 1
-          assert raw_names.count('get_function_context') == 1
+          for name in internal:
+              assert raw_names.count(name) == 1, (name, raw_names)
           assert internal.issubset(server.core.TOOL_HANDLERS)
           assert pm.descriptor()['program_model_version'] == 1
           assert pm.descriptor()['provider_continuation'] is True
@@ -148,6 +179,17 @@ jobs:
           assert ctx.descriptor()['progressive_semantic_retrieval'] is True
           assert ctx.descriptor()['persistent_context_storage'] is False
           assert ctx.descriptor()['calls_xref_are_data_flow'] is False
+          assert tracing.descriptor()['value_tracing_version'] == 1
+          assert tracing.descriptor()['gaps_are_traversable'] is False
+          producer = dexruntime.descriptor()
+          assert producer['dex_flow_producer_version'] == 1
+          assert producer['calls_xref_are_data_flow'] is False
+          assert producer['raw_constants_emitted'] is False
+          assert producer['dalvik_abi_normalization'] is True
+          assert producer['instance_receiver_preserved_until_semantic_call_layer'] is True
+          assert producer['declaring_field_owner_canonical'] is True
+          assert producer['read_before_write_semantics'] is True
+          assert producer['move_exception_is_explicit_gap'] is True
 
           health = entry.health({})
           assert health['version'] == entry.RELEASE_VERSION, health
@@ -172,6 +214,11 @@ jobs:
           assert health['application_map']['persistent_map_storage'] is False, health
           assert health['context_retrieval']['context_retrieval_version'] == 1, health
           assert health['context_retrieval']['persistent_context_storage'] is False, health
+          assert health['value_tracing']['value_tracing_version'] == 1, health
+          assert health['value_tracing']['gaps_are_traversable'] is False, health
+          assert health['dex_flow_producer']['dex_flow_producer_version'] == 1, health
+          assert health['dex_flow_producer']['declaring_field_owner_canonical'] is True, health
+          assert health['dex_flow_producer']['read_before_write_semantics'] is True, health
           assert health['tool_contract']['source'] == 'static-core.json', health
           assert health['tool_contract']['single_descriptor_source'] is True, health
           assert health['tool_contract']['public_operation_count'] == len(canonical), health
@@ -184,13 +231,20 @@ jobs:
             program_model.py \
             application_map.py \
             context_retrieval.py \
+            flow_ir.py \
+            value_tracing.py \
             tests_program_model_contract.py \
             tests_application_map.py \
             tests_context_retrieval.py \
+            tests_flow_ir.py \
+            tests_value_tracing.py \
             sandbox/mcp_server.py \
             sandbox/static_semantic_worker.py \
             sandbox/static_application_map.py \
             sandbox/static_context_retrieval.py \
+            sandbox/dex_value_tracing.py \
+            sandbox/dex_value_tracing_runtime.py \
+            sandbox/static_value_tracing.py \
             sandbox/mcp_entrypoint.py \
             sandbox/analysis_routing.py \
             sandbox/archive_safety.py \
@@ -210,7 +264,9 @@ jobs:
             sandbox/tests_program_understanding_scopes.py \
             sandbox/tests_program_model_provider.py \
             sandbox/tests_application_map_provider.py \
-            sandbox/tests_context_retrieval_provider.py
+            sandbox/tests_context_retrieval_provider.py \
+            sandbox/tests_dex_value_tracing.py \
+            sandbox/tests_dex_value_tracing_runtime.py
 
   image:
     needs: test
@@ -276,7 +332,7 @@ jobs:
       - name: Run semantic integration tests inside worker
         run: |
           mkdir -p "$RUNNER_TEMP/semantic-data"
-          for test in tests_archive_safety.py tests_flutter_analysis.py tests_program_understanding.py tests_program_understanding_scopes.py tests_program_model_provider.py tests_application_map_provider.py tests_context_retrieval_provider.py; do
+          for test in tests_archive_safety.py tests_flutter_analysis.py tests_program_understanding.py tests_program_understanding_scopes.py tests_program_model_provider.py tests_application_map_provider.py tests_context_retrieval_provider.py tests_dex_value_tracing.py tests_dex_value_tracing_runtime.py; do
             docker run --rm \
               --network=none --read-only --cap-drop=ALL \
               --security-opt=no-new-privileges \
@@ -289,7 +345,7 @@ jobs:
               safe-android-reverser:ci \
               "/workspace/sandbox/$test"
           done
-          for test in tests_program_model_contract.py tests_application_map.py tests_context_retrieval.py; do
+          for test in tests_program_model_contract.py tests_application_map.py tests_context_retrieval.py tests_flow_ir.py tests_value_tracing.py; do
             docker run --rm \
               --network=none --read-only --cap-drop=ALL \
               --security-opt=no-new-privileges \
@@ -336,10 +392,21 @@ jobs:
           assert payload['analysis_routing']['profiles']['framework-flutter']['status'] == 'declared', payload
           assert payload['application_map']['application_map_version'] == 1, payload
           assert payload['context_retrieval']['context_retrieval_version'] == 1, payload
+          assert payload['value_tracing']['value_tracing_version'] == 1, payload
+          assert payload['value_tracing']['gaps_are_traversable'] is False, payload
+          assert payload['dex_flow_producer']['declaring_field_owner_canonical'] is True, payload
+          assert payload['dex_flow_producer']['read_before_write_semantics'] is True, payload
           assert payload['tool_contract']['single_descriptor_source'] is True, payload
           tools_response = next(item for item in rows if item.get('id') == 3)
           names = {item['name'] for item in tools_response['result']['tools']}
-          assert {'health', 'get_application_map', 'expand_application_node', 'get_function_context'}.issubset(names), names
+          assert {
+              'health',
+              'get_application_map',
+              'expand_application_node',
+              'get_function_context',
+              'trace_value',
+              'find_source_to_sink',
+          }.issubset(names), names
           PY
 
       - name: Log in to GHCR

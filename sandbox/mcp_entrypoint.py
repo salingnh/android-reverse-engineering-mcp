@@ -11,6 +11,7 @@ import archive_safety
 import static_application_map
 import static_context_retrieval
 import static_semantic_worker as server
+import static_value_tracing
 
 SEMVER_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
 
@@ -35,6 +36,7 @@ RELEASE_VERSION = _release_version()
 server.core.SERVER_VERSION = RELEASE_VERSION
 static_application_map.install(server)
 static_context_retrieval.install(server)
+static_value_tracing.install(server)
 _original_health = server.health
 
 
