@@ -11,15 +11,18 @@ on:
       - 'context_retrieval.py'
       - 'flow_ir.py'
       - 'value_tracing.py'
+      - 'security_semantics.py'
       - 'tests_application_map.py'
       - 'tests_context_retrieval.py'
       - 'tests_flow_ir.py'
       - 'tests_value_tracing.py'
+      - 'tests_security_semantics.py'
       - 'docs/APPLICATION_MAP.md'
       - 'docs/APPLICATION_MAP_ROUTING.md'
       - 'docs/CONTEXT_RETRIEVAL.md'
       - 'docs/FLOW_IR.md'
       - 'docs/VALUE_TRACING.md'
+      - 'docs/AUTH_CRYPTO_FLOW.md'
       - 'scripts/check_release_consistency.py'
       - '.claude-plugin/marketplace.json'
       - '.github/workflows/test-control-plane.yml'
@@ -35,15 +38,18 @@ on:
       - 'context_retrieval.py'
       - 'flow_ir.py'
       - 'value_tracing.py'
+      - 'security_semantics.py'
       - 'tests_application_map.py'
       - 'tests_context_retrieval.py'
       - 'tests_flow_ir.py'
       - 'tests_value_tracing.py'
+      - 'tests_security_semantics.py'
       - 'docs/APPLICATION_MAP.md'
       - 'docs/APPLICATION_MAP_ROUTING.md'
       - 'docs/CONTEXT_RETRIEVAL.md'
       - 'docs/FLOW_IR.md'
       - 'docs/VALUE_TRACING.md'
+      - 'docs/AUTH_CRYPTO_FLOW.md'
       - 'scripts/check_release_consistency.py'
       - '.claude-plugin/marketplace.json'
       - '.github/workflows/test-control-plane.yml'
@@ -78,6 +84,9 @@ jobs:
 
       - name: Test Value Tracing host routing contracts
         run: PYTHONPATH=plugins/safe-android-reverser/lib python3 plugins/safe-android-reverser/tests/test_value_tracing_routing.py
+
+      - name: Test Security Semantics host routing contracts
+        run: PYTHONPATH=plugins/safe-android-reverser/lib python3 plugins/safe-android-reverser/tests/test_security_semantics_routing.py
 
       - name: Test cross-worker ABI contracts
         run: PYTHONPATH=plugins/safe-android-reverser/lib python3 plugins/safe-android-reverser/tests/test_cross_worker_contracts.py
@@ -123,6 +132,7 @@ jobs:
             plugins/safe-android-reverser/tests/test_application_map_routing.py \
             plugins/safe-android-reverser/tests/test_context_retrieval_routing.py \
             plugins/safe-android-reverser/tests/test_value_tracing_routing.py \
+            plugins/safe-android-reverser/tests/test_security_semantics_routing.py \
             plugins/safe-android-reverser/tests/test_cross_worker_contracts.py \
             plugins/safe-android-reverser/tests/test_runtime_image_pinning.py \
             plugins/safe-android-reverser/tests/test_runtime_cache_resolver.py \
@@ -149,6 +159,8 @@ jobs:
           from safe_reverser.semantic_operations import (
               CONTROL_PLANE_CATALOG_OPERATIONS,
               CONTROL_PLANE_SEMANTIC_OPERATIONS,
+              SECURITY_ROUTABLE_REPRESENTATIONS,
+              SECURITY_SEMANTIC_OPERATIONS,
               VALUE_FLOW_ROUTABLE_REPRESENTATIONS,
               VALUE_FLOW_SEMANTIC_OPERATIONS,
           )
@@ -179,6 +191,8 @@ jobs:
           assert {item['name'] for item in control_tools} == set(CONTROL_PLANE_CATALOG_OPERATIONS)
           assert VALUE_FLOW_SEMANTIC_OPERATIONS == {'trace_value', 'find_source_to_sink'}
           assert VALUE_FLOW_ROUTABLE_REPRESENTATIONS == {'dex'}
+          assert SECURITY_SEMANTIC_OPERATIONS == {'find_auth_flow', 'trace_crypto'}
+          assert SECURITY_ROUTABLE_REPRESENTATIONS == {'dex'}
           assert registry.owner_for_representation('dex').capability_id == 'static-core'
           assert registry.owner_for_representation('flutter-dart-aot').capability_id == 'framework-flutter'
           PY
@@ -281,7 +295,7 @@ jobs:
           names = set(tool_names)
           semantic = {
               'get_application_map', 'expand_application_node', 'get_function_context',
-              'trace_value', 'find_source_to_sink'
+              'trace_value', 'find_source_to_sink', 'find_auth_flow', 'trace_crypto'
           }
           assert {'health', 'list_capabilities'}.issubset(names)
           assert semantic.issubset(names)
@@ -316,6 +330,12 @@ jobs:
           assert static_diag['value_tracing']['gaps_are_traversable'] is False, diagnostics
           assert static_diag['dex_flow_producer']['dex_flow_producer_version'] == 1, diagnostics
           assert static_diag['dex_flow_producer']['raw_constants_emitted'] is False, diagnostics
+          assert static_diag['security_semantics']['security_semantics_version'] == 1, diagnostics
+          assert static_diag['security_semantics']['gaps_are_traversable'] is False, diagnostics
+          assert static_diag['security_semantics']['raw_secret_values'] is False, diagnostics
+          assert static_diag['dex_security_producer']['dex_security_producer_version'] == 1, diagnostics
+          assert static_diag['dex_security_producer']['structured_dex_operands'] is True, diagnostics
+          assert static_diag['dex_security_producer']['decompiler_grep_is_finding_source'] is False, diagnostics
           assert diagnostics['framework-flutter']['runtime_cache_schema'] == 3, diagnostics
           flutter_worker = diagnostics['framework-flutter']['worker']
           assert flutter_worker['status'] == 'ok', flutter_worker
