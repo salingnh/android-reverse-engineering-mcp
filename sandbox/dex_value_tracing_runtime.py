@@ -133,6 +133,76 @@ class DalvikFlowBuilder(dexflow.NormalizedDexFlowBuilder):
     def _dispatch_gap_kind(instruction: dexflow.InstructionSpec) -> str | None:
         return dispatch_gap_kind(instruction)
 
+    def _unknown_call_result_node(
+        self,
+        method: dexflow.MethodSpec,
+        instruction: dexflow.InstructionSpec,
+    ) -> flow.FlowNode:
+        return self._node(
+            method,
+            semantic_key=self._semantic_key(
+                "call-result", method.semantic_key, instruction.offset
+            ),
+            value_kind="UNKNOWN",
+            evidence_refs=(self.evidence_ref(method, instruction, "call-result"),),
+        )
+
+    def _call(
+        self,
+        method: dexflow.MethodSpec,
+        instruction: dexflow.InstructionSpec,
+        state: dict[int, frozenset[str]],
+        depth: int,
+    ) -> tuple[str, Any] | None:
+        """Materialize uncertainty at the invoke itself, even when result is ignored.
+
+        The base builder historically deferred a pending call gap until a following
+        move-result. Dalvik callers may legitimately ignore a return value, and void
+        calls never have move-result, so that behavior could silently lose a dynamic,
+        native, missing-target, external-boundary or budget gap. The runtime adapter
+        emits the gap at the invoke evidence site and leaves only the known/unknown
+        return node pending for optional move-result wiring.
+        """
+        pending = super()._call(method, instruction, state, depth)
+        if not pending or pending[0] != "gap":
+            return pending
+
+        _, gap_kind, sources, reason, *return_ids = pending
+        target = str(return_ids[0]) if return_ids else self._unknown_call_result_node(
+            method, instruction
+        ).node_id
+        source_ids = tuple(str(item) for item in sources)
+        if source_ids:
+            for ordinal, source in enumerate(source_ids):
+                self._gap(
+                    method,
+                    instruction,
+                    str(gap_kind),
+                    source=source,
+                    target=target,
+                    reason=str(reason),
+                    discriminator=self._discriminator(
+                        method.semantic_key,
+                        instruction.offset,
+                        "invoke-gap",
+                        ordinal,
+                    ),
+                )
+        else:
+            self._gap(
+                method,
+                instruction,
+                str(gap_kind),
+                target=target,
+                reason=str(reason),
+                discriminator=self._discriminator(
+                    method.semantic_key,
+                    instruction.offset,
+                    "invoke-gap",
+                ),
+            )
+        return ("return", target)
+
     def _field_node(
         self,
         method: dexflow.MethodSpec,
@@ -469,6 +539,8 @@ def descriptor() -> dict[str, Any]:
             "instance_field_unproven_is_gap": True,
             "read_before_write_semantics": True,
             "move_exception_is_explicit_gap": True,
+            "call_gap_materialized_at_invoke": True,
+            "ignored_call_results_preserve_gap": True,
         }
     )
     return base

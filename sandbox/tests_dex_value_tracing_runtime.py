@@ -162,6 +162,73 @@ class DalvikRuntimeAdapterTests(unittest.TestCase):
         )
         self.assertEqual(runtime.dispatch_gap_kind(instruction), "REFLECTION")
 
+    def test_ignored_external_void_call_materializes_boundary_at_invoke(self) -> None:
+        external = self.method(
+            "header-setter",
+            descriptor="(Ljava/lang/String;Ljava/lang/String;)V",
+            parameters=(
+                dexflow.ParameterSpec(0, 0, "Ljava/lang/String;"),
+                dexflow.ParameterSpec(1, 1, "Ljava/lang/String;"),
+            ),
+            class_name="java.net.HttpURLConnection",
+            ownership="PLATFORM",
+            is_static=True,
+            is_external=True,
+        )
+        caller = self.method(
+            "ignored-void-call",
+            descriptor="(Ljava/lang/String;)V",
+            parameters=(dexflow.ParameterSpec(0, 0, "Ljava/lang/String;"),),
+            blocks=(
+                dexflow.BlockSpec(
+                    0,
+                    (
+                        dexflow.InstructionSpec(
+                            0,
+                            "invoke-static",
+                            (0,),
+                            call_targets=(external.private_id,),
+                        ),
+                        dexflow.InstructionSpec(2, "return-void", ()),
+                    ),
+                ),
+            ),
+        )
+        analysis = self.builder().build(caller.private_id)
+        gaps = [item for item in analysis.document.gaps if item.kind == "EXTERNAL_BOUNDARY"]
+        self.assertTrue(gaps)
+        self.assertTrue(any(item.evidence_refs for item in gaps))
+        self.assertTrue(any(item.target_node_id for item in gaps))
+
+    def test_ignored_dynamic_call_materializes_gap_with_unknown_result_anchor(self) -> None:
+        caller = self.method(
+            "ignored-dynamic-call",
+            descriptor="(Ljava/lang/Object;Ljava/lang/String;)V",
+            parameters=(
+                dexflow.ParameterSpec(0, 0, "Ljava/lang/Object;"),
+                dexflow.ParameterSpec(1, 1, "Ljava/lang/String;"),
+            ),
+            blocks=(
+                dexflow.BlockSpec(
+                    0,
+                    (
+                        dexflow.InstructionSpec(
+                            0,
+                            "invoke-interface",
+                            (0, 1),
+                        ),
+                        dexflow.InstructionSpec(2, "return-void", ()),
+                    ),
+                ),
+            ),
+        )
+        analysis = self.builder().build(caller.private_id)
+        gaps = [item for item in analysis.document.gaps if item.kind == "DYNAMIC_DISPATCH"]
+        self.assertTrue(gaps)
+        unknowns = {item.node_id for item in analysis.document.nodes if item.value_kind == "UNKNOWN"}
+        self.assertTrue(unknowns)
+        self.assertTrue(any(item.target_node_id in unknowns for item in gaps))
+
     def test_field_owner_is_declaring_class_and_shared_across_accessors(self) -> None:
         field_ref = "Lcom/shared/Store;->token:Ljava/lang/String;"
         getter = self.method(
@@ -412,6 +479,8 @@ class DalvikRuntimeAdapterTests(unittest.TestCase):
         self.assertTrue(descriptor["instance_field_unproven_is_gap"])
         self.assertTrue(descriptor["read_before_write_semantics"])
         self.assertTrue(descriptor["move_exception_is_explicit_gap"])
+        self.assertTrue(descriptor["call_gap_materialized_at_invoke"])
+        self.assertTrue(descriptor["ignored_call_results_preserve_gap"])
 
 
 if __name__ == "__main__":
