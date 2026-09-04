@@ -1,6 +1,6 @@
 {
   "name": "safe-android-reverser",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "description": "Sandboxed Android reverse engineering with semantic program indexing, XREF/CFG queries and structured network evidence through MCP.",
   "author": {
     "name": "salingnh"
