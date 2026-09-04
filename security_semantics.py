@@ -136,7 +136,6 @@ def _properties(value: Any) -> dict[str, str]:
         if key not in SAFE_PROPERTY_KEYS:
             raise SecuritySemanticsError(f"unsupported security property: {key}")
         text = _text(raw, f"security property {key}", MAX_SECURITY_TEXT)
-        # Security metadata is category/contract data, never arbitrary secret material.
         if any(ord(char) < 32 for char in text):
             raise SecuritySemanticsError(f"invalid security property {key}")
         result[key] = text
@@ -673,13 +672,10 @@ def trace_crypto(
         input_paths("HMAC_KEY_INPUT", "HMAC_KEY_INPUT_FLOW")
         input_paths("HMAC_PAYLOAD_INPUT", "HMAC_PAYLOAD_INPUT_FLOW")
         outputs = by_kind.get("HMAC_OUTPUT_BOUNDARY", ())
-        signature_sinks = (
-            by_kind.get("SIGNATURE_HEADER_SINK", ())
-            + by_kind.get("SIGNATURE_QUERY_SINK", ())
-        )
+        signature_sinks = list(by_kind.get("SIGNATURE_HEADER_SINK", ()))
+        signature_sinks.extend(by_kind.get("SIGNATURE_QUERY_SINK", ()))
         for output in outputs:
             source_nodes = set(_anchor_node_ids(output, document))
-            # For a gap anchor, only the target is an output candidate.
             if output.anchor_type == "FLOW_GAP":
                 gap = next(item for item in document.gaps if item.gap_id == output.anchor_id)
                 source_nodes = {gap.target_node_id} if gap.target_node_id else set()
