@@ -29,6 +29,7 @@ VERIFICATION_METHODS = (
 
 MAX_TEXT = 512
 MAX_TITLE = 256
+MAX_PRODUCERS = 16
 MAX_REFS = 64
 MAX_FLOW_PATHS = 32
 MAX_KNOWLEDGE_REFS = 32
@@ -71,6 +72,15 @@ def _bounded_refs(values: Iterable[str], name: str, maximum: int) -> tuple[str, 
     result = tuple(sorted({_text(item, name, 256) for item in values}))
     if len(result) > maximum:
         raise SecurityFindingError(f"{name} exceeds count bound")
+    return result
+
+
+def _bounded_producers(values: Iterable[str]) -> tuple[str, ...]:
+    result = tuple(sorted({_text(item, "candidate producer", 128) for item in values}))
+    if not result:
+        raise SecurityFindingError("finding requires at least one candidate producer")
+    if len(result) > MAX_PRODUCERS:
+        raise SecurityFindingError("candidate producers exceed count bound")
     return result
 
 
@@ -214,7 +224,7 @@ class SecurityFinding:
     severity: str
     state: str
     primary_anchor: SemanticAnchor
-    producer: str
+    candidate_producers: tuple[str, ...]
     related_anchors: tuple[SemanticAnchor, ...] = field(default_factory=tuple)
     knowledge_refs: tuple[KnowledgeRef, ...] = field(default_factory=tuple)
     evidence_refs: tuple[str, ...] = field(default_factory=tuple)
@@ -237,7 +247,7 @@ class SecurityFinding:
         category = _text(self.category, "category", 128).lower()
         severity = _enum(self.severity, SEVERITIES, "severity")
         state = _enum(self.state, FINDING_STATES, "finding state")
-        producer = _text(self.producer, "producer", 128)
+        candidate_producers = _bounded_producers(self.candidate_producers)
 
         related: dict[str, SemanticAnchor] = {}
         for anchor in self.related_anchors:
@@ -268,8 +278,8 @@ class SecurityFinding:
                 raise SecurityFindingError("terminal finding state requires VerificationRecord")
             if verification.verdict != state:
                 raise SecurityFindingError("verification verdict must match terminal finding state")
-            if verification.verifier == producer:
-                raise SecurityFindingError("verification must be logically independent from finding producer")
+            if verification.verifier in candidate_producers:
+                raise SecurityFindingError("verification must be logically independent from candidate producers")
         elif verification is not None:
             raise SecurityFindingError("candidate/probable finding cannot carry terminal verification")
 
@@ -280,7 +290,7 @@ class SecurityFinding:
             ("category", category),
             ("severity", severity),
             ("state", state),
-            ("producer", producer),
+            ("candidate_producers", candidate_producers),
             ("related_anchors", tuple(related[key] for key in sorted(related))),
             ("knowledge_refs", tuple(knowledge[key] for key in sorted(knowledge))),
             ("evidence_refs", evidence_refs),
@@ -302,7 +312,7 @@ class SecurityFinding:
             "primary_anchor": self.primary_anchor.to_dict(),
             "related_anchors": [item.to_dict() for item in self.related_anchors],
             "knowledge_refs": [item.to_dict() for item in self.knowledge_refs],
-            "producer": self.producer,
+            "candidate_producers": list(self.candidate_producers),
             "evidence_refs": list(self.evidence_refs),
             "flow_path_ids": list(self.flow_path_ids),
             "limitations": list(self.limitations),
