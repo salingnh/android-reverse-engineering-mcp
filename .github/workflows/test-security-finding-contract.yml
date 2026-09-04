@@ -1,0 +1,60 @@
+name: Test security finding contract
+
+on:
+  pull_request:
+    paths:
+      - 'security_finding.py'
+      - 'tests_security_finding.py'
+      - 'docs/ROADMAP_0_5_EXECUTION.md'
+      - '.github/workflows/test-security-finding-contract.yml'
+  push:
+    branches: [master, 'feat/**']
+    tags: ['safe-v*']
+    paths:
+      - 'security_finding.py'
+      - 'tests_security_finding.py'
+      - 'docs/ROADMAP_0_5_EXECUTION.md'
+      - '.github/workflows/test-security-finding-contract.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Test security finding lifecycle
+        run: PYTHONPATH=. python3 tests_security_finding.py
+
+      - name: Validate Python syntax
+        run: python3 -m py_compile security_finding.py tests_security_finding.py
+
+      - name: Validate durable finding invariants
+        run: |
+          PYTHONPATH=. python3 - <<'PY'
+          from dataclasses import fields
+          import security_finding as finding
+
+          assert finding.SECURITY_FINDING_SCHEMA_VERSION == 1
+          assert finding.FINDING_STATES == (
+              'candidate', 'probable', 'verified', 'refuted', 'unknown'
+          )
+          assert finding.TERMINAL_FINDING_STATES == {'verified', 'refuted', 'unknown'}
+          assert set(finding.KNOWLEDGE_SCHEMES) == {'CWE', 'MASWE', 'MASVS', 'MASTG'}
+          assert set(finding.VERIFICATION_VERDICTS) == {'verified', 'refuted', 'unknown'}
+
+          public_fields = {item.name for item in fields(finding.SecurityFinding)}
+          assert 'confidence' not in public_fields
+          assert 'score' not in public_fields
+          assert {'rule', 'primary_anchor', 'producer', 'evidence_refs', 'flow_path_ids', 'verification'} <= public_fields
+
+          # The contract is semantic and backend-independent. Analyzer names may
+          # appear later as provenance/rule namespaces, never as structural fields.
+          forbidden_structural_fields = {
+              'semgrep_result', 'mobsfscan_result', 'sqlite_row', 'backend_payload'
+          }
+          assert public_fields.isdisjoint(forbidden_structural_fields)
+          PY
