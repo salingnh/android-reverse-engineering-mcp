@@ -8,7 +8,6 @@ from typing import Any, Iterable
 import dex_value_tracing as dexflow
 import dex_value_tracing_runtime as dexruntime
 import flow_ir as flow
-import program_model as pm
 import pu_index
 import pu_program_model
 import security_semantics as security
@@ -30,39 +29,26 @@ SAFE_LITERAL_MARKERS = {
     "signature": "signature",
     "x-signature-v1": "signature",
 }
-HTTP_HEADER_CONTRACTS = frozenset(
-    {
-        ("okhttp3.Request$Builder", "header"),
-        ("okhttp3.Request$Builder", "addHeader"),
-        ("okhttp3.Headers$Builder", "add"),
-        ("java.net.HttpURLConnection", "setRequestProperty"),
-        ("java.net.HttpURLConnection", "addRequestProperty"),
-    }
-)
-HTTP_QUERY_CONTRACTS = frozenset(
-    {
-        ("okhttp3.HttpUrl$Builder", "addQueryParameter"),
-        ("okhttp3.HttpUrl$Builder", "setQueryParameter"),
-        ("okhttp3.HttpUrl$Builder", "addEncodedQueryParameter"),
-        ("okhttp3.FormBody$Builder", "add"),
-        ("okhttp3.FormBody$Builder", "addEncoded"),
-    }
-)
-TOKEN_STORAGE_CONTRACTS = frozenset(
-    {
-        ("android.content.SharedPreferences", "getString"),
-        ("androidx.security.crypto.EncryptedSharedPreferences", "getString"),
-    }
-)
-IDENTITY_PREFIXES = (
-    "com.google.firebase.auth.",
-    "com.google.android.gms.auth.",
-)
-PAYMENT_PREFIXES = (
-    "com.stripe.",
-    "com.braintreepayments.",
-    "com.paypal.",
-)
+HTTP_HEADER_CONTRACTS = frozenset({
+    ("okhttp3.Request$Builder", "header"),
+    ("okhttp3.Request$Builder", "addHeader"),
+    ("okhttp3.Headers$Builder", "add"),
+    ("java.net.HttpURLConnection", "setRequestProperty"),
+    ("java.net.HttpURLConnection", "addRequestProperty"),
+})
+HTTP_QUERY_CONTRACTS = frozenset({
+    ("okhttp3.HttpUrl$Builder", "addQueryParameter"),
+    ("okhttp3.HttpUrl$Builder", "setQueryParameter"),
+    ("okhttp3.HttpUrl$Builder", "addEncodedQueryParameter"),
+    ("okhttp3.FormBody$Builder", "add"),
+    ("okhttp3.FormBody$Builder", "addEncoded"),
+})
+TOKEN_STORAGE_CONTRACTS = frozenset({
+    ("android.content.SharedPreferences", "getString"),
+    ("androidx.security.crypto.EncryptedSharedPreferences", "getString"),
+})
+IDENTITY_PREFIXES = ("com.google.firebase.auth.", "com.google.android.gms.auth.")
+PAYMENT_PREFIXES = ("com.stripe.", "com.braintreepayments.", "com.paypal.")
 
 
 class DexSecuritySemanticsError(ValueError):
@@ -85,11 +71,21 @@ class DexSecurityAnalysis:
         }
 
 
+@dataclass(frozen=True)
+class CallView:
+    caller: dexflow.MethodSpec
+    instruction: dexflow.InstructionSpec
+    target: dexflow.MethodSpec
+    contract: tuple[str, str]
+    arguments: tuple[str, ...]
+    result_id: str
+    gaps: tuple[flow.FlowGap, ...]
+
+
 def _normalize_literal(value: str) -> set[str]:
     text = value.strip().strip("\"'").strip()
-    lowered = text.lower()
     result: set[str] = set()
-    marker = SAFE_LITERAL_MARKERS.get(lowered)
+    marker = SAFE_LITERAL_MARKERS.get(text.lower())
     if marker:
         result.add(marker)
     upper = text.upper()
@@ -101,7 +97,6 @@ def _normalize_literal(value: str) -> set[str]:
 
 
 def safe_literal_markers(instruction: Any, offset: int) -> tuple[str, ...]:
-    """Return allowlisted categories from structured operands without retaining raw text."""
     try:
         operands = instruction.get_operands(offset)
     except Exception:
@@ -137,15 +132,7 @@ def _unknown_call_result_node_id(snapshot_id: str, method: dexflow.MethodSpec, o
 
 
 def _semantic_argument_count(instruction: dexflow.InstructionSpec) -> int:
-    if instruction.mnemonic.startswith("invoke-static"):
-        return len(instruction.registers)
-    return max(0, len(instruction.registers) - 1)
-
-
-def _method_contract(method: dexflow.MethodSpec | None) -> tuple[str, str] | None:
-    if method is None:
-        return None
-    return method.class_name, method.name
+    return len(instruction.registers) if instruction.mnemonic.startswith("invoke-static") else max(0, len(instruction.registers) - 1)
 
 
 def _edge_graph(document: flow.FlowDocument) -> dict[str, tuple[str, ...]]:
@@ -177,15 +164,15 @@ def _reaches(graph: dict[str, tuple[str, ...]], source: str, target: str, *, max
     return False
 
 
-def _call_result_id(
-    snapshot_id: str,
-    caller: dexflow.MethodSpec,
-    instruction: dexflow.InstructionSpec,
-    target: dexflow.MethodSpec | None,
-) -> str:
-    # Stage G deliberately refuses to treat virtual/interface dispatch as an exact
-    # implementation even when XREF gives a likely target. Its runtime adapter
-    # therefore materializes those calls into an UNKNOWN result anchor.
+def _markers_reaching_argument(graph: dict[str, tuple[str, ...]], marker_nodes: dict[str, set[str]], argument_id: str) -> set[str]:
+    return {
+        marker
+        for marker, nodes in marker_nodes.items()
+        if any(_reaches(graph, node_id, argument_id) for node_id in nodes)
+    }
+
+
+def _call_result_id(snapshot_id: str, caller: dexflow.MethodSpec, instruction: dexflow.InstructionSpec, target: dexflow.MethodSpec | None) -> str:
     if dexruntime.dispatch_gap_kind(instruction) is not None or target is None:
         return _unknown_call_result_node_id(snapshot_id, caller, instruction.offset)
     return _return_node_id(snapshot_id, target)
@@ -193,30 +180,30 @@ def _call_result_id(
 
 def _call_gaps(document: flow.FlowDocument, argument_ids: Iterable[str], result_id: str) -> tuple[flow.FlowGap, ...]:
     arguments = set(argument_ids)
-    return tuple(
-        sorted(
-            (
-                item
-                for item in document.gaps
-                if item.target_node_id == result_id
-                and (item.source_node_id is None or item.source_node_id in arguments)
-            ),
-            key=lambda item: item.gap_id,
-        )
+    return tuple(sorted((
+        item for item in document.gaps
+        if item.target_node_id == result_id
+        and (item.source_node_id is None or item.source_node_id in arguments)
+    ), key=lambda item: item.gap_id))
+
+
+def _call_view(document: flow.FlowDocument, methods: dict[str, dexflow.MethodSpec], caller: dexflow.MethodSpec, instruction: dexflow.InstructionSpec) -> CallView | None:
+    if not instruction.mnemonic.startswith("invoke-") or len(instruction.call_targets) != 1:
+        return None
+    target = methods.get(instruction.call_targets[0])
+    if target is None:
+        return None
+    node_ids = {item.node_id for item in document.nodes}
+    arguments = tuple(
+        node_id
+        for index in range(_semantic_argument_count(instruction))
+        if (node_id := _argument_node_id(document.snapshot_id, caller, instruction.offset, index)) in node_ids
     )
+    result_id = _call_result_id(document.snapshot_id, caller, instruction, target)
+    return CallView(caller, instruction, target, (target.class_name, target.name), arguments, result_id, _call_gaps(document, arguments, result_id))
 
 
-def _signal(
-    document: flow.FlowDocument,
-    *,
-    kind: str,
-    owner_entity_id: str,
-    anchor_type: str,
-    anchor_id: str,
-    discriminator: str = "",
-    properties: dict[str, str] | None = None,
-    evidence_refs: Iterable[str] = (),
-) -> security.SecuritySignal:
+def _signal(document: flow.FlowDocument, *, kind: str, owner_entity_id: str, anchor_type: str, anchor_id: str, discriminator: str, properties: dict[str, str] | None = None, evidence_refs: Iterable[str] = ()) -> security.SecuritySignal:
     return security.SecuritySignal(
         snapshot_id=document.snapshot_id,
         signal_id=security.security_signal_id(document.snapshot_id, kind, anchor_type, anchor_id, discriminator),
@@ -232,154 +219,99 @@ def _signal(
     )
 
 
-def _markers_reaching_argument(
-    graph: dict[str, tuple[str, ...]], marker_nodes: dict[str, set[str]], argument_id: str
-) -> set[str]:
-    return {
-        marker
-        for marker, nodes in marker_nodes.items()
-        if any(_reaches(graph, node_id, argument_id) for node_id in nodes)
-    }
+def _confirmed_crypto_families(document: flow.FlowDocument, methods: dict[str, dexflow.MethodSpec], graph: dict[str, tuple[str, ...]], marker_nodes: dict[str, set[str]]) -> dict[str, frozenset[str]]:
+    confirmed: dict[str, set[str]] = defaultdict(set)
+    for method in sorted(methods.values(), key=lambda item: item.private_id):
+        for block in method.blocks:
+            for instruction in block.instructions:
+                call = _call_view(document, methods, method, instruction)
+                if call is None or not call.arguments or call.contract[1] != "getInstance":
+                    continue
+                markers = _markers_reaching_argument(graph, marker_nodes, call.arguments[0])
+                if call.contract[0] == "javax.crypto.Mac" and "hmac" in markers:
+                    confirmed[method.private_id].add("hmac")
+                if call.contract[0] == "javax.crypto.Cipher" and "aes" in markers:
+                    confirmed[method.private_id].add("aes")
+    return {key: frozenset(value) for key, value in confirmed.items()}
 
 
-def build_overlay(
-    document: flow.FlowDocument,
-    methods: dict[str, dexflow.MethodSpec],
-    marker_sites: dict[tuple[str, int], tuple[str, ...]],
-) -> security.SecurityOverlay:
+def build_overlay(document: flow.FlowDocument, methods: dict[str, dexflow.MethodSpec], marker_sites: dict[tuple[str, int], tuple[str, ...]]) -> security.SecurityOverlay:
     node_ids = {item.node_id for item in document.nodes}
     graph = _edge_graph(document)
     signals: dict[str, security.SecuritySignal] = {}
     marker_nodes: dict[str, set[str]] = defaultdict(set)
 
     def add(item: security.SecuritySignal) -> None:
-        if len(signals) >= security.MAX_SECURITY_SIGNALS and item.signal_id not in signals:
-            return
-        signals[item.signal_id] = item
+        if len(signals) < security.MAX_SECURITY_SIGNALS or item.signal_id in signals:
+            signals[item.signal_id] = item
 
     for method in sorted(methods.values(), key=lambda item: item.private_id):
         for block in method.blocks:
             for instruction in block.instructions:
-                site_markers = marker_sites.get((method.private_id, instruction.offset), ())
-                if not site_markers or not instruction.mnemonic.startswith("const"):
+                markers = marker_sites.get((method.private_id, instruction.offset), ())
+                if not markers or not instruction.mnemonic.startswith("const"):
                     continue
                 constant_id = _constant_node_id(document.snapshot_id, method, instruction)
                 if constant_id not in node_ids:
                     continue
-                for marker in site_markers:
+                for marker in markers:
                     marker_nodes[marker].add(constant_id)
                     if marker == "bearer":
-                        add(_signal(
-                            document,
-                            kind="BEARER_SCHEME_MARKER",
-                            owner_entity_id=method.entity_id,
-                            anchor_type="FLOW_NODE",
-                            anchor_id=constant_id,
-                            discriminator=f"marker:{instruction.offset}:bearer",
-                            properties={"token_kind": "bearer"},
-                        ))
+                        add(_signal(document, kind="BEARER_SCHEME_MARKER", owner_entity_id=method.entity_id, anchor_type="FLOW_NODE", anchor_id=constant_id, discriminator=f"marker:{instruction.offset}:bearer", properties={"token_kind": "bearer"}))
                     elif marker in {"hmac", "aes"}:
-                        add(_signal(
-                            document,
-                            kind="CRYPTO_ALGORITHM_MARKER",
-                            owner_entity_id=method.entity_id,
-                            anchor_type="FLOW_NODE",
-                            anchor_id=constant_id,
-                            discriminator=f"marker:{instruction.offset}:{marker}",
-                            properties={"family": marker},
-                        ))
+                        add(_signal(document, kind="CRYPTO_ALGORITHM_MARKER", owner_entity_id=method.entity_id, anchor_type="FLOW_NODE", anchor_id=constant_id, discriminator=f"marker:{instruction.offset}:{marker}", properties={"family": marker}))
 
-    global_markers = {key for key, values in marker_nodes.items() if values}
+    crypto_families = _confirmed_crypto_families(document, methods, graph, marker_nodes)
 
     for method in sorted(methods.values(), key=lambda item: item.private_id):
+        families = crypto_families.get(method.private_id, frozenset())
         for block in method.blocks:
             for instruction in block.instructions:
-                if not instruction.mnemonic.startswith("invoke-"):
+                call = _call_view(document, methods, method, instruction)
+                if call is None:
                     continue
-                target = methods.get(instruction.call_targets[0]) if len(instruction.call_targets) == 1 else None
-                contract = _method_contract(target)
-                if contract is None:
-                    continue
-                class_name, name = contract
-                count = _semantic_argument_count(instruction)
-                arguments = [
-                    _argument_node_id(document.snapshot_id, method, instruction.offset, index)
-                    for index in range(count)
-                ]
-                arguments = [item for item in arguments if item in node_ids]
-                result_id = _call_result_id(document.snapshot_id, method, instruction, target)
-                gaps = _call_gaps(document, arguments, result_id)
+                class_name, name = call.contract
+                arguments = call.arguments
+                gaps = call.gaps
 
-                if arguments and contract in HTTP_HEADER_CONTRACTS:
+                if arguments and call.contract in HTTP_HEADER_CONTRACTS:
                     name_markers = _markers_reaching_argument(graph, marker_nodes, arguments[0])
                     if len(arguments) >= 2:
-                        value_id = arguments[1]
-                        for marker, kind in (
-                            ("authorization", "AUTHORIZATION_HEADER_SINK"),
-                            ("api_key", "API_KEY_HEADER_SINK"),
-                            ("signature", "SIGNATURE_HEADER_SINK"),
-                        ):
+                        for marker, kind in (("authorization", "AUTHORIZATION_HEADER_SINK"), ("api_key", "API_KEY_HEADER_SINK"), ("signature", "SIGNATURE_HEADER_SINK")):
                             if marker in name_markers:
-                                add(_signal(
-                                    document,
-                                    kind=kind,
-                                    owner_entity_id=method.entity_id,
-                                    anchor_type="FLOW_NODE",
-                                    anchor_id=value_id,
-                                    discriminator=f"{class_name}.{name}:{instruction.offset}:{marker}",
-                                    properties={"channel": "header", "contract": f"{class_name}.{name}"},
-                                ))
+                                add(_signal(document, kind=kind, owner_entity_id=method.entity_id, anchor_type="FLOW_NODE", anchor_id=arguments[1], discriminator=f"{class_name}.{name}:{instruction.offset}:{marker}", properties={"channel": "header", "contract": f"{class_name}.{name}"}))
 
-                if arguments and contract in HTTP_QUERY_CONTRACTS:
+                if arguments and call.contract in HTTP_QUERY_CONTRACTS:
                     name_markers = _markers_reaching_argument(graph, marker_nodes, arguments[0])
                     if len(arguments) >= 2:
-                        value_id = arguments[1]
                         if "api_key" in name_markers:
-                            add(_signal(document, kind="API_KEY_QUERY_SINK", owner_entity_id=method.entity_id, anchor_type="FLOW_NODE", anchor_id=value_id, discriminator=f"{class_name}.{name}:{instruction.offset}:api-key", properties={"channel": "query", "contract": f"{class_name}.{name}"}))
+                            add(_signal(document, kind="API_KEY_QUERY_SINK", owner_entity_id=method.entity_id, anchor_type="FLOW_NODE", anchor_id=arguments[1], discriminator=f"{class_name}.{name}:{instruction.offset}:api-key", properties={"channel": "query", "contract": f"{class_name}.{name}"}))
                         if "signature" in name_markers:
-                            add(_signal(document, kind="SIGNATURE_QUERY_SINK", owner_entity_id=method.entity_id, anchor_type="FLOW_NODE", anchor_id=value_id, discriminator=f"{class_name}.{name}:{instruction.offset}:signature", properties={"channel": "query", "contract": f"{class_name}.{name}"}))
+                            add(_signal(document, kind="SIGNATURE_QUERY_SINK", owner_entity_id=method.entity_id, anchor_type="FLOW_NODE", anchor_id=arguments[1], discriminator=f"{class_name}.{name}:{instruction.offset}:signature", properties={"channel": "query", "contract": f"{class_name}.{name}"}))
                         if "refresh_token" in name_markers:
-                            add(_signal(document, kind="TOKEN_EXCHANGE_SINK", owner_entity_id=method.entity_id, anchor_type="FLOW_NODE", anchor_id=value_id, discriminator=f"{class_name}.{name}:{instruction.offset}:refresh-token", properties={"token_kind": "refresh_token", "contract": f"{class_name}.{name}"}))
+                            add(_signal(document, kind="TOKEN_EXCHANGE_SINK", owner_entity_id=method.entity_id, anchor_type="FLOW_NODE", anchor_id=arguments[1], discriminator=f"{class_name}.{name}:{instruction.offset}:refresh-token", properties={"token_kind": "refresh_token", "contract": f"{class_name}.{name}"}))
 
-                if arguments and contract in TOKEN_STORAGE_CONTRACTS and gaps:
+                if arguments and call.contract in TOKEN_STORAGE_CONTRACTS and gaps:
                     key_markers = _markers_reaching_argument(graph, marker_nodes, arguments[0])
-                    source_kind = None
-                    token_kind = None
-                    if "refresh_token" in key_markers:
-                        source_kind = "REFRESH_TOKEN_SOURCE_BOUNDARY"
-                        token_kind = "refresh_token"
-                    elif "access_token" in key_markers:
-                        source_kind = "TOKEN_SOURCE_BOUNDARY"
-                        token_kind = "access_token"
-                    if source_kind and result_id in node_ids:
+                    source_kind = "REFRESH_TOKEN_SOURCE_BOUNDARY" if "refresh_token" in key_markers else "TOKEN_SOURCE_BOUNDARY" if "access_token" in key_markers else None
+                    token_kind = "refresh_token" if source_kind == "REFRESH_TOKEN_SOURCE_BOUNDARY" else "access_token"
+                    if source_kind and call.result_id in node_ids:
                         gap = gaps[0]
-                        # The gap remains visible as uncertainty, while the source
-                        # signal anchors only the post-boundary result node so the
-                        # query layer never starts a proven path from the storage-key input.
-                        add(_signal(
-                            document,
-                            kind=source_kind,
-                            owner_entity_id=method.entity_id,
-                            anchor_type="FLOW_NODE",
-                            anchor_id=result_id,
-                            discriminator=f"storage:{instruction.offset}:{token_kind}",
-                            properties={"token_kind": token_kind, "boundary_kind": "storage"},
-                            evidence_refs=gap.evidence_refs,
-                        ))
+                        add(_signal(document, kind=source_kind, owner_entity_id=method.entity_id, anchor_type="FLOW_NODE", anchor_id=call.result_id, discriminator=f"storage:{instruction.offset}:{token_kind}", properties={"token_kind": token_kind, "boundary_kind": "storage"}, evidence_refs=gap.evidence_refs))
 
                 if class_name.startswith(IDENTITY_PREFIXES) and gaps:
                     gap = gaps[0]
                     provider = "firebase" if class_name.startswith("com.google.firebase.auth.") else "google"
                     add(_signal(document, kind="IDENTITY_SDK_BOUNDARY", owner_entity_id=method.entity_id, anchor_type="FLOW_GAP", anchor_id=gap.gap_id, discriminator=f"identity:{instruction.offset}", properties={"provider": provider, "boundary_kind": "identity_sdk"}, evidence_refs=gap.evidence_refs))
-                    if name in {"getIdToken", "getToken", "getAccessToken"} and result_id in node_ids:
-                        add(_signal(document, kind="TOKEN_SOURCE_BOUNDARY", owner_entity_id=method.entity_id, anchor_type="FLOW_NODE", anchor_id=result_id, discriminator=f"identity-token:{instruction.offset}", properties={"token_kind": "access_token", "boundary_kind": "identity_sdk"}, evidence_refs=gap.evidence_refs))
+                    if name in {"getIdToken", "getToken", "getAccessToken"} and call.result_id in node_ids:
+                        add(_signal(document, kind="TOKEN_SOURCE_BOUNDARY", owner_entity_id=method.entity_id, anchor_type="FLOW_NODE", anchor_id=call.result_id, discriminator=f"identity-token:{instruction.offset}", properties={"token_kind": "access_token", "boundary_kind": "identity_sdk"}, evidence_refs=gap.evidence_refs))
 
                 if class_name.startswith(PAYMENT_PREFIXES) and gaps:
                     gap = gaps[0]
                     provider = "stripe" if class_name.startswith("com.stripe.") else "braintree" if class_name.startswith("com.braintreepayments.") else "paypal"
                     add(_signal(document, kind="PAYMENT_SDK_BOUNDARY", owner_entity_id=method.entity_id, anchor_type="FLOW_GAP", anchor_id=gap.gap_id, discriminator=f"payment:{instruction.offset}", properties={"provider": provider, "boundary_kind": "payment_sdk"}, evidence_refs=gap.evidence_refs))
 
-                if class_name == "javax.crypto.Mac":
+                if class_name == "javax.crypto.Mac" and "hmac" in families:
                     if name == "init" and arguments:
                         add(_signal(document, kind="HMAC_KEY_INPUT", owner_entity_id=method.entity_id, anchor_type="FLOW_NODE", anchor_id=arguments[0], discriminator=f"mac-init:{instruction.offset}", properties={"family": "hmac", "contract": "javax.crypto.Mac.init"}))
                     if name in {"update", "doFinal"} and arguments:
@@ -388,12 +320,12 @@ def build_overlay(
                         gap = gaps[0]
                         add(_signal(document, kind="HMAC_OUTPUT_BOUNDARY", owner_entity_id=method.entity_id, anchor_type="FLOW_GAP", anchor_id=gap.gap_id, discriminator=f"mac-output:{instruction.offset}", properties={"family": "hmac", "boundary_kind": "crypto"}, evidence_refs=gap.evidence_refs))
 
-                if class_name == "javax.crypto.spec.IvParameterSpec" and name == "<init>" and arguments:
+                if class_name == "javax.crypto.spec.IvParameterSpec" and name == "<init>" and arguments and "aes" in families:
                     add(_signal(document, kind="CRYPTO_IV_INPUT", owner_entity_id=method.entity_id, anchor_type="FLOW_NODE", anchor_id=arguments[0], discriminator=f"iv:{instruction.offset}", properties={"family": "aes", "contract": "javax.crypto.spec.IvParameterSpec.<init>"}))
-                if class_name == "javax.crypto.spec.GCMParameterSpec" and name == "<init>" and len(arguments) >= 2:
+                if class_name == "javax.crypto.spec.GCMParameterSpec" and name == "<init>" and len(arguments) >= 2 and "aes" in families:
                     add(_signal(document, kind="CRYPTO_IV_INPUT", owner_entity_id=method.entity_id, anchor_type="FLOW_NODE", anchor_id=arguments[1], discriminator=f"gcm-nonce:{instruction.offset}", properties={"family": "aes", "variant": "gcm", "contract": "javax.crypto.spec.GCMParameterSpec.<init>"}))
 
-                if class_name == "javax.crypto.Cipher" and "aes" in global_markers:
+                if class_name == "javax.crypto.Cipher" and "aes" in families:
                     if name == "init" and len(arguments) >= 2:
                         add(_signal(document, kind="CRYPTO_KEY_INPUT", owner_entity_id=method.entity_id, anchor_type="FLOW_NODE", anchor_id=arguments[1], discriminator=f"cipher-key:{instruction.offset}", properties={"family": "aes", "contract": "javax.crypto.Cipher.init"}))
                     if name in {"update", "doFinal"} and arguments:
@@ -407,10 +339,7 @@ def build_overlay(
     return overlay
 
 
-def _collect_marker_sites(
-    loader: dexruntime.DalvikAbiMethodLoader,
-    methods: dict[str, dexflow.MethodSpec],
-) -> dict[tuple[str, int], tuple[str, ...]]:
+def _collect_marker_sites(loader: dexruntime.DalvikAbiMethodLoader, methods: dict[str, dexflow.MethodSpec]) -> dict[tuple[str, int], tuple[str, ...]]:
     result: dict[tuple[str, int], tuple[str, ...]] = {}
     for private_id in sorted(methods):
         method = loader._methods.get(private_id)
@@ -421,8 +350,7 @@ def _collect_marker_sites(
         for block in sorted(candidates, key=lambda item: int(item.get_start())):
             offset = int(block.get_start())
             for instruction in block.get_instructions():
-                mnemonic = str(instruction.get_name()).strip().lower()
-                if mnemonic.startswith("const-string"):
+                if str(instruction.get_name()).strip().lower().startswith("const-string"):
                     markers = safe_literal_markers(instruction, offset)
                     if markers:
                         if len(result) >= MAX_MARKER_SITES:
@@ -435,16 +363,7 @@ def _collect_marker_sites(
     return result
 
 
-def build_dex_security(
-    job: Path,
-    workspace: Path,
-    caps: dict[str, Any],
-    *,
-    entity_id: str,
-    method_limit: int = dexflow.DEFAULT_METHOD_LIMIT,
-    analysis_depth: int = dexflow.DEFAULT_ANALYSIS_DEPTH,
-    instruction_limit: int = dexflow.DEFAULT_INSTRUCTION_LIMIT,
-) -> DexSecurityAnalysis:
+def build_dex_security(job: Path, workspace: Path, caps: dict[str, Any], *, entity_id: str, method_limit: int = dexflow.DEFAULT_METHOD_LIMIT, analysis_depth: int = dexflow.DEFAULT_ANALYSIS_DEPTH, instruction_limit: int = dexflow.DEFAULT_INSTRUCTION_LIMIT) -> DexSecurityAnalysis:
     pu_index.ensure_index(job, workspace, caps)
     provider = pu_program_model.DexProgramProvider(job, workspace, caps)
     with pu_index.connect(job) as conn:
@@ -453,7 +372,6 @@ def build_dex_security(
         if truncated_lookup:
             raise DexSecuritySemanticsError("canonical function lookup exceeded provider budget")
         raise DexSecuritySemanticsError("canonical function entity not found")
-
     root_private_id = str(row["id"])
     artifact = pu_index.artifact(job, workspace)
     with pu_index.androguard_analysis(artifact) as (analysis, class_members):
@@ -481,8 +399,7 @@ def build_dex_security(
             instruction_limit=instruction_limit,
         )
         flow_analysis = builder.build(root_private_id)
-        marker_sites = _collect_marker_sites(loader, builder.methods)
-        overlay = build_overlay(flow_analysis.document, builder.methods, marker_sites)
+        overlay = build_overlay(flow_analysis.document, builder.methods, _collect_marker_sites(loader, builder.methods))
         return DexSecurityAnalysis(flow_analysis, overlay)
 
 
@@ -499,6 +416,7 @@ def descriptor() -> dict[str, Any]:
         "safe_literal_categories_only": True,
         "receiver_alias_claimed": False,
         "stage_g_dynamic_result_anchor_respected": True,
+        "crypto_family_requires_getinstance_flow": True,
         "max_marker_sites": MAX_MARKER_SITES,
         "max_reachability_states": MAX_REACHABILITY_STATES,
     }
