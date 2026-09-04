@@ -17,6 +17,8 @@ PROGRAM_MODEL_INTERNAL_OPERATIONS = frozenset(
         "get_function_context",
         "trace_value",
         "find_source_to_sink",
+        "find_auth_flow",
+        "trace_crypto",
     }
 )
 INTERNAL_MCP_OPERATIONS = (
