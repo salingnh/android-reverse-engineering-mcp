@@ -49,7 +49,15 @@ jobs:
           public_fields = {item.name for item in fields(finding.SecurityFinding)}
           assert 'confidence' not in public_fields
           assert 'score' not in public_fields
-          assert {'rule', 'primary_anchor', 'producer', 'evidence_refs', 'flow_path_ids', 'verification'} <= public_fields
+          assert {
+              'rule',
+              'primary_anchor',
+              'candidate_producers',
+              'evidence_refs',
+              'flow_path_ids',
+              'verification',
+          } <= public_fields
+          assert 'producer' not in public_fields
 
           # The contract is semantic and backend-independent. Analyzer names may
           # appear later as provenance/rule namespaces, never as structural fields.
