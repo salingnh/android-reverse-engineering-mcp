@@ -81,16 +81,15 @@ class DexSecurityProducerTests(unittest.TestCase):
             properties={"argument_index": index},
         )
 
-    def return_node(self, method: dexflow.MethodSpec):
-        key = f"return:{dexflow._hash(method.semantic_key)}"
+    def unknown_result(self, method: dexflow.MethodSpec, offset: int):
+        key = f"call-result:{dexflow._hash(method.semantic_key, offset)}"
         return flow.FlowNode(
             self.snapshot,
-            flow.flow_node_id(self.snapshot, "RETURN", method.entity_id, key),
+            flow.flow_node_id(self.snapshot, "UNKNOWN", method.entity_id, key),
             key,
-            "RETURN",
+            "UNKNOWN",
             method.entity_id,
             "dex",
-            properties={"type": method.descriptor.split(")", 1)[1] if ")" in method.descriptor else ""},
         )
 
     def edge(self, source: flow.FlowNode, target: flow.FlowNode):
@@ -108,27 +107,27 @@ class DexSecurityProducerTests(unittest.TestCase):
             {"flow_kind": "fixture"},
         )
 
-    def gap(self, owner: dexflow.MethodSpec, source: flow.FlowNode, target: flow.FlowNode):
+    def gap(self, owner: dexflow.MethodSpec, source: flow.FlowNode, target: flow.FlowNode, kind="DYNAMIC_DISPATCH"):
         self.counter += 1
         disc = f"gap:{self.counter}"
         return flow.FlowGap(
             self.snapshot,
             flow.flow_gap_id(
                 self.snapshot,
-                "EXTERNAL_BOUNDARY",
+                kind,
                 owner.entity_id,
                 source.node_id,
                 target.node_id,
                 disc,
             ),
-            "EXTERNAL_BOUNDARY",
+            kind,
             owner.entity_id,
             "dex",
             "fixture",
             source.node_id,
             target.node_id,
             disc,
-            "external boundary",
+            "call boundary",
         )
 
     def test_authorization_header_sink_requires_name_marker_flow(self):
@@ -185,11 +184,9 @@ class DexSecurityProducerTests(unittest.TestCase):
             self.methods,
             {(caller.private_id, 0): ("authorization",)},
         )
-        self.assertNotIn(
-            "AUTHORIZATION_HEADER_SINK", {item.kind for item in overlay.signals}
-        )
+        self.assertNotIn("AUTHORIZATION_HEADER_SINK", {item.kind for item in overlay.signals})
 
-    def test_hmac_contract_marks_key_payload_and_output_boundary(self):
+    def test_hmac_contract_uses_stage_g_unknown_result_boundary(self):
         init = self.method(
             "mac-init",
             class_name="javax.crypto.Mac",
@@ -215,7 +212,7 @@ class DexSecurityProducerTests(unittest.TestCase):
         payload = self.node(caller, "parameter:payload", "PARAMETER", {"parameter_index": 1})
         key_arg = self.argument(caller, 2, 0)
         payload_arg = self.argument(caller, 4, 0)
-        result_node = self.return_node(final)
+        result_node = self.unknown_result(caller, 4)
         gap = self.gap(caller, payload_arg, result_node)
         document = flow.FlowDocument(
             self.snapshot,
@@ -225,9 +222,9 @@ class DexSecurityProducerTests(unittest.TestCase):
         )
         overlay = producer.build_overlay(document, self.methods, {})
         kinds = {item.kind for item in overlay.signals}
-        self.assertTrue(
-            {"HMAC_KEY_INPUT", "HMAC_PAYLOAD_INPUT", "HMAC_OUTPUT_BOUNDARY"}.issubset(kinds)
-        )
+        self.assertTrue({"HMAC_KEY_INPUT", "HMAC_PAYLOAD_INPUT", "HMAC_OUTPUT_BOUNDARY"}.issubset(kinds))
+        boundary = next(item for item in overlay.signals if item.kind == "HMAC_OUTPUT_BOUNDARY")
+        self.assertEqual(boundary.anchor_id, gap.gap_id)
         result = security.trace_crypto(document, overlay, family="hmac")
         finding_kinds = {item["kind"] for item in result["findings"]}
         self.assertIn("HMAC_KEY_INPUT_FLOW", finding_kinds)
@@ -263,7 +260,7 @@ class DexSecurityProducerTests(unittest.TestCase):
         self.assertIn("CRYPTO_KEY_INPUT", {item.kind for item in with_aes.signals})
         self.assertIn("CRYPTO_ALGORITHM_MARKER", {item.kind for item in with_aes.signals})
 
-    def test_identity_and_payment_sdk_stay_boundaries(self):
+    def test_identity_and_payment_sdk_stay_boundaries_and_token_source_is_post_gap_node(self):
         identity = self.method(
             "firebase-token",
             class_name="com.google.firebase.auth.FirebaseUser",
@@ -287,8 +284,8 @@ class DexSecurityProducerTests(unittest.TestCase):
         caller = self.method("caller", blocks=(dexflow.BlockSpec(0, (c1, c2)),))
         a1 = self.argument(caller, 2, 0)
         a2 = self.argument(caller, 4, 0)
-        r1 = self.return_node(identity)
-        r2 = self.return_node(payment)
+        r1 = self.unknown_result(caller, 2)
+        r2 = self.unknown_result(caller, 4)
         g1 = self.gap(caller, a1, r1)
         g2 = self.gap(caller, a2, r2)
         document = flow.FlowDocument(self.snapshot, nodes=(a1, a2, r1, r2), gaps=(g1, g2))
@@ -297,6 +294,9 @@ class DexSecurityProducerTests(unittest.TestCase):
         self.assertIn("IDENTITY_SDK_BOUNDARY", kinds)
         self.assertIn("TOKEN_SOURCE_BOUNDARY", kinds)
         self.assertIn("PAYMENT_SDK_BOUNDARY", kinds)
+        token = next(item for item in overlay.signals if item.kind == "TOKEN_SOURCE_BOUNDARY")
+        self.assertEqual(token.anchor_type, "FLOW_NODE")
+        self.assertEqual(token.anchor_id, r1.node_id)
         serialized = json.dumps(overlay.to_dict(), sort_keys=True)
         self.assertNotIn("publishable", serialized.lower())
 
@@ -313,6 +313,7 @@ class DexSecurityProducerTests(unittest.TestCase):
         self.assertFalse(value["gaps_are_traversable"])
         self.assertFalse(value["raw_secret_values"])
         self.assertFalse(value["receiver_alias_claimed"])
+        self.assertTrue(value["stage_g_dynamic_result_anchor_respected"])
 
 
 if __name__ == "__main__":
