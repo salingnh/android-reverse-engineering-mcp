@@ -10,6 +10,7 @@ from typing import Any
 import archive_safety
 import static_application_map
 import static_context_retrieval
+import static_security_semantics
 import static_semantic_worker as server
 import static_value_tracing
 
@@ -37,6 +38,7 @@ server.core.SERVER_VERSION = RELEASE_VERSION
 static_application_map.install(server)
 static_context_retrieval.install(server)
 static_value_tracing.install(server)
+static_security_semantics.install(server)
 _original_health = server.health
 
 
