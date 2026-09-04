@@ -7,6 +7,7 @@ on:
       - 'scripts/check_single_plugin_model.py'
       - '.claude-plugin/marketplace.json'
       - 'plugins/**'
+      - '.github/workflows/request-safe-release.yml'
       - '.github/workflows/ship-safe-reverser.yml'
       - '.github/workflows/post-release-normalize.yml'
       - '.github/workflows/release-safe-reverser.yml'
@@ -38,6 +39,7 @@ jobs:
         shell: bash
         run: |
           ruby -e 'require "yaml"; ARGV.each { |path| YAML.load_file(path) }' \
+            .github/workflows/request-safe-release.yml \
             .github/workflows/ship-safe-reverser.yml \
             .github/workflows/post-release-normalize.yml \
             .github/workflows/release-safe-reverser.yml \
@@ -82,9 +84,18 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          request=.github/workflows/request-safe-release.yml
           ship=.github/workflows/ship-safe-reverser.yml
           post=.github/workflows/post-release-normalize.yml
           runtime_cache=.github/workflows/test-flutter-runtime-cache.yml
+
+          grep -Fq "'release-request/safe-v*'" "$request"
+          grep -Fq 'actions: write' "$request"
+          grep -Fq 'gh workflow run ship-safe-reverser.yml' "$request"
+          grep -Fq -- '--ref master' "$request"
+          ! grep -Fq 'prepare_release_metadata.py' "$request"
+          ! grep -Fq 'docker build' "$request"
+          ! grep -Fq 'gh release create' "$request"
 
           grep -Fq 'group: safe-android-reverser-production-release' "$ship"
           grep -Fq 'scripts/prepare_release_metadata.py' "$ship"
