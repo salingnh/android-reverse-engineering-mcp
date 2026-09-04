@@ -73,17 +73,25 @@ jobs:
               )
           )
           public_names = {item['name'] for item in [*control, *static]}
-          # Stage G value-flow operations are now an approved consumer of this
-          # durable IR. Stage H semantics remain forbidden until Stage G is gated
-          # and merged and Stage H receives its own architecture review.
-          stage_h = {
+
+          # Stages G and H are approved semantic consumers of the durable Flow IR.
+          # Keep the IR independent from those public operations while ensuring the
+          # accepted control-plane surface remains present and transitional aliases
+          # do not appear.
+          approved_flow_consumers = {
+              'trace_value',
+              'find_source_to_sink',
               'find_auth_flow',
-              'trace_header_generation',
-              'find_signing_logic',
               'trace_crypto',
           }
-          assert public_names.isdisjoint(stage_h), public_names & stage_h
-          assert {'trace_value', 'find_source_to_sink'}.issubset(public_names), public_names
+          forbidden_transitional_security_ops = {
+              'trace_header_generation',
+              'find_signing_logic',
+          }
+          assert approved_flow_consumers.issubset(public_names), public_names
+          assert public_names.isdisjoint(forbidden_transitional_security_ops), (
+              public_names & forbidden_transitional_security_ops
+          )
           PY
 
   locked-images:

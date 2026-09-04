@@ -2,158 +2,146 @@
   {
     "name": "health",
     "description": "Check the Safe Reverser host control plane and discover actual readiness across isolated capability workers.",
-    "inputSchema": {
-      "type": "object",
-      "properties": {},
-      "additionalProperties": false
-    }
+    "inputSchema": {"type":"object","properties":{},"additionalProperties":false}
   },
   {
     "name": "list_capabilities",
     "description": "Return the manifest-driven Capability SPI registry and current runtime readiness states.",
-    "inputSchema": {
-      "type": "object",
-      "properties": {},
-      "additionalProperties": false
-    }
+    "inputSchema": {"type":"object","properties":{},"additionalProperties":false}
   },
   {
     "name": "get_application_map",
     "description": "Return a deterministic bounded Application Map projection over the canonical Program Model for one analyzed representation.",
     "inputSchema": {
-      "type": "object",
+      "type":"object",
       "properties": {
-        "job_id": {"type": "string", "pattern": "^[0-9a-f]{12}$"},
-        "representation": {"type": "string", "enum": ["dex", "flutter-dart-aot"]},
-        "ownership_scope": {"type": "string", "enum": ["application", "all", "first_party", "third_party", "platform", "generated", "unknown"], "default": "application"},
-        "node_limit": {"type": "integer", "minimum": 1, "maximum": 80, "default": 40},
-        "edge_limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 100}
+        "job_id":{"type":"string","pattern":"^[0-9a-f]{12}$"},
+        "representation":{"type":"string","enum":["dex","flutter-dart-aot"]},
+        "ownership_scope":{"type":"string","enum":["application","all","first_party","third_party","platform","generated","unknown"],"default":"application"},
+        "node_limit":{"type":"integer","minimum":1,"maximum":80,"default":40},
+        "edge_limit":{"type":"integer","minimum":1,"maximum":200,"default":100}
       },
-      "required": ["job_id", "representation"],
-      "additionalProperties": false
+      "required":["job_id","representation"],"additionalProperties":false
     }
   },
   {
     "name": "expand_application_node",
     "description": "Re-resolve and progressively expand one canonical Program Model entity from an Application Map without relying on prior process state.",
     "inputSchema": {
-      "type": "object",
+      "type":"object",
       "properties": {
-        "job_id": {"type": "string", "pattern": "^[0-9a-f]{12}$"},
-        "representation": {"type": "string", "enum": ["dex", "flutter-dart-aot"]},
-        "entity_id": {"type": "string", "maxLength": 256},
-        "ownership_scope": {"type": "string", "enum": ["application", "all", "first_party", "third_party", "platform", "generated", "unknown"], "default": "application"},
-        "direction": {"type": "string", "enum": ["incoming", "outgoing", "both"], "default": "both"},
-        "relationship_kinds": {"type": "array", "items": {"type": "string", "maxLength": 128}, "maxItems": 32},
-        "node_limit": {"type": "integer", "minimum": 2, "maximum": 80, "default": 40},
-        "edge_limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 100},
-        "cursor": {"type": "string", "maxLength": 4096}
+        "job_id":{"type":"string","pattern":"^[0-9a-f]{12}$"},
+        "representation":{"type":"string","enum":["dex","flutter-dart-aot"]},
+        "entity_id":{"type":"string","maxLength":256},
+        "ownership_scope":{"type":"string","enum":["application","all","first_party","third_party","platform","generated","unknown"],"default":"application"},
+        "direction":{"type":"string","enum":["incoming","outgoing","both"],"default":"both"},
+        "relationship_kinds":{"type":"array","items":{"type":"string","maxLength":128},"maxItems":32},
+        "node_limit":{"type":"integer","minimum":2,"maximum":80,"default":40},
+        "edge_limit":{"type":"integer","minimum":1,"maximum":200,"default":100},
+        "cursor":{"type":"string","maxLength":4096}
       },
-      "required": ["job_id", "representation", "entity_id"],
-      "additionalProperties": false
+      "required":["job_id","representation","entity_id"],"additionalProperties":false
     }
   },
   {
     "name": "get_function_context",
     "description": "Return bounded progressive semantic context for one canonical function, including structural topology, provenance, and a safe localized source slice when available.",
     "inputSchema": {
-      "type": "object",
+      "type":"object",
       "properties": {
-        "job_id": {"type": "string", "pattern": "^[0-9a-f]{12}$"},
-        "representation": {"type": "string", "enum": ["dex", "flutter-dart-aot"]},
-        "entity_id": {"type": "string", "minLength": 1, "maxLength": 256},
-        "ownership_scope": {"type": "string", "enum": ["application", "all", "first_party", "third_party", "platform", "generated", "unknown"], "default": "application"},
-        "direction": {"type": "string", "enum": ["incoming", "outgoing", "both"], "default": "both"},
-        "relationship_kinds": {
-          "type": "array",
-          "items": {
-            "type": "string",
-            "enum": ["DECLARES", "CALLS", "XREF", "CALLS_EXTERNAL", "READS", "WRITES", "PASSES_ARGUMENT", "RETURNS", "TRANSFORMS", "FLOWS_TO", "SANITIZES", "BINDS_TO_NATIVE", "CONFIRMS", "CONTRADICTS"]
-          },
-          "maxItems": 32
-        },
-        "relationship_limit": {"type": "integer", "minimum": 1, "maximum": 120, "default": 32},
-        "evidence_limit": {"type": "integer", "minimum": 1, "maximum": 32, "default": 12},
-        "source_line_limit": {"type": "integer", "minimum": 1, "maximum": 400, "default": 120},
-        "source_byte_limit": {"type": "integer", "minimum": 1024, "maximum": 65536, "default": 16384},
-        "response_budget_bytes": {"type": "integer", "minimum": 32768, "maximum": 262144, "default": 65536},
-        "cursor": {"type": "string", "maxLength": 4096}
+        "job_id":{"type":"string","pattern":"^[0-9a-f]{12}$"},
+        "representation":{"type":"string","enum":["dex","flutter-dart-aot"]},
+        "entity_id":{"type":"string","minLength":1,"maxLength":256},
+        "ownership_scope":{"type":"string","enum":["application","all","first_party","third_party","platform","generated","unknown"],"default":"application"},
+        "direction":{"type":"string","enum":["incoming","outgoing","both"],"default":"both"},
+        "relationship_kinds":{"type":"array","items":{"type":"string","enum":["DECLARES","CALLS","XREF","CALLS_EXTERNAL","READS","WRITES","PASSES_ARGUMENT","RETURNS","TRANSFORMS","FLOWS_TO","SANITIZES","BINDS_TO_NATIVE","CONFIRMS","CONTRADICTS"]},"maxItems":32},
+        "relationship_limit":{"type":"integer","minimum":1,"maximum":120,"default":32},
+        "evidence_limit":{"type":"integer","minimum":1,"maximum":32,"default":12},
+        "source_line_limit":{"type":"integer","minimum":1,"maximum":400,"default":120},
+        "source_byte_limit":{"type":"integer","minimum":1024,"maximum":65536,"default":16384},
+        "response_budget_bytes":{"type":"integer","minimum":32768,"maximum":262144,"default":65536},
+        "cursor":{"type":"string","maxLength":4096}
       },
-      "required": ["job_id", "representation", "entity_id"],
-      "additionalProperties": false
+      "required":["job_id","representation","entity_id"],"additionalProperties":false
     }
   },
   {
     "name": "trace_value",
     "description": "Trace a semantic value through bounded proven data-flow evidence from one canonical DEX function; structural CALLS/XREF topology is never treated as value flow.",
     "inputSchema": {
-      "type": "object",
+      "type":"object",
       "properties": {
-        "job_id": {"type": "string", "pattern": "^[0-9a-f]{12}$"},
-        "representation": {"type": "string", "enum": ["dex"]},
-        "entity_id": {"type": "string", "minLength": 1, "maxLength": 256},
-        "seed": {
-          "type": "object",
-          "properties": {
-            "kind": {"type": "string", "enum": ["parameter", "return", "field", "node"]},
-            "index": {"type": "integer", "minimum": 0, "maximum": 1024},
-            "name": {"type": "string", "minLength": 1, "maxLength": 512},
-            "node_id": {"type": "string", "minLength": 1, "maxLength": 256}
-          },
-          "required": ["kind"],
-          "additionalProperties": false
-        },
-        "direction": {"type": "string", "enum": ["forward", "backward", "both"], "default": "both"},
-        "method_limit": {"type": "integer", "minimum": 1, "maximum": 32, "default": 12},
-        "analysis_depth": {"type": "integer", "minimum": 0, "maximum": 8, "default": 3},
-        "instruction_limit": {"type": "integer", "minimum": 1, "maximum": 20000, "default": 8000},
-        "trace_depth": {"type": "integer", "minimum": 0, "maximum": 32, "default": 8},
-        "node_limit": {"type": "integer", "minimum": 1, "maximum": 500, "default": 160}
+        "job_id":{"type":"string","pattern":"^[0-9a-f]{12}$"},
+        "representation":{"type":"string","enum":["dex"]},
+        "entity_id":{"type":"string","minLength":1,"maxLength":256},
+        "seed":{"type":"object","properties":{"kind":{"type":"string","enum":["parameter","return","field","node"]},"index":{"type":"integer","minimum":0,"maximum":1024},"name":{"type":"string","minLength":1,"maxLength":512},"node_id":{"type":"string","minLength":1,"maxLength":256}},"required":["kind"],"additionalProperties":false},
+        "direction":{"type":"string","enum":["forward","backward","both"],"default":"both"},
+        "method_limit":{"type":"integer","minimum":1,"maximum":32,"default":12},
+        "analysis_depth":{"type":"integer","minimum":0,"maximum":8,"default":3},
+        "instruction_limit":{"type":"integer","minimum":1,"maximum":20000,"default":8000},
+        "trace_depth":{"type":"integer","minimum":0,"maximum":32,"default":8},
+        "node_limit":{"type":"integer","minimum":1,"maximum":500,"default":160}
       },
-      "required": ["job_id", "representation", "entity_id", "seed"],
-      "additionalProperties": false
+      "required":["job_id","representation","entity_id","seed"],"additionalProperties":false
     }
   },
   {
     "name": "find_source_to_sink",
     "description": "Find bounded complete source-to-sink paths over proven DEX Flow IR edges while returning unsupported boundaries as non-traversable gaps.",
     "inputSchema": {
-      "type": "object",
+      "type":"object",
       "properties": {
-        "job_id": {"type": "string", "pattern": "^[0-9a-f]{12}$"},
-        "representation": {"type": "string", "enum": ["dex"]},
-        "entity_id": {"type": "string", "minLength": 1, "maxLength": 256},
-        "source": {
-          "type": "object",
-          "properties": {
-            "kind": {"type": "string", "enum": ["parameter", "return", "field", "node"]},
-            "index": {"type": "integer", "minimum": 0, "maximum": 1024},
-            "name": {"type": "string", "minLength": 1, "maxLength": 512},
-            "node_id": {"type": "string", "minLength": 1, "maxLength": 256}
-          },
-          "required": ["kind"],
-          "additionalProperties": false
-        },
-        "sink": {
-          "type": "object",
-          "properties": {
-            "kind": {"type": "string", "enum": ["parameter", "return", "field", "node"]},
-            "index": {"type": "integer", "minimum": 0, "maximum": 1024},
-            "name": {"type": "string", "minLength": 1, "maxLength": 512},
-            "node_id": {"type": "string", "minLength": 1, "maxLength": 256}
-          },
-          "required": ["kind"],
-          "additionalProperties": false
-        },
-        "method_limit": {"type": "integer", "minimum": 1, "maximum": 32, "default": 12},
-        "analysis_depth": {"type": "integer", "minimum": 0, "maximum": 8, "default": 3},
-        "instruction_limit": {"type": "integer", "minimum": 1, "maximum": 20000, "default": 8000},
-        "path_depth": {"type": "integer", "minimum": 1, "maximum": 32, "default": 12},
-        "path_limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20},
-        "node_limit": {"type": "integer", "minimum": 2, "maximum": 500, "default": 240}
+        "job_id":{"type":"string","pattern":"^[0-9a-f]{12}$"},
+        "representation":{"type":"string","enum":["dex"]},
+        "entity_id":{"type":"string","minLength":1,"maxLength":256},
+        "source":{"type":"object","properties":{"kind":{"type":"string","enum":["parameter","return","field","node"]},"index":{"type":"integer","minimum":0,"maximum":1024},"name":{"type":"string","minLength":1,"maxLength":512},"node_id":{"type":"string","minLength":1,"maxLength":256}},"required":["kind"],"additionalProperties":false},
+        "sink":{"type":"object","properties":{"kind":{"type":"string","enum":["parameter","return","field","node"]},"index":{"type":"integer","minimum":0,"maximum":1024},"name":{"type":"string","minLength":1,"maxLength":512},"node_id":{"type":"string","minLength":1,"maxLength":256}},"required":["kind"],"additionalProperties":false},
+        "method_limit":{"type":"integer","minimum":1,"maximum":32,"default":12},
+        "analysis_depth":{"type":"integer","minimum":0,"maximum":8,"default":3},
+        "instruction_limit":{"type":"integer","minimum":1,"maximum":20000,"default":8000},
+        "path_depth":{"type":"integer","minimum":1,"maximum":32,"default":12},
+        "path_limit":{"type":"integer","minimum":1,"maximum":100,"default":20},
+        "node_limit":{"type":"integer","minimum":2,"maximum":500,"default":240}
       },
-      "required": ["job_id", "representation", "entity_id", "source", "sink"],
-      "additionalProperties": false
+      "required":["job_id","representation","entity_id","source","sink"],"additionalProperties":false
+    }
+  },
+  {
+    "name": "find_auth_flow",
+    "description": "Find bounded authentication and token semantics for one canonical DEX function using proven Flow IR paths and explicit non-traversable boundaries.",
+    "inputSchema": {
+      "type":"object",
+      "properties": {
+        "job_id":{"type":"string","pattern":"^[0-9a-f]{12}$"},
+        "representation":{"type":"string","enum":["dex"]},
+        "entity_id":{"type":"string","minLength":1,"maxLength":256},
+        "focus":{"type":"string","enum":["any","authorization_header","bearer","refresh_token","api_key"],"default":"any"},
+        "method_limit":{"type":"integer","minimum":1,"maximum":32,"default":12},
+        "analysis_depth":{"type":"integer","minimum":0,"maximum":8,"default":3},
+        "instruction_limit":{"type":"integer","minimum":1,"maximum":20000,"default":8000},
+        "path_depth":{"type":"integer","minimum":1,"maximum":32,"default":16},
+        "finding_limit":{"type":"integer","minimum":1,"maximum":100,"default":40}
+      },
+      "required":["job_id","representation","entity_id"],"additionalProperties":false
+    }
+  },
+  {
+    "name": "trace_crypto",
+    "description": "Trace bounded HMAC/AES security semantics for one canonical DEX function without treating external crypto boundaries, CALLS, or XREF as proven value flow.",
+    "inputSchema": {
+      "type":"object",
+      "properties": {
+        "job_id":{"type":"string","pattern":"^[0-9a-f]{12}$"},
+        "representation":{"type":"string","enum":["dex"]},
+        "entity_id":{"type":"string","minLength":1,"maxLength":256},
+        "family":{"type":"string","enum":["any","hmac","aes"],"default":"any"},
+        "method_limit":{"type":"integer","minimum":1,"maximum":32,"default":12},
+        "analysis_depth":{"type":"integer","minimum":0,"maximum":8,"default":3},
+        "instruction_limit":{"type":"integer","minimum":1,"maximum":20000,"default":8000},
+        "path_depth":{"type":"integer","minimum":1,"maximum":32,"default":16},
+        "finding_limit":{"type":"integer","minimum":1,"maximum":100,"default":40}
+      },
+      "required":["job_id","representation","entity_id"],"additionalProperties":false
     }
   }
 ]

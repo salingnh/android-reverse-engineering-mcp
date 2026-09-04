@@ -9,6 +9,8 @@ from .registry import CapabilityRegistry
 from .semantic_operations import (
     CONTROL_PLANE_SEMANTIC_OPERATIONS,
     PROGRAM_MODEL_ROUTABLE_REPRESENTATIONS,
+    SECURITY_ROUTABLE_REPRESENTATIONS,
+    SECURITY_SEMANTIC_OPERATIONS,
     VALUE_FLOW_ROUTABLE_REPRESENTATIONS,
     VALUE_FLOW_SEMANTIC_OPERATIONS,
 )
@@ -50,6 +52,13 @@ def route_program_model_operation(
     ):
         raise SemanticRoutingError(
             f"value tracing is not available for representation: {representation}"
+        )
+    if (
+        operation in SECURITY_SEMANTIC_OPERATIONS
+        and representation not in SECURITY_ROUTABLE_REPRESENTATIONS
+    ):
+        raise SemanticRoutingError(
+            f"security semantics are not available for representation: {representation}"
         )
     try:
         manifest = registry.owner_for_representation(representation)

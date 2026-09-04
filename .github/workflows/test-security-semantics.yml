@@ -1,0 +1,203 @@
+name: Test auth and crypto semantics
+
+on:
+  pull_request:
+    paths:
+      - 'flow_ir.py'
+      - 'security_semantics.py'
+      - 'tests_security_semantics.py'
+      - 'sandbox/dex_security_semantics.py'
+      - 'sandbox/static_security_semantics.py'
+      - 'sandbox/tests_dex_security_semantics.py'
+      - 'sandbox/dex_value_tracing.py'
+      - 'sandbox/dex_value_tracing_runtime.py'
+      - 'sandbox/mcp_entrypoint.py'
+      - 'sandbox/Dockerfile'
+      - 'plugins/safe-android-reverser/lib/safe_reverser/worker.py'
+      - 'plugins/safe-android-reverser/lib/safe_reverser/semantic_operations.py'
+      - 'plugins/safe-android-reverser/lib/safe_reverser/semantic_router.py'
+      - 'plugins/safe-android-reverser/tests/test_security_semantics_routing.py'
+      - 'plugins/safe-android-reverser/tool-catalogs/control-plane.json'
+      - 'docs/AUTH_CRYPTO_FLOW.md'
+      - '.github/workflows/test-security-semantics.yml'
+  push:
+    branches: [master, 'feat/**']
+    tags: ['safe-v*']
+    paths:
+      - 'flow_ir.py'
+      - 'security_semantics.py'
+      - 'tests_security_semantics.py'
+      - 'sandbox/dex_security_semantics.py'
+      - 'sandbox/static_security_semantics.py'
+      - 'sandbox/tests_dex_security_semantics.py'
+      - 'sandbox/dex_value_tracing.py'
+      - 'sandbox/dex_value_tracing_runtime.py'
+      - 'sandbox/mcp_entrypoint.py'
+      - 'sandbox/Dockerfile'
+      - 'plugins/safe-android-reverser/lib/safe_reverser/worker.py'
+      - 'plugins/safe-android-reverser/lib/safe_reverser/semantic_operations.py'
+      - 'plugins/safe-android-reverser/lib/safe_reverser/semantic_router.py'
+      - 'plugins/safe-android-reverser/tests/test_security_semantics_routing.py'
+      - 'plugins/safe-android-reverser/tool-catalogs/control-plane.json'
+      - 'docs/AUTH_CRYPTO_FLOW.md'
+      - '.github/workflows/test-security-semantics.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Test security semantic overlay
+        run: PYTHONPATH=. python3 tests_security_semantics.py
+
+      - name: Test structured DEX security producer
+        run: PYTHONPATH=.:sandbox python3 sandbox/tests_dex_security_semantics.py
+
+      - name: Test control-plane security routing
+        run: PYTHONPATH=plugins/safe-android-reverser/lib python3 plugins/safe-android-reverser/tests/test_security_semantics_routing.py
+
+      - name: Validate Stage H Python syntax
+        run: |
+          python3 -m py_compile \
+            security_semantics.py \
+            tests_security_semantics.py \
+            sandbox/dex_security_semantics.py \
+            sandbox/static_security_semantics.py \
+            sandbox/tests_dex_security_semantics.py \
+            sandbox/mcp_entrypoint.py \
+            plugins/safe-android-reverser/lib/safe_reverser/worker.py \
+            plugins/safe-android-reverser/lib/safe_reverser/semantic_operations.py \
+            plugins/safe-android-reverser/lib/safe_reverser/semantic_router.py \
+            plugins/safe-android-reverser/tests/test_security_semantics_routing.py
+
+      - name: Validate Stage H semantic invariants
+        run: |
+          PYTHONPATH=.:sandbox:plugins/safe-android-reverser/lib python3 - <<'PY'
+          import json
+          from pathlib import Path
+          import dex_security_semantics as dexsecurity
+          import flow_ir as flow
+          import security_semantics as security
+          from safe_reverser.semantic_operations import (
+              SECURITY_ROUTABLE_REPRESENTATIONS,
+              SECURITY_SEMANTIC_OPERATIONS,
+          )
+
+          descriptor = security.descriptor()
+          assert descriptor['flow_ir_version'] == flow.FLOW_IR_VERSION
+          assert descriptor['calls_xref_are_data_flow'] is False
+          assert descriptor['gaps_are_traversable'] is False
+          assert descriptor['raw_secret_values'] is False
+          assert descriptor['persistent_security_storage'] is False
+          assert descriptor['max_path_states'] == 10_000
+
+          producer = dexsecurity.descriptor()
+          assert producer['structured_dex_operands'] is True
+          assert producer['decompiler_grep_is_finding_source'] is False
+          assert producer['calls_xref_are_data_flow'] is False
+          assert producer['gaps_are_traversable'] is False
+          assert producer['raw_secret_values'] is False
+          assert producer['receiver_alias_claimed'] is False
+          assert SECURITY_SEMANTIC_OPERATIONS == {'find_auth_flow', 'trace_crypto'}
+          assert SECURITY_ROUTABLE_REPRESENTATIONS == {'dex'}
+
+          catalog = json.loads(
+              Path('plugins/safe-android-reverser/tool-catalogs/control-plane.json').read_text(
+                  encoding='utf-8'
+              )
+          )
+          names = [item['name'] for item in catalog]
+          for name in SECURITY_SEMANTIC_OPERATIONS:
+              assert names.count(name) == 1, names
+              schema = next(item['inputSchema'] for item in catalog if item['name'] == name)
+              assert schema['properties']['representation']['enum'] == ['dex']
+          PY
+
+  locked-image:
+    needs: contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Read release version
+        id: version
+        shell: bash
+        run: |
+          version="$(tr -d '[:space:]' < plugins/safe-android-reverser/VERSION)"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build static-core image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: sandbox/Dockerfile
+          load: true
+          push: false
+          tags: safe-android-reverser-security:ci
+          build-args: |
+            SAFE_REVERSER_VERSION=${{ steps.version.outputs.version }}
+            SAFE_REVERSER_BUILD_COMMIT=${{ github.sha }}
+          cache-from: type=gha,scope=static-core
+
+      - name: Run Stage H contracts inside locked image
+        run: |
+          for test in \
+            /workspace/tests_security_semantics.py \
+            /workspace/sandbox/tests_dex_security_semantics.py; do
+            docker run --rm \
+              --network=none --read-only --cap-drop=ALL \
+              --security-opt=no-new-privileges \
+              --tmpfs=/tmp:rw,nosuid,nodev,size=256m \
+              --tmpfs=/work:rw,nosuid,nodev,size=256m \
+              --user="$(id -u):$(id -g)" \
+              --volume="$PWD:/workspace:ro" \
+              --entrypoint=python3 \
+              safe-android-reverser-security:ci \
+              "$test"
+          done
+
+      - name: Verify security worker ABI and health
+        run: |
+          mkdir -p "$RUNNER_TEMP/security-data"
+          output="$RUNNER_TEMP/security-health.jsonl"
+          printf '%s\n' \
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"ci","version":"1"}}}' \
+            '{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}' \
+            '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' \
+            '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"health","arguments":{}}}' \
+          | docker run --rm -i \
+              --network=none --read-only --cap-drop=ALL \
+              --security-opt=no-new-privileges \
+              --tmpfs=/tmp:rw,nosuid,nodev,size=256m \
+              --tmpfs=/work:rw,nosuid,nodev,size=256m \
+              --user="$(id -u):$(id -g)" \
+              --volume="$PWD:/workspace:ro" \
+              --volume="$RUNNER_TEMP/security-data:/data:rw" \
+              safe-android-reverser-security:ci > "$output"
+          python3 - "$output" <<'PY'
+          import json
+          import sys
+          rows = [json.loads(line) for line in open(sys.argv[1], encoding='utf-8') if line.strip()]
+          tools = next(item for item in rows if item.get('id') == 2)['result']['tools']
+          names = [item['name'] for item in tools]
+          for name in ('find_auth_flow', 'trace_crypto'):
+              assert names.count(name) == 1, names
+          health = json.loads(next(item for item in rows if item.get('id') == 3)['result']['content'][0]['text'])
+          semantics = health['security_semantics']
+          assert semantics['security_semantics_version'] == 1, health
+          assert semantics['gaps_are_traversable'] is False, health
+          assert semantics['raw_secret_values'] is False, health
+          producer = health['dex_security_producer']
+          assert producer['dex_security_producer_version'] == 1, health
+          assert producer['structured_dex_operands'] is True, health
+          assert producer['decompiler_grep_is_finding_source'] is False, health
+          assert producer['receiver_alias_claimed'] is False, health
+          PY
